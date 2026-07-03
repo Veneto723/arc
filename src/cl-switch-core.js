@@ -67,17 +67,20 @@ function requestSwitch(session, target) {
   const ids = cfg.accounts.map((a) => a.id).join(', ');
   target = target ? String(target).trim() : null;
 
-  // No explicit target: refuse (1) / cycle (2) / show the picker menu (3+).
+  // No explicit target: refuse (1) / cycle (below menuMin) / show the picker menu.
+  // menuMin = min account count that triggers the numbered menu instead of a
+  // blind cycle (cl-config features.switchMenuMin, default 3, floor 2).
+  const menuMin = Math.max(2, (cfg.features && cfg.features.switchMenuMin) || 3);
   if (!target) {
     if (cfg.accounts.length < 2) {
       return { ok: false, switching: false,
         message: `NOT SWITCHING — only ONE account is configured (${ids}), so there is nothing to switch to. The session stays on "${current}". Add another with \`cl add-account <id>\`.` };
     }
-    if (cfg.accounts.length >= 3) {
+    if (cfg.accounts.length >= menuMin) {
       return { ok: true, switching: false, menu: true,
         message: renderMenu(cfg, current, `SWITCH ACCOUNT — you're on "${current}". ${cfg.accounts.length} accounts configured:`) };
     }
-    // exactly 2 → cycle to the other
+    // below the menu threshold → cycle to the other
     const next = C.nextAccount(cfg, current, null);
     if (!next) return { ok: false, switching: false, message: `NOT SWITCHING — no other account to cycle to (current: "${current}").` };
     return writeSwitch(session, current, next);

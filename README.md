@@ -85,7 +85,7 @@ Requires: Windows 11, Node.js, Claude Code (`claude` CLI installed).
   ],
   "switchOrder": ["max", "pool"],
   "thresholds": { "warnSessionPct": 85, "warnWeekPct": 90, "switchSessionPct": 92, "switchWeekPct": 95 },
-  "features": { "flagRetry": true, "rephraseAccount": "pool" },
+  "features": { "flagRetry": true, "rephraseAccount": "pool", "switchMenuMin": 3 },
   "poolDb": { "neonUrl": "postgresql://..." }   // optional
 }
 ```
