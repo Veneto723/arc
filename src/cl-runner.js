@@ -741,6 +741,13 @@ async function main() {
   }
   if (userArgs[0] === 'capture') return cmdCapture(userArgs[1]);
   if (userArgs[0] === 'add-account' || userArgs[0] === 'add') return cmdAddAccount(userArgs.slice(1));
+  if (userArgs[0] === 'export' || userArgs[0] === 'import') {
+    const sync = require('./cl-sync');
+    const fn = userArgs[0] === 'export' ? sync.doExport : sync.doImport;
+    const r = fn(process.env.CL_SESSION || '', userArgs.slice(1).join(' '));
+    process.stdout.write(r.message + '\n');
+    process.exit(r.ok ? 0 : 1);
+  }
   if (userArgs[0] === 'doctor') return cmdDoctor();
 
   let respawning = process.env.CL_RESPAWNED === '1';

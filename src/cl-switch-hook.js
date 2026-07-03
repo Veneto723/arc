@@ -22,7 +22,7 @@
 
 const core = require('./cl-switch-core');
 
-const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|add-account|add|remove-account|rm-account|remove)\b\s*(.*)$/i;
+const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|add-account|add|remove-account|rm-account|remove|export|import)\b\s*(.*)$/i;
 
 function block(reason) {
   // UserPromptSubmit: block the prompt from reaching the model, show `reason`.
@@ -51,6 +51,13 @@ function run(raw) {
   }
   if (action === 'remove-account' || action === 'rm-account' || action === 'remove') {
     const r = core.requestRemoveAccount(session, arg || '');
+    return block(`[cl] ${r.message}`);
+  }
+  if (action === 'export' || action === 'import') {
+    // Pure file ops — run synchronously in the hook (zero tokens, no session
+    // disruption). Loaded lazily so a plain cl:switch stays lightweight.
+    const sync = require('./cl-sync');
+    const r = action === 'export' ? sync.doExport(session, arg || '') : sync.doImport(session, arg || '');
     return block(`[cl] ${r.message}`);
   }
   // Bare `cl:switch` → open the interactive arrow-key picker (cl-runner renders

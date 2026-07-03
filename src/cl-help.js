@@ -24,6 +24,11 @@ Add / manage accounts:
   cl add-account <id>    same, run from a terminal
   cl:remove-account <id> remove an account (asks; then repeat with 'confirm')
 
+Move chats between PCs (discrete export/import — no realtime sync):
+  cl:export              archive the CURRENT conversation → ~/cl-export-<ts>.tgz
+  cl:export all          archive every session   ·   cl:export <project|id>
+  cl:import <archive>    merge sessions in (newer-wins; live chats protected)
+
 Session:
   cl:restart   /restart  reload the wrapper + relaunch this conversation
   /pool                  pool account usage % + reset times

@@ -92,6 +92,8 @@ sessions to load new wrapper code.
 | `cl:switch <n\|name>` | switch straight to an account | **0** |
 | `cl:add-account <id>` | guided browser login to add a subscription, in-session | **0** |
 | `cl:remove-account <id>` | remove an account (double-confirmed; `<id> confirm` to finish) | **0** |
+| `cl:export [sel]` | archive chat sessions to a `.tgz` (bare = current conv) | **0** |
+| `cl:import <archive>` | merge sessions from an archive (newer-wins, safe) | **0** |
 | `cl:restart` | reload the wrapper + relaunch this conversation | **0** |
 | `/switch [n\|name]` | same picker / direct switch, from the `/` menu | small |
 | `/restart` | reload + relaunch | small |
@@ -213,6 +215,29 @@ and never echoes secrets. Changes are `/switch`-able immediately, no restart.
   re-applies it via the documented `{"ultracode": true}` settings key on switch.
 
 ---
+
+## Moving chat sessions between machines
+
+Claude Code has no cloud sync — sessions are local `.jsonl` transcripts. cl-kit
+ships a discrete **export / import** so you can carry chats between PCs (no
+realtime sync daemon, no concurrency risk):
+
+```
+cl:export                 # archive the CURRENT conversation → ~/cl-export-<ts>.tgz
+cl:export all             # every session   ·   cl:export <project|id>   ·   --since <days>
+cl:export ... --out <f>   # choose the archive path
+cl:import <archive.tgz>   # merge into ~/.claude/projects  ( --dry-run / --force / --skip-existing )
+```
+
+Export bundles each session's transcript **plus** its sidecar (subagents, tool
+results) and a manifest. Import is **safe**: it's *newer-wins* (compares the last
+transcript entry's timestamp), backs up any local copy it overwrites (to
+`~/.claude/backups/cl-import-<ts>/`), and **never touches a conversation that's
+open in a live cl session**. Also available as terminal `cl export` / `cl import`.
+
+**Resume caveat:** `claude --resume <id>` is scoped to the cwd's project dir, so
+both machines must use the **same project paths** (e.g. work in `E:\proj` on
+both) for the imported chat to resume cleanly.
 
 ## Setting up a second machine
 
