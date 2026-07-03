@@ -10,9 +10,10 @@
 //     This runner polls for its own session's trigger.
 //   - There is NO usage-based auto-switch. Use /switch (or `cl --account <id>`).
 //
-// Subcommands:  cl setup    — interactive config wizard
-//               cl capture <id> — save the current claude.ai login for an oauth account
-//               cl doctor   — print resolved config + health checks
+// Subcommands:  cl setup           — interactive config wizard
+//               cl add-account <id> — drive native login + auto-capture a NEW account
+//               cl capture <id>     — save the current claude.ai login for an account
+//               cl doctor           — print resolved config + health checks
 // Usage: node cl-runner.js [claude args...]   (normally via cl.cmd)
 'use strict';
 
@@ -490,7 +491,130 @@ function cmdCapture(id) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, cur);
   process.stdout.write(`[cl] captured the CURRENT claude.ai login as account "${acc.id}" → ${dest}\n`);
-  process.stdout.write(`[cl] tip: to capture another subscription, /logout, log in as it, then \`cl capture <otherId>\`.\n`);
+  process.stdout.write(`[cl] tip: to add ANOTHER subscription end-to-end, use \`cl add-account <id>\` (it drives the login for you).\n`);
+  process.exit(0);
+}
+
+// The identity of the login currently in ~/.claude/.credentials.json.
+function authStatus() {
+  try {
+    const r = spawnSync(CLAUDE_BIN, ['auth', 'status', '--json'], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
+    const j = JSON.parse((r.stdout || '').trim());
+    return j && j.loggedIn ? j : null;
+  } catch { return null; }
+}
+
+// Append an account to cl-config.json with backup + validate (rollback on error).
+function addAccountToConfig(accObj, makeDefault) {
+  const bak = C.CONFIG_PATH + '.bak-' + Date.now();
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(C.CONFIG_PATH, 'utf8')); }
+  catch { raw = { version: 1, accounts: [], switchOrder: [] }; }
+  try { fs.copyFileSync(C.CONFIG_PATH, bak); } catch {}
+  raw.accounts = raw.accounts || [];
+  raw.accounts.push(accObj);
+  raw.switchOrder = Array.isArray(raw.switchOrder) ? raw.switchOrder : raw.accounts.map((a) => a.id);
+  if (!raw.switchOrder.includes(accObj.id)) raw.switchOrder.push(accObj.id);
+  if (makeDefault || !raw.defaultAccount) raw.defaultAccount = accObj.id;
+  fs.writeFileSync(C.CONFIG_PATH, JSON.stringify(raw, null, 2));
+  try { C.loadConfig(); } catch (e) {
+    if (fs.existsSync(bak)) fs.copyFileSync(bak, C.CONFIG_PATH);
+    throw new Error(`config rejected (${e.message}) — restored previous`);
+  }
+  return bak;
+}
+
+// `cl add-account <id> [--label L] [--email E] [--color #hex] [--console] [--default]`
+// Drives the NATIVE Claude login, then auto-captures the resulting credential and
+// registers a new oauth switcher account — no manual /login + /logout dance.
+function cmdAddAccount(argv) {
+  const id = argv.find((a) => !a.startsWith('-'));
+  const opt = (name) => { const i = argv.indexOf(name); return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('-') ? argv[i + 1] : null; };
+  const has = (name) => argv.includes(name);
+  if (!id || !/^[a-z][a-z0-9_-]*$/i.test(id)) {
+    process.stderr.write('[cl] usage: cl add-account <id> [--label L] [--email E] [--color #hex] [--console] [--default]\n       id must be alphanumeric (dash/underscore ok)\n');
+    process.exit(1);
+  }
+  if (C.findAccount(cfg, id)) { process.stderr.write(`[cl] account "${id}" already exists (see \`cl doctor\`).\n`); process.exit(1); }
+
+  // 1. Snapshot the CURRENT login so we can (a) detect a real account change and
+  //    (b) restore it afterward — adding an account must not disturb the session
+  //    you're currently on.
+  const before = authStatus();
+  let backup = null;
+  try { backup = fs.readFileSync(C.CRED_PATH, 'utf8'); } catch {}
+
+  process.stdout.write(
+    `\x1b[36m[cl] Adding account "${id}".\x1b[0m\n` +
+    `\x1b[2m    A Claude sign-in will open in your browser. Log in as the account you want to ADD\n` +
+    `    (a DIFFERENT one${before ? ` than the current ${before.email}` : ''}). This returns automatically when done.\x1b[0m\n\n`);
+
+  // 2. Drive the native login (interactive: browser + terminal).
+  const loginArgs = ['auth', 'login', has('--console') ? '--console' : '--claudeai'];
+  const email = opt('--email'); if (email) loginArgs.push('--email', email);
+  const r = spawnSync(CLAUDE_BIN, loginArgs, { stdio: 'inherit', windowsHide: true });
+
+  // 3. Verify a DIFFERENT account is now active.
+  const after = authStatus();
+  const restore = () => { if (backup != null) { try { fs.writeFileSync(C.CRED_PATH, backup); } catch {} } };
+  if (r.status !== 0 || !after) {
+    restore();
+    process.stderr.write(`\x1b[31m[cl] login did not complete — no account added. (your previous login is unchanged)\x1b[0m\n`);
+    process.exit(1);
+  }
+  if (before && after.email && before.email === after.email) {
+    restore();
+    process.stderr.write(`\x1b[33m[cl] you logged in as the SAME account (${after.email}) — nothing to add. Log in as a DIFFERENT subscription. (previous login restored)\x1b[0m\n`);
+    process.exit(1);
+  }
+
+  // 4. Capture the new account's credential.
+  const credDir = path.join(C.CLAUDE_DIR, 'cl-credentials');
+  fs.mkdirSync(credDir, { recursive: true });
+  const credPath = path.join(credDir, `${id}.json`);
+  try { fs.writeFileSync(credPath, fs.readFileSync(C.CRED_PATH, 'utf8')); }
+  catch (e) { restore(); process.stderr.write(`\x1b[31m[cl] failed to capture credential: ${e.message}\x1b[0m\n`); process.exit(1); }
+
+  // 5. Register the account.
+  const acc = {
+    id,
+    label: opt('--label') || (after.email ? after.email.split('@')[0].slice(0, 12) : id).toUpperCase(),
+    color: opt('--color') || '#D97757',
+    type: 'oauth',
+    email: after.email || null,
+    subscriptionType: after.subscriptionType || null,
+    credentials: credPath,
+  };
+  let cfgBak;
+  try { cfgBak = addAccountToConfig(acc, has('--default')); }
+  catch (e) { restore(); process.stderr.write(`\x1b[31m[cl] ${e.message}\x1b[0m\n`); process.exit(1); }
+
+  // 6. If a PRE-EXISTING oauth account still "uses the active login" (no captured
+  //    credential), the login we just did would break its switching (a no-op swap
+  //    would leave the new account's creds in place). Capture the pre-login active
+  //    account into it so BOTH are reliably switchable.
+  reloadCfg();
+  const orphan = cfg.accounts.find((a) => a.type === 'oauth' && a.id !== id && !a.credentials);
+  let orphanNote = '';
+  if (orphan && backup != null && before) {
+    try {
+      const op = path.join(credDir, `${orphan.id}.json`);
+      fs.writeFileSync(op, backup);
+      const raw = JSON.parse(fs.readFileSync(C.CONFIG_PATH, 'utf8'));
+      const a = raw.accounts.find((x) => x.id === orphan.id);
+      if (a) { a.credentials = op; if (!a.email) a.email = before.email; fs.writeFileSync(C.CONFIG_PATH, JSON.stringify(raw, null, 2)); }
+      orphanNote = `\n[cl] also captured your existing "${orphan.id}" (${before.email}) so switching between the two is reliable.`;
+    } catch {}
+  }
+
+  // 7. Restore the pre-login active credential so the current session is undisturbed.
+  restore();
+
+  process.stdout.write(
+    `\n\x1b[32m[cl] ✓ added account "${id}"${acc.email ? ` (${acc.email}, ${acc.subscriptionType || 'subscription'})` : ''}.\x1b[0m` +
+    orphanNote +
+    `\n[cl] use it:  /switch ${id}   (in a running cl session)   or   cl --account ${id}\n` +
+    `[cl] config backed up at ${cfgBak}\n`);
   process.exit(0);
 }
 
@@ -535,6 +659,7 @@ async function main() {
     process.exit(r.status ?? 0);
   }
   if (userArgs[0] === 'capture') return cmdCapture(userArgs[1]);
+  if (userArgs[0] === 'add-account' || userArgs[0] === 'add') return cmdAddAccount(userArgs.slice(1));
   if (userArgs[0] === 'doctor') return cmdDoctor();
 
   let respawning = process.env.CL_RESPAWNED === '1';

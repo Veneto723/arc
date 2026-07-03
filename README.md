@@ -90,20 +90,28 @@ Requires: Windows 11, Node.js, Claude Code (`claude` CLI installed).
 }
 ```
 
-### Two subscriptions
+### Adding a subscription (guided) — `cl add-account`
 
-Claude Code stores its claude.ai login in one file, so cl swaps captured
-credentials on switch (sessions/transcripts stay unified):
+The easy way: one command drives the native Claude login and captures the
+result automatically.
 
 ```powershell
-# log in as subscription A (claude /login), then:
-cl capture personal
-# /logout, log in as subscription B, then:
-cl capture work
+cl add-account work            # opens Claude sign-in in your browser
+# log in as the NEW subscription; cl captures it and registers the account
 ```
 
-After that `/switch` alternates logins seamlessly. Captures live in
-`~/.claude/cl-credentials/` — treat that directory as secret.
+`cl add-account <id>` snapshots your current login, runs `claude auth login`,
+verifies you signed into a *different* account (aborts + restores if not),
+captures its credential to `~/.claude/cl-credentials/<id>.json`, registers an
+oauth account, and — if your existing account had no captured credential yet —
+captures that too so switching between them is reliable. Your pre-add login is
+restored, so the session you're on is undisturbed. Flags: `--label`, `--email`
+(prefill), `--color`, `--console` (API billing), `--default`. Then
+`/switch <id>` or `cl --account <id>`.
+
+Manual alternative — `cl capture <id>` snapshots whatever login is currently
+active into an existing account. Captures live in `~/.claude/cl-credentials/`;
+treat that directory as secret.
 
 ## Notes
 
