@@ -134,6 +134,38 @@ function requestPicker(session) {
   }
 }
 
+// Drop an add-account trigger → cl-runner kills claude and runs the guided
+// browser login on the freed TTY. Requires an id (bare cl:add-account → usage,
+// no trigger). `argStr` is everything after `cl:add-account` (id + flags).
+function requestAddAccount(session, argStr) {
+  if (!session) {
+    return { ok: false, message: 'NOT running under the cl wrapper (launch with `cl`).' };
+  }
+  const tokens = (argStr || '').trim().split(/\s+/).filter(Boolean);
+  const id = tokens.find((t) => !t.startsWith('-'));
+  if (!id) {
+    return { ok: false, message: 'usage: cl:add-account <id> [--label L] [--email E] [--console] [--default] — an account id is required.' };
+  }
+  if (!/^[a-z][a-z0-9_-]*$/i.test(id)) {
+    return { ok: false, message: `invalid id "${id}" — use letters/digits/dash/underscore, starting with a letter.` };
+  }
+  // Reject an existing id up front (before killing claude) so an obvious mistake
+  // doesn't cost a disruptive kill+relaunch.
+  try {
+    const C = require('./cl-config');
+    if (C.findAccount(C.loadConfig(), id)) {
+      return { ok: false, message: `account "${id}" already exists — pick a different id (see /cl or cl doctor).` };
+    }
+  } catch {}
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(CACHE_DIR, `cl-addacct-${session}.trigger`), JSON.stringify({ at: Date.now(), args: argStr.trim() }));
+    return { ok: true, message: `adding account "${id}" — a Claude sign-in opens in your browser; log in as the NEW account. (this takes over the terminal briefly, then returns)` };
+  } catch (e) {
+    return { ok: false, message: `add-account signal FAILED — ${e.message}` };
+  }
+}
+
 // Drop a restart trigger. Returns { ok, message }. Never throws.
 function requestRestart(session) {
   if (!session) {
@@ -148,4 +180,4 @@ function requestRestart(session) {
   }
 }
 
-module.exports = { requestSwitch, requestRestart, requestPicker, currentAccount, CACHE_DIR };
+module.exports = { requestSwitch, requestRestart, requestPicker, requestAddAccount, currentAccount, CACHE_DIR };

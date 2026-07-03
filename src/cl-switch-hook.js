@@ -22,7 +22,7 @@
 
 const core = require('./cl-switch-core');
 
-const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart)\b\s*(.*)$/i;
+const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|add-account|add)\b\s*(.*)$/i;
 
 function block(reason) {
   // UserPromptSubmit: block the prompt from reaching the model, show `reason`.
@@ -43,6 +43,10 @@ function run(raw) {
 
   if (action === 'restart') {
     const r = core.requestRestart(session);
+    return block(`[cl] ${r.message}`);
+  }
+  if (action === 'add-account' || action === 'add') {
+    const r = core.requestAddAccount(session, arg || '');
     return block(`[cl] ${r.message}`);
   }
   // Bare `cl:switch` → open the interactive arrow-key picker (cl-runner renders

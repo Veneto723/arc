@@ -90,6 +90,7 @@ sessions to load new wrapper code.
 |---|---|---|
 | `cl:switch` | open the interactive account picker | **0** |
 | `cl:switch <n\|name>` | switch straight to an account | **0** |
+| `cl:add-account <id>` | guided browser login to add a subscription, in-session | **0** |
 | `cl:restart` | reload the wrapper + relaunch this conversation | **0** |
 | `/switch [n\|name]` | same picker / direct switch, from the `/` menu | small |
 | `/restart` | reload + relaunch | small |
@@ -155,13 +156,15 @@ Everything lives in `~/.claude/cl-config.json` (created by `cl setup`):
   `apiKeyEnv` env var, or `apiKeyFrom` file+regex). `modelMap` maps the
   opus/sonnet/haiku/fable aliases to the gateway's model names.
 
-**Adding a subscription — `cl add-account <id>`:** snapshots your current login,
-runs `claude auth login` (browser OAuth), verifies you signed into a *different*
-account (aborts + restores if not), captures the credential, and registers the
-account. If your existing account had no captured credential yet, it captures
-that too so switching is reliable. Your pre-add login is restored, so the session
-you're on is undisturbed. Flags: `--label`, `--email` (prefill), `--color`,
-`--console` (API billing), `--default`.
+**Adding a subscription — `cl add-account <id>`** (terminal) **or `cl:add-account <id>`**
+(in-session): snapshots your current login, runs `claude auth login` (browser
+OAuth), verifies you signed into a *different* account (aborts + restores if not),
+captures the credential, and registers the account. If your existing account had
+no captured credential yet, it captures that too so switching is reliable. Your
+pre-add login is restored, so the session you're on is undisturbed. Flags:
+`--label`, `--email` (prefill), `--color`, `--console` (API billing), `--default`.
+The `cl:` form runs it right inside a session (the wrapper takes over the terminal
+for the login, then relaunches your conversation).
 
 **Optional pool metrics (`poolDb.neonUrl`):** point it at a Postgres DB with
 `pool_accounts` / `account_usage` tables to get per-account utilization in the

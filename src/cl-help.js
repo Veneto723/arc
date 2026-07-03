@@ -19,6 +19,10 @@ Switch account (keeps your conversation, preserves model/effort/mode):
   /switch                same picker, from the / menu (costs a small model turn)
   /switch ${example.padEnd(13)} switch directly, from the / menu
 
+Add / manage accounts:
+  cl:add-account <id>    guided browser login to add a subscription (in-session)
+  cl add-account <id>    same, run from a terminal
+
 Session:
   cl:restart   /restart  reload the wrapper + relaunch this conversation
   /pool                  pool account usage % + reset times

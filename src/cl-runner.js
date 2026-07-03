@@ -359,11 +359,21 @@ const flagRetryTrigger = path.join(CACHE_DIR, `cl-flagretry-${SESSION_ID}.trigge
 // account picker. cl-runner kills claude, renders the picker on the freed TTY,
 // and relaunches on the chosen account — zero model tokens.
 const pickTrigger      = path.join(CACHE_DIR, `cl-pick-${SESSION_ID}.trigger`);
+// Dropped by the cl:add-account hook: carries { args } (the id + flags). cl-runner
+// kills claude, runs the guided browser login on the freed TTY, and relaunches.
+const addAcctTrigger   = path.join(CACHE_DIR, `cl-addacct-${SESSION_ID}.trigger`);
 
 function clearTriggers() {
-  for (const t of [switchTrigger, restartTrigger, flagRetryTrigger, pickTrigger]) {
+  for (const t of [switchTrigger, restartTrigger, flagRetryTrigger, pickTrigger, addAcctTrigger]) {
     try { fs.unlinkSync(t); } catch {}
   }
+}
+
+// Return the terminal to a clean primary-screen state after a hard-killed claude
+// (which may leave the alt screen + raw mode set). Used before the picker and the
+// in-session add-account login.
+function resetTerminal() {
+  try { process.stdout.write('\x1b[?1049l\x1b[?25h\x1b[0m'); } catch {}
 }
 
 // ---- interactive account picker (native arrow-key TUI, zero tokens) --------
@@ -418,7 +428,7 @@ function pickAccount(currentId) {
 }
 
 // ---- one claude session ---------------------------------------------------
-// Resolves with { reason: 'switch'|'restart'|'flagretry'|'effort'|'pick'|'exit', exitCode, payload }.
+// Resolves with { reason: 'switch'|'restart'|'flagretry'|'effort'|'pick'|'addaccount'|'exit', exitCode, payload }.
 
 function runClaude(claudeArgs, account, extraSettings, watchAdopt) {
   return new Promise(resolve => {
@@ -467,6 +477,12 @@ function runClaude(claudeArgs, account, extraSettings, watchAdopt) {
       else if (fs.existsSync(pickTrigger)) {
         // Interactive picker: kill claude, then cl-runner renders the arrow-key UI.
         clearTriggers(); killChild(child); finish('pick');
+      }
+      else if (fs.existsSync(addAcctTrigger)) {
+        // Guided add-account: kill claude, run the browser login on the freed TTY.
+        let payload = null;
+        try { payload = JSON.parse(fs.readFileSync(addAcctTrigger, 'utf8')); } catch {}
+        clearTriggers(); killChild(child); finish('addaccount', undefined, payload || {});
       }
       else if (fs.existsSync(switchTrigger)) {
         // The trigger may carry a target account id (from `/switch <id>`).
@@ -583,18 +599,20 @@ function addAccountToConfig(accObj, makeDefault) {
   return bak;
 }
 
-// `cl add-account <id> [--label L] [--email E] [--color #hex] [--console] [--default]`
-// Drives the NATIVE Claude login, then auto-captures the resulting credential and
-// registers a new oauth switcher account — no manual /login + /logout dance.
-function cmdAddAccount(argv) {
+// The guided add-account flow. Drives the NATIVE Claude login, auto-captures the
+// resulting credential, and registers a new oauth account. Returns { code:0|1 }
+// and prints its own progress — it NEVER exits, so it works both as the `cl
+// add-account` CLI subcommand AND in-session (cl:add-account, run by the wrapper
+// after it kills claude and owns the TTY).
+function doAddAccount(argv) {
   const id = argv.find((a) => !a.startsWith('-'));
   const opt = (name) => { const i = argv.indexOf(name); return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('-') ? argv[i + 1] : null; };
   const has = (name) => argv.includes(name);
   if (!id || !/^[a-z][a-z0-9_-]*$/i.test(id)) {
-    process.stderr.write('[cl] usage: cl add-account <id> [--label L] [--email E] [--color #hex] [--console] [--default]\n       id must be alphanumeric (dash/underscore ok)\n');
-    process.exit(1);
+    process.stderr.write('[cl] usage: add-account <id> [--label L] [--email E] [--color #hex] [--console] [--default]\n       id must be alphanumeric (dash/underscore ok)\n');
+    return { code: 1 };
   }
-  if (C.findAccount(cfg, id)) { process.stderr.write(`[cl] account "${id}" already exists (see \`cl doctor\`).\n`); process.exit(1); }
+  if (C.findAccount(reloadCfg(), id)) { process.stderr.write(`[cl] account "${id}" already exists (see \`cl doctor\`).\n`); return { code: 1 }; }
 
   // 1. Snapshot the CURRENT login so we can (a) detect a real account change and
   //    (b) restore it afterward — adding an account must not disturb the session
@@ -619,12 +637,12 @@ function cmdAddAccount(argv) {
   if (r.status !== 0 || !after) {
     restore();
     process.stderr.write(`\x1b[31m[cl] login did not complete — no account added. (your previous login is unchanged)\x1b[0m\n`);
-    process.exit(1);
+    return { code: 1 };
   }
   if (before && after.email && before.email === after.email) {
     restore();
     process.stderr.write(`\x1b[33m[cl] you logged in as the SAME account (${after.email}) — nothing to add. Log in as a DIFFERENT subscription. (previous login restored)\x1b[0m\n`);
-    process.exit(1);
+    return { code: 1 };
   }
 
   // 4. Capture the new account's credential.
@@ -632,7 +650,7 @@ function cmdAddAccount(argv) {
   fs.mkdirSync(credDir, { recursive: true });
   const credPath = path.join(credDir, `${id}.json`);
   try { fs.writeFileSync(credPath, fs.readFileSync(C.CRED_PATH, 'utf8')); }
-  catch (e) { restore(); process.stderr.write(`\x1b[31m[cl] failed to capture credential: ${e.message}\x1b[0m\n`); process.exit(1); }
+  catch (e) { restore(); process.stderr.write(`\x1b[31m[cl] failed to capture credential: ${e.message}\x1b[0m\n`); return { code: 1 }; }
 
   // 5. Register the account.
   const acc = {
@@ -646,7 +664,7 @@ function cmdAddAccount(argv) {
   };
   let cfgBak;
   try { cfgBak = addAccountToConfig(acc, has('--default')); }
-  catch (e) { restore(); process.stderr.write(`\x1b[31m[cl] ${e.message}\x1b[0m\n`); process.exit(1); }
+  catch (e) { restore(); process.stderr.write(`\x1b[31m[cl] ${e.message}\x1b[0m\n`); return { code: 1 }; }
 
   // 6. If a PRE-EXISTING oauth account still "uses the active login" (no captured
   //    credential), the login we just did would break its switching (a no-op swap
@@ -668,14 +686,18 @@ function cmdAddAccount(argv) {
 
   // 7. Restore the pre-login active credential so the current session is undisturbed.
   restore();
+  reloadCfg(); // the new account is now switchable
 
   process.stdout.write(
     `\n\x1b[32m[cl] ✓ added account "${id}"${acc.email ? ` (${acc.email}, ${acc.subscriptionType || 'subscription'})` : ''}.\x1b[0m` +
     orphanNote +
-    `\n[cl] use it:  /switch ${id}   (in a running cl session)   or   cl --account ${id}\n` +
+    `\n[cl] use it:  cl:switch ${id}  (or /switch ${id})\n` +
     `[cl] config backed up at ${cfgBak}\n`);
-  process.exit(0);
+  return { code: 0 };
 }
+
+// CLI entry: `cl add-account <id> ...` — run the flow, then exit.
+function cmdAddAccount(argv) { process.exit(doAddAccount(argv).code); }
 
 function cmdDoctor() {
   const lines = [];
@@ -903,6 +925,17 @@ async function main() {
         env: { ...process.env, CL_SESSION: SESSION_ID, CL_RESPAWNED: '1' },
       });
       process.exit(r.status == null ? 0 : r.status);
+    }
+
+    if (reason === 'addaccount') {
+      // Guided add-account: claude is dead, cl-runner owns the TTY for the login.
+      resetTerminal();
+      const argv = (payload && typeof payload.args === 'string' ? payload.args : '').trim().split(/\s+/).filter(Boolean);
+      doAddAccount(argv); // prints its own progress; never exits
+      process.stdout.write('\x1b[2m[cl] returning to your conversation…\x1b[0m\n');
+      writeState({ account, switchCount, convId, pinnedEffort });
+      await new Promise(r => setTimeout(r, 300));
+      continue; // relaunch --resume convId on the SAME account
     }
 
     if (reason === 'pick') {
