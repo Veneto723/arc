@@ -51,10 +51,15 @@ Requires: Windows 11, Node.js, Claude Code (`claude` CLI installed).
   message and falls back to another model, cl rephrases the message (via
   `features.rephraseAccount`) and auto-retries it on the original model. One
   retry per message, never rephrases a rephrase. Disable: `features.flagRetry: false`.
+- **`cl` MCP server** — manage accounts conversationally from ANY session:
+  `account_list` / `account_add` / `account_remove` / `account_update` /
+  `config_update` ("add my work gateway", "make pool the default", "remove the
+  old account"). Changes are instantly `/switch`-able — no restart. Every write
+  backs up `cl-config.json` first and validates before committing; secrets are
+  never echoed.
 - **Pool metrics (optional)** — point `poolDb.neonUrl` at a Postgres DB with
   `pool_accounts` / `account_usage` tables and get: statusline per-account
-  utilization, `/pool` table, and a `pool` MCP server (`pool_status`,
-  `pool_next_reset`).
+  utilization, a `/pool` table, and MCP tools (`pool_status`, `pool_next_reset`).
 
 ## Config (`~/.claude/cl-config.json`)
 

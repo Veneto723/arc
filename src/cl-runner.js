@@ -27,7 +27,7 @@ const C = require('./cl-config');
 const CACHE_DIR = C.CACHE_DIR;
 const TRIGGER_POLL_MS = 1_000;    // how often to check for a slash-command trigger
 
-const cfg = (() => {
+let cfg = (() => {
   try { return C.loadConfig(); }
   catch (e) {
     process.stderr.write(`[cl] ${e.message}\n[cl] run \`cl setup\` to create ~/.claude/cl-config.json\n`);
@@ -35,6 +35,13 @@ const cfg = (() => {
   }
 })();
 const CLAUDE_BIN = C.claudeBin(cfg);
+
+// Re-read cl-config.json (accounts can be added/edited mid-session via the cl
+// MCP server or by hand). Keeps the last good config if the file is broken.
+function reloadCfg() {
+  try { cfg = C.loadConfig(); } catch {}
+  return cfg;
+}
 
 // A stable per-session id. Reuse an inherited CL_SESSION ONLY for our own /restart
 // re-exec (which sets CL_RESPAWNED=1); otherwise mint a fresh one. This stops a
@@ -594,7 +601,8 @@ async function main() {
     }
 
     if (reason === 'switch') {
-      const next = C.nextAccount(cfg, account, payload && payload.target);
+      // Pick up accounts added/edited since launch (cl MCP / manual edits).
+      const next = C.nextAccount(reloadCfg(), account, payload && payload.target);
       if (!next) {
         process.stdout.write('\x1b[33m[cl] only one account configured — nothing to switch to. Relaunching...\x1b[0m\n');
       } else {

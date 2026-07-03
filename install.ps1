@@ -25,10 +25,21 @@ Write-Host "  scripts -> $scripts"
 Copy-Item (Join-Path $kit 'pool\pool-query.js') $scripts -Force
 Copy-Item (Join-Path $kit 'pool\pool-status.js') $scripts -Force
 Copy-Item (Join-Path $kit 'pool\pool-neon-url.js') $scripts -Force
-$mcpDest = Join-Path $scripts 'pool-mcp'
+
+# cl MCP server (account management + pool metrics tools)
+$mcpDest = Join-Path $scripts 'cl-mcp'
 New-Item -ItemType Directory -Force $mcpDest | Out-Null
-Copy-Item (Join-Path $kit 'pool\pool-mcp\server.js') $mcpDest -Force
-Copy-Item (Join-Path $kit 'pool\pool-mcp\package.json') $mcpDest -Force
+Copy-Item (Join-Path $kit 'mcp\server.js') $mcpDest -Force
+Copy-Item (Join-Path $kit 'mcp\package.json') $mcpDest -Force
+if (-not (Test-Path (Join-Path $mcpDest 'node_modules'))) {
+  Push-Location $mcpDest
+  npm install --silent 2>$null | Out-Null
+  Pop-Location
+}
+# register at user scope (idempotent: remove-then-add)
+claude mcp remove --scope user cl 2>$null | Out-Null
+claude mcp add --scope user cl node (Join-Path $mcpDest 'server.js') 2>$null | Out-Null
+Write-Host "  cl MCP server installed + registered (account_* / config_update / pool_* tools)"
 
 # 2. bin shim
 Set-Content (Join-Path $bin 'cl.cmd') "@echo off`r`nnode `"%USERPROFILE%\.claude\scripts\cl-runner.js`" %*" -Encoding ascii
