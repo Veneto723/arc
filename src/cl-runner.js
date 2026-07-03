@@ -149,7 +149,7 @@ function sweepStaleStates() {
   const DAY = 24 * 60 * 60 * 1000;
   try {
     for (const f of fs.readdirSync(CACHE_DIR)) {
-      if (!/^cl-(state|prefs|active|effort|flagretry|flagretry-payload|turn|convlock)-.*\.json$/.test(f)) continue;
+      if (!/^cl-(state|prefs|active|effort|flagretry|flagretry-payload|turn|convlock|rmpending)-.*\.json$/.test(f)) continue;
       const p = path.join(CACHE_DIR, f);
       // convlock files are cleaned by LIVENESS, not age: a still-running session
       // days old must keep its lock. Remove only if its owner pid is dead.

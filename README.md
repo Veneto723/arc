@@ -91,6 +91,7 @@ sessions to load new wrapper code.
 | `cl:switch` | open the interactive account picker | **0** |
 | `cl:switch <n\|name>` | switch straight to an account | **0** |
 | `cl:add-account <id>` | guided browser login to add a subscription, in-session | **0** |
+| `cl:remove-account <id>` | remove an account (double-confirmed; `<id> confirm` to finish) | **0** |
 | `cl:restart` | reload the wrapper + relaunch this conversation | **0** |
 | `/switch [n\|name]` | same picker / direct switch, from the `/` menu | small |
 | `/restart` | reload + relaunch | small |
@@ -165,6 +166,13 @@ pre-add login is restored, so the session you're on is undisturbed. Flags:
 `--label`, `--email` (prefill), `--color`, `--console` (API billing), `--default`.
 The `cl:` form runs it right inside a session (the wrapper takes over the terminal
 for the login, then relaunches your conversation).
+
+**Removing an account — `cl:remove-account <id>`** (double-confirmed): step 1
+shows exactly what will happen and arms a 2-minute confirmation; step 2
+(`cl:remove-account <id> confirm`) actually removes it. It backs up
+`cl-config.json` first, auto-fixes references (switch order / default / rephrase),
+and **never deletes the captured login file** — so removal is recoverable by
+restoring the backup. Refuses to remove the last account.
 
 **Optional pool metrics (`poolDb.neonUrl`):** point it at a Postgres DB with
 `pool_accounts` / `account_usage` tables to get per-account utilization in the

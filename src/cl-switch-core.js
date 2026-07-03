@@ -166,6 +166,87 @@ function requestAddAccount(session, argStr) {
   }
 }
 
+// ---- remove account (double-confirmed, pure config edit — no wrapper needed) ---
+const CONFIRM_WORDS = new Set(['confirm', '--confirm', 'yes', '--yes', 'y']);
+function pendingRmPath(session) { return path.join(CACHE_DIR, `cl-rmpending-${session}.json`); }
+
+// Remove `id` from cl-config.json: backup → remove → fix references → validate
+// (rollback on failure). NEVER deletes the captured credential file (recoverable).
+// Returns { backup, fixes[], credFile }.
+function removeAccountFromConfig(C, id) {
+  const bak = C.CONFIG_PATH + '.bak-' + Date.now();
+  const raw = JSON.parse(fs.readFileSync(C.CONFIG_PATH, 'utf8'));
+  fs.copyFileSync(C.CONFIG_PATH, bak);
+  const idx = (raw.accounts || []).findIndex((a) => a.id === id);
+  if (idx === -1) throw new Error(`account "${id}" not found`);
+  const removed = raw.accounts[idx];
+  raw.accounts.splice(idx, 1);
+  const fixes = [];
+  if (Array.isArray(raw.switchOrder)) raw.switchOrder = raw.switchOrder.filter((x) => x !== id);
+  if (raw.defaultAccount === id) { raw.defaultAccount = raw.accounts[0].id; fixes.push(`default → ${raw.defaultAccount}`); }
+  if (raw.features && raw.features.rephraseAccount === id) { raw.features.rephraseAccount = null; fixes.push('rephrase cleared'); }
+  fs.writeFileSync(C.CONFIG_PATH, JSON.stringify(raw, null, 2));
+  try { C.loadConfig(); }
+  catch (e) { fs.copyFileSync(bak, C.CONFIG_PATH); throw new Error(`config rejected (${e.message}) — restored`); }
+  const credFile = (removed.type === 'oauth' && removed.credentials && fs.existsSync(removed.credentials)) ? removed.credentials : null;
+  return { backup: bak, fixes, credFile };
+}
+
+// Two-step removal. `argStr` = "<id>" (step 1: arm + show impact) or
+// "<id> confirm" (step 2: verify the fresh pending marker, then remove).
+// Returns { ok, pending?, removed?, message }.
+function requestRemoveAccount(session, argStr) {
+  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `cl`).' };
+  let C, cfg;
+  try { C = require('./cl-config'); cfg = C.loadConfig(); }
+  catch (e) { return { ok: false, message: `cl config unreadable (${e.message}).` }; }
+
+  const tokens = (argStr || '').trim().split(/\s+/).filter(Boolean);
+  const isConfirm = tokens.some((t) => CONFIRM_WORDS.has(t.toLowerCase()));
+  const id = tokens.find((t) => !t.startsWith('-') && !CONFIRM_WORDS.has(t.toLowerCase()));
+  if (!id) return { ok: false, message: 'usage: cl:remove-account <id>   (then confirm) — an account id is required.' };
+
+  const acc = C.findAccount(cfg, id);
+  if (!acc) return { ok: false, message: `no account "${id}". Configured: ${cfg.accounts.map((a) => a.id).join(', ')}.` };
+  if (cfg.accounts.length < 2) return { ok: false, message: `refusing to remove the LAST account ("${acc.id}") — cl needs at least one.` };
+
+  const current = currentAccount(C, cfg, session);
+  const onIt = acc.id === current
+    ? '\n  ⚠ this session is CURRENTLY on it — it keeps working until you switch or exit.' : '';
+
+  if (!isConfirm) {
+    // STEP 1 — arm a short-lived pending marker and show exactly what happens.
+    try { fs.mkdirSync(CACHE_DIR, { recursive: true }); fs.writeFileSync(pendingRmPath(session), JSON.stringify({ id: acc.id, at: Date.now() })); } catch {}
+    return {
+      ok: true, pending: true,
+      message:
+        `REMOVE account "${acc.id}"${acc.label && acc.label !== acc.id.toUpperCase() ? ` (${acc.label})` : ''}` +
+        ` · ${acc.type}${acc.email ? ` · ${acc.email}` : ''}?` + onIt + '\n' +
+        `  • cl-config.json is backed up first; references (switch order / default / rephrase) are auto-fixed\n` +
+        `  • its captured login file is KEPT (never deleted) so removal is recoverable\n` +
+        `  CONFIRM within 2 min:  cl:remove-account ${acc.id} confirm     ·     or ignore this to cancel`,
+    };
+  }
+
+  // STEP 2 — require a fresh pending marker for THIS id (enforces the two-step).
+  let pend = null;
+  try { pend = JSON.parse(fs.readFileSync(pendingRmPath(session), 'utf8')); } catch {}
+  if (!pend || pend.id !== acc.id || Date.now() - pend.at > 120_000) {
+    return { ok: false, message: `no pending confirmation for "${acc.id}" (or it expired) — run \`cl:remove-account ${acc.id}\` first to review what will be removed.` };
+  }
+  let res;
+  try { res = removeAccountFromConfig(C, acc.id); }
+  catch (e) { return { ok: false, message: `remove FAILED — ${e.message}` }; }
+  try { fs.unlinkSync(pendingRmPath(session)); } catch {}
+  return {
+    ok: true, removed: true,
+    message:
+      `✓ removed account "${acc.id}".${res.fixes.length ? ` (${res.fixes.join('; ')})` : ''}\n` +
+      (res.credFile ? `  its login file was KEPT at ${res.credFile} — delete it yourself if you want it gone.\n` : '') +
+      `  reverse it by restoring the backup: ${res.backup}`,
+  };
+}
+
 // Drop a restart trigger. Returns { ok, message }. Never throws.
 function requestRestart(session) {
   if (!session) {
@@ -180,4 +261,4 @@ function requestRestart(session) {
   }
 }
 
-module.exports = { requestSwitch, requestRestart, requestPicker, requestAddAccount, currentAccount, CACHE_DIR };
+module.exports = { requestSwitch, requestRestart, requestPicker, requestAddAccount, requestRemoveAccount, currentAccount, CACHE_DIR };
