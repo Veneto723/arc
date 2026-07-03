@@ -112,6 +112,28 @@ function writeSwitch(session, current, next) {
   }
 }
 
+// Drop a picker trigger → cl-runner opens the interactive arrow-key account
+// picker (zero tokens). Refuses if <2 accounts. Returns { ok, picker, message }.
+function requestPicker(session) {
+  if (!session) {
+    return { ok: false, picker: false, message: 'NOT SWITCHING — not running under the cl wrapper (launch with `cl`).' };
+  }
+  let C, cfg;
+  try { C = require('./cl-config'); cfg = C.loadConfig(); }
+  catch (e) { return { ok: false, picker: false, message: `NOT SWITCHING — cl config unreadable (${e.message}).` }; }
+  if (cfg.accounts.length < 2) {
+    return { ok: false, picker: false,
+      message: `NOT SWITCHING — only ONE account is configured. Add another with \`cl add-account <id>\`.` };
+  }
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(CACHE_DIR, `cl-pick-${session}.trigger`), JSON.stringify({ at: Date.now() }));
+    return { ok: true, picker: true, message: 'opening account picker — use ↑/↓ and Enter in the terminal…' };
+  } catch (e) {
+    return { ok: false, picker: false, message: `picker signal FAILED — ${e.message}` };
+  }
+}
+
 // Drop a restart trigger. Returns { ok, message }. Never throws.
 function requestRestart(session) {
   if (!session) {
@@ -126,4 +148,4 @@ function requestRestart(session) {
   }
 }
 
-module.exports = { requestSwitch, requestRestart, currentAccount, CACHE_DIR };
+module.exports = { requestSwitch, requestRestart, requestPicker, currentAccount, CACHE_DIR };

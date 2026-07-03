@@ -355,15 +355,69 @@ const restartTrigger   = path.join(CACHE_DIR, `cl-restart-${SESSION_ID}.trigger`
 // Dropped by cl-flag-retry.js (Stop hook) when the model's safeguards flagged a
 // message and it prepared a rephrased retry: {text, model, uuid, at}.
 const flagRetryTrigger = path.join(CACHE_DIR, `cl-flagretry-${SESSION_ID}.trigger`);
+// Dropped by the cl:switch hook (or /switch) to open the interactive arrow-key
+// account picker. cl-runner kills claude, renders the picker on the freed TTY,
+// and relaunches on the chosen account — zero model tokens.
+const pickTrigger      = path.join(CACHE_DIR, `cl-pick-${SESSION_ID}.trigger`);
 
 function clearTriggers() {
-  for (const t of [switchTrigger, restartTrigger, flagRetryTrigger]) {
+  for (const t of [switchTrigger, restartTrigger, flagRetryTrigger, pickTrigger]) {
     try { fs.unlinkSync(t); } catch {}
   }
 }
 
+// ---- interactive account picker (native arrow-key TUI, zero tokens) --------
+// Rendered by cl-runner itself after killing claude, so it owns the real
+// terminal. Returns the chosen account id, or null on cancel (keep current).
+function pickAccount(currentId) {
+  return new Promise((resolve) => {
+    const accounts = cfg.accounts;
+    const stdin = process.stdin, out = process.stdout;
+    if (!stdin.isTTY || accounts.length < 2) return resolve(null);
+
+    let sel = Math.max(0, accounts.findIndex((a) => a.id === currentId));
+    const cols = (out.columns || 80);
+    out.write('\x1b[?1049l\x1b[?25l');       // leave claude's alt screen, hide cursor
+
+    function render() {
+      out.write('\x1b[2J\x1b[H');            // clear screen, home
+      out.write('\r\n  \x1b[1;36mSwitch cl account\x1b[0m   \x1b[2m↑/↓ move · 1-9 jump · Enter confirm · Esc keep current\x1b[0m\r\n\r\n');
+      accounts.forEach((a, i) => {
+        const cur = a.id === currentId ? '  \x1b[2m← current\x1b[0m' : '';
+        const body = ` ${String(i + 1)}. ${a.id}  ·  ${a.label} [${a.type}] `;
+        out.write(i === sel
+          ? `  \x1b[7m${body}\x1b[0m${cur}\r\n`   // reverse-video selection
+          : `   ${body}${cur}\r\n`);
+      });
+      out.write('\r\n');
+    }
+
+    function done(id) {
+      try { stdin.removeListener('data', onKey); } catch {}
+      try { stdin.setRawMode(false); } catch {}
+      stdin.pause();
+      out.write('\x1b[?25h\x1b[2J\x1b[H');   // show cursor, clear (claude re-enters its own screen next)
+      resolve(id);
+    }
+
+    function onKey(buf) {
+      const k = buf.toString('utf8');
+      if (k === '\x1b[A' || k === 'k') { sel = (sel - 1 + accounts.length) % accounts.length; render(); }
+      else if (k === '\x1b[B' || k === 'j') { sel = (sel + 1) % accounts.length; render(); }
+      else if (k >= '1' && k <= '9') { const n = +k - 1; if (n < accounts.length) done(accounts[n].id); } // number = jump + confirm
+      else if (k === '\r' || k === '\n') done(accounts[sel].id);
+      else if (k === '\x1b' || k === 'q' || k === '\x03') done(null); // Esc / q / Ctrl-C → cancel
+    }
+
+    try { stdin.setRawMode(true); } catch {}
+    stdin.resume();
+    stdin.on('data', onKey);
+    render();
+  });
+}
+
 // ---- one claude session ---------------------------------------------------
-// Resolves with { reason: 'switch'|'restart'|'flagretry'|'effort'|'exit', exitCode, payload }.
+// Resolves with { reason: 'switch'|'restart'|'flagretry'|'effort'|'pick'|'exit', exitCode, payload }.
 
 function runClaude(claudeArgs, account, extraSettings, watchAdopt) {
   return new Promise(resolve => {
@@ -409,6 +463,10 @@ function runClaude(claudeArgs, account, extraSettings, watchAdopt) {
     let adoptPending = !!watchAdopt;
     const triggerPoll = setInterval(() => {
       if (fs.existsSync(restartTrigger)) { clearTriggers(); killChild(child); finish('restart'); }
+      else if (fs.existsSync(pickTrigger)) {
+        // Interactive picker: kill claude, then cl-runner renders the arrow-key UI.
+        clearTriggers(); killChild(child); finish('pick');
+      }
       else if (fs.existsSync(switchTrigger)) {
         // The trigger may carry a target account id (from `/switch <id>`).
         let target = null;
@@ -844,6 +902,22 @@ async function main() {
         env: { ...process.env, CL_SESSION: SESSION_ID, CL_RESPAWNED: '1' },
       });
       process.exit(r.status == null ? 0 : r.status);
+    }
+
+    if (reason === 'pick') {
+      // Interactive account picker: claude is dead, cl-runner owns the TTY.
+      reloadCfg(); // reflect accounts added/edited since launch
+      const chosen = await pickAccount(account);
+      if (chosen && chosen !== account) {
+        switchCount++;
+        account = chosen;
+        process.stdout.write(`\x1b[36m[cl] switching to ${accountLabel(account)} — continuing conversation...\x1b[0m\n`);
+      } else {
+        process.stdout.write(`\x1b[2m[cl] staying on ${accountLabel(account)}.\x1b[0m\n`);
+      }
+      writeState({ account, switchCount, convId, pinnedEffort });
+      await new Promise(r => setTimeout(r, 200));
+      continue; // loop top relaunches --resume convId on `account`
     }
 
     if (reason === 'switch') {

@@ -22,7 +22,12 @@ const session = (process.env.CL_SESSION || '').trim();
 if (action === 'restart') {
   process.stdout.write('RESULT: ' + core.requestRestart(session).message + '\n');
 } else if (action === 'switch') {
-  process.stdout.write('RESULT: ' + core.requestSwitch(session, target).message + '\n');
+  // Bare /switch → open the interactive arrow-key picker; /switch <n|name> →
+  // switch directly. (The picker itself costs zero model tokens; note that the
+  // /switch slash command still briefly starts a model turn that cl-runner
+  // aborts when it opens the picker — use `cl:switch` for a strictly-zero path.)
+  const r = target ? core.requestSwitch(session, target) : core.requestPicker(session);
+  process.stdout.write('RESULT: ' + r.message + '\n');
 } else {
   process.stdout.write(`RESULT: unknown action "${action}" — nothing happened.\n`);
 }
