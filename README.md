@@ -15,16 +15,34 @@ config file, so it fits any account style:
 
 ## Install
 
+Prerequisites: **Windows 11**, **Node.js**, **Claude Code** (`claude` on PATH).
+
 ```powershell
-git clone <this-repo> cl-kit
+git clone https://github.com/<you>/cl-kit.git    # private repo → authenticate first (gh auth login)
 cd cl-kit
 powershell -ExecutionPolicy Bypass -File install.ps1
-cl setup     # interactive: pick your style, define accounts
-cl doctor    # verify everything resolves
-cl           # launch
+# open a NEW terminal (installer adds ~/.local/bin to PATH), then:
+cl setup      # interactive: pick your style, define accounts
+cl doctor     # verify everything resolves
+cl            # launch
 ```
 
-Requires: Windows 11, Node.js, Claude Code (`claude` CLI installed).
+`install.ps1` deploys scripts/commands into `~/.claude`, adds `cl` to your PATH,
+installs + registers the MCP server, generates toast icons, registers the
+`cl-focus:` protocol, and **merges** hooks/statusline into `settings.json` (it
+backs up first and never removes your existing entries). Re-runnable.
+
+**What is machine-specific (NOT in the repo, by design):**
+- `~/.claude/cl-config.json` — your accounts + secrets (API keys, `poolDb.neonUrl`).
+  Create it fresh with `cl setup`, **or** copy it from another machine.
+- `~/.claude/cl-credentials/` — captured subscription logins. Either re-add each
+  account with `cl add-account <id>`, or copy this folder over (treat as secret).
+- If an account's key uses `apiKeyFrom: { file }`, that file must exist on the new
+  machine too — or switch that account to `apiKeyEnv` / inline `apiKey` in setup.
+
+Fastest way to mirror an existing machine: run the installer, then copy
+`cl-config.json` and the `cl-credentials/` folder from the old machine into
+`~/.claude/`, and `cl doctor` to confirm.
 
 ## What you get
 

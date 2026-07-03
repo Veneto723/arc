@@ -12,6 +12,11 @@ $bin = Join-Path $env:USERPROFILE '.local\bin'
 Write-Host "cl-kit installer" -ForegroundColor Cyan
 node --version *> $null
 if ($LASTEXITCODE -ne 0) { throw 'Node.js is required on PATH.' }
+$hasClaude = $null -ne (Get-Command claude -ErrorAction SilentlyContinue)
+if (-not $hasClaude) {
+  Write-Host "  ! 'claude' CLI not found on PATH — install Claude Code first (https://claude.com/claude-code)." -ForegroundColor Yellow
+  Write-Host "    Continuing; the cl MCP server registration will be skipped." -ForegroundColor Yellow
+}
 
 # 1. scripts
 New-Item -ItemType Directory -Force $scripts, $commands, $bin, (Join-Path $scripts 'icons') | Out-Null
@@ -36,18 +41,28 @@ if (-not (Test-Path (Join-Path $mcpDest 'node_modules'))) {
   npm install --silent 2>$null | Out-Null
   Pop-Location
 }
-# register at user scope (idempotent: remove-then-add)
-claude mcp remove --scope user cl 2>$null | Out-Null
-claude mcp add --scope user cl node (Join-Path $mcpDest 'server.js') 2>$null | Out-Null
-Write-Host "  cl MCP server installed + registered (account_* / config_update / pool_* tools)"
+# register at user scope (idempotent: remove-then-add) — only if claude is present
+if ($hasClaude) {
+  claude mcp remove --scope user cl 2>$null | Out-Null
+  claude mcp add --scope user cl node (Join-Path $mcpDest 'server.js') 2>$null | Out-Null
+  Write-Host "  cl MCP server installed + registered (account_* / config_update / pool_* tools)"
+} else {
+  Write-Host "  cl MCP server installed (register later: claude mcp add --scope user cl node `"$mcpDest\server.js`")"
+}
 
-# 2. bin shim
+# 2. bin shim + PATH
 Set-Content (Join-Path $bin 'cl.cmd') "@echo off`r`nnode `"%USERPROFILE%\.claude\scripts\cl-runner.js`" %*" -Encoding ascii
-Write-Host "  cl.cmd  -> $bin (ensure it's on PATH)"
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $bin) {
+  [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $bin), 'User')
+  Write-Host "  cl.cmd  -> $bin  (added to your user PATH — open a NEW terminal to use 'cl')" -ForegroundColor Yellow
+} else {
+  Write-Host "  cl.cmd  -> $bin  (already on PATH)"
+}
 
 # 3. slash commands
 Copy-Item (Join-Path $kit 'commands\*.md') $commands -Force
-Write-Host "  commands -> $commands (/switch /restart /pool)"
+Write-Host "  commands -> $commands (/switch /restart /pool /cl)"
 
 # 4. toast icons
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'icons\make-icons.ps1') | Out-Null
