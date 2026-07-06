@@ -125,7 +125,10 @@ function run(raw) {
   // for real attention asks, not routine notices.
   if (mode === 'wait') {
     const msg = String(hook.message || '');
-    const isPerm = /permission|approval|waiting for your input/i.test(msg);
+    // Only genuine attention asks (permission/approval prompts) toast here — NOT
+    // the routine "waiting for your input" idle notice, which re-fires ~60s after
+    // a completed turn and just annoys (the Stop 'ready' toast already covered it).
+    const isPerm = /permission|approval/i.test(msg);
     if (!isPerm) { trace(`wait-skip sid=${sid.slice(0, 8)} msg=${msg.slice(0, 60)}`); process.exit(0); }
     const info0 = sessionInfo(sid);
     const proj0 = info0.cwd ? String(info0.cwd).split(/[\\/]/).filter(Boolean).pop() : '';
