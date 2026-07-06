@@ -24,27 +24,41 @@ One config file fits any setup:
 
 - **Switch accounts mid-conversation** — same chat continues on the other account, preserving model, permission mode, and effort (including `ultracode`).
 - **Zero-token interactive picker** — type `cl:switch` for an ↑/↓ arrow-key account menu that costs **no model tokens**, shows each account's live usage, and works even when the current account is fully rate-limited.
-- **Auto-selects the best account at launch** — every `cl` / `cl --resume` prefers your subscription while it has headroom and falls to the most-available pool only when it's exhausted. No flag; cost-aware; launch/resume only (never mid-session).
-- **Add a subscription in one command** — `cl add-account <id>` drives the native browser login and auto-captures the credential.
+- **Peek at all usage, zero tokens** — `cl:peek` prints every account's usage in one readout: subscription 5h/7d %, and gateway accounts' own cost/tokens.
+- **Auto-selects the best account at launch** — every `cl` / `cl --resume` prefers your subscription while it has headroom and falls to the most-available gateway only when it's exhausted. No flag; cost-aware; launch/resume only (never mid-session).
+- **Add any account, guided** — bare `cl:add-account` opens a wizard (pick Subscription vs Gateway, then prompts). Subscriptions drive the native browser login; **gateways** verify the endpoint, auto-detect models, and store the key.
+- **Keys encrypted at rest** — a gateway key can be **DPAPI-encrypted inside the config** (no plaintext file), bound to your Windows login; `cl set-key <id>` to set/rotate.
+- **Gateway usage in the statusline + peek** — if a gateway exposes a usage endpoint, cl shows the account's real cost/tokens (a cached, zero-token metadata call) — e.g. `MATE $103.60 today · 62.9M tok`.
 - **Manage accounts conversationally** — an MCP server exposes `account_add` / `remove` / `update` / `config_update` to any session.
 - **Desktop toasts** labeled with the session's `/rename` name, with colored state icons; **click a toast to focus that terminal window**.
-- **Usage statusline** — per-account 5h/7d rate-limit %, reset times, pace ETA, and blink warnings near the limit.
+- **Usage statusline** — subscription 5h/7d %, reset times, pace ETA, blink warnings near the limit; gateway cost/tokens for api accounts.
 - **Safeguard-flag auto-retry** — when a benign message gets flagged and downgraded, cl rephrases and retries it on the original model.
-- **Safety rails** — refuses to open one conversation in two processes (a crash cause), logs every launch/exit, and backs up config before every change.
+- **Safety rails** — refuses to open one conversation in two processes (a crash cause), warns before removing an account live sessions are using, logs every launch/exit, and backs up config before every change.
 
 ---
 
 ## Demo
 
-`cl:switch` opens the picker — no tokens, driven entirely by arrow keys:
+`cl:switch` opens the picker — no tokens, driven entirely by arrow keys, with each
+account's live usage inline:
 
 ```text
   Switch cl account   ↑/↓ move · 1-9 jump · Enter confirm · Esc keep current
 
-   1. max   ·  MAX  [oauth]   ← current
- ❯ 2. pool  ·  POOL [api]                ← selected (reverse-video in the terminal)
+   1. max   ·  MAX  [oauth]   5h 31% · 7d 26%              ← current
+ ❯ 2. mate  ·  MATE [api]     $118 today · 66.3M tok · unlimited   ← selected
 
   tip: cl:switch <name> jumps directly · /cl lists all commands
+```
+
+`cl:peek` prints the same usage for every account as a plain, zero-token readout:
+
+```text
+cl usage — peek
+  MAX  [subscription]   5h 31% · 7d 26%  (resets 8pm)   1m ago
+  MATE [gateway]        $118 today · 66.3M tok · 493 req · unlimited   2m ago
+      opus-4-8   64.3M tok · $116
+      haiku-4-5  1.5M tok · $1.73
 ```
 
 <!-- Replace the block above with a real recording once captured:
@@ -89,10 +103,13 @@ sessions to load new wrapper code.
 
 | Command | What it does | Tokens |
 |---|---|---|
-| `cl:switch` | open the interactive account picker | **0** |
+| `cl:switch` | open the interactive account picker (shows each account's usage) | **0** |
 | `cl:switch <n\|name>` | switch straight to an account | **0** |
-| `cl:add-account <id>` | guided browser login to add a subscription, in-session | **0** |
-| `cl:remove-account <id>` | remove an account (double-confirmed; `<id> confirm` to finish) | **0** |
+| `cl:peek` (`cl:usage`) | usage readout of **all** accounts (subscription 5h/7d + gateway cost/tokens) | **0** |
+| `cl:add-account` | open the add-account **wizard** — pick Subscription or Gateway, then prompts | **0** |
+| `cl:add-account <id>` | add a **subscription** via guided browser login | **0** |
+| `cl:add-account <id> --api --url <gw>` | add a **gateway/pool** — verifies it, auto-detects models, encrypts the key | **0** |
+| `cl:remove-account <id>` (alias `cl:delete-account`) | remove an account (double-confirmed; `<id> confirm` to finish) | **0** |
 | `cl:export [sel]` | archive chat sessions to a `.tgz` (bare = current conv) | **0** |
 | `cl:import <archive>` | merge sessions from an archive (newer-wins, safe) | **0** |
 | `cl:delete` | delete THIS conversation → recoverable trash, start fresh (double-confirmed) | **0** |
@@ -116,7 +133,10 @@ native `/` menu but cost one small model turn. `/cl` documents both.
 | `cl --account <id>` (or `--<id>`) | launch on a specific account |
 | `cl --effort <level>` | pin the effort for the whole session |
 | `cl --resume <uuid>` / `cl --resume` | resume, restoring model / mode / effort (incl. ultracode) |
-| `cl add-account <id>` | guided browser login to add a subscription |
+| `cl add-account <id>` | add a subscription (browser login) |
+| `cl add-account <id> --api --url <gw>` | add a gateway/pool account (same as the `cl:` form) |
+| `cl set-key <id>` | set/rotate an api account's key, DPAPI-encrypted (from clipboard / `--file` / `--stdin`) |
+| `cl peek` | usage readout of all accounts (same as `cl:peek`) |
 | `cl capture <id>` | save the currently-active login into an account |
 | `cl setup` | (re)configure accounts |
 | `cl doctor` | print resolved config + health checks |
@@ -139,10 +159,12 @@ Everything lives in `~/.claude/cl-config.json` (created by `cl setup`):
     {
       "id": "pool", "label": "POOL", "color": "#2DD4BF", "type": "api",
       "baseUrl": "https://my-gateway.example.com",
-      "apiKeyEnv": "MY_GATEWAY_KEY",            // or "apiKey": "...", or:
-      // "apiKeyFrom": { "file": "~/keys.txt", "regex": "key=(sk-[\\w-]+)" },
+      "apiKeyEnv": "MY_GATEWAY_KEY",            // key: env var, or "apiKey" inline, or
+      // "apiKeyFrom": { "file": "~/keys.txt", "regex": "key=(sk-[\\w-]+)" }, or
+      // "apiKeyEnc": "AQAAAN…"                 // DPAPI-encrypted; set via `cl set-key pool`
       "modelMap": { "opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable" },
       "headers": { "x-title": "claude" }
+      // "usageUrl": "<baseUrl>/v1/usage" by default (false to disable) — the gateway's own usage endpoint
     }
   ],
   "switchOrder": ["max", "pool"],
@@ -157,9 +179,16 @@ Everything lives in `~/.claude/cl-config.json` (created by `cl setup`):
   captured credential file; cl swaps `~/.claude/.credentials.json` on switch so
   sessions and transcripts stay unified. Use `cl add-account` (guided) or
   `cl capture`.
-- **`api`** — any gateway. Needs `baseUrl` + one key source (`apiKey` inline,
-  `apiKeyEnv` env var, or `apiKeyFrom` file+regex). `modelMap` maps the
-  opus/sonnet/haiku/fable aliases to the gateway's model names.
+- **`api`** — any gateway. Needs `baseUrl` + one key source: `apiKey` inline,
+  `apiKeyEnv` env var, `apiKeyFrom` file+regex, or **`apiKeyEnc`** (DPAPI-encrypted
+  in the config — no plaintext on disk; set with `cl set-key <id>`). `modelMap`
+  maps the opus/sonnet/haiku/fable aliases to the gateway's model names. Optional
+  `usageUrl` surfaces the gateway's own usage in the statusline + `cl:peek`.
+
+**The add-account wizard — bare `cl:add-account`** (no args): opens a `cl:switch`-style
+screen to pick **Subscription** vs **Gateway/pool**, then walks you through the details
+(id, and for a gateway: URL, label, and reading the key from your clipboard). It delegates
+to the two flows below, so you never need to remember the flags.
 
 **Adding a subscription — `cl add-account <id>`** (terminal) **or `cl:add-account <id>`**
 (in-session): snapshots your current login, runs `claude auth login` (browser
@@ -189,12 +218,14 @@ Unmapped families fall back to Claude Code's own default model ids. The probe se
 `anthropic-version` so a dual Claude+GPT gateway (one universal key) returns its Claude
 models, not GPT ones.
 
-**Removing an account — `cl:remove-account <id>`** (double-confirmed): step 1
-shows exactly what will happen and arms a 2-minute confirmation; step 2
-(`cl:remove-account <id> confirm`) actually removes it. It backs up
+**Removing an account — `cl:remove-account <id>`** (alias **`cl:delete-account`**,
+double-confirmed): step 1 shows exactly what will happen and arms a 2-minute
+confirmation; step 2 (`… <id> confirm`) actually removes it. It backs up
 `cl-config.json` first, auto-fixes references (switch order / default / rephrase),
 and **never deletes the captured login file** — so removal is recoverable by
-restoring the backup. Refuses to remove the last account.
+restoring the backup. Refuses to remove the last account. If **live sessions are
+using the account**, step 1 warns you (in red) — removal never kills a session, but
+those sessions drop to the default on their next switch/restart.
 
 **Auto-select the best account at launch (`features.autoBest`, default on):**
 every fresh `cl` and `cl --resume` picks the account with the most headroom so you
@@ -319,7 +350,8 @@ The repo has all the *code* but deliberately **not** your accounts or secrets
 
 ```
 src/            wrapper + hooks (cl-runner, cl-config, cl-signal, cl-switch-*,
-                cl-notify, cl-flag-retry, cl-help, cl-focus.*, usage-monitor, cl-setup)
+                cl-notify, cl-flag-retry, cl-help, cl-focus.*, usage-monitor,
+                gw-usage, cl-sync, cl-setup)
 mcp/            cl MCP server (account management + pool metrics tools)
 pool/           optional pool-DB tooling (pool-query, pool-status, pool-neon-url)
 commands/       slash commands (/switch, /restart, /pool, /cl)
@@ -335,6 +367,14 @@ install.ps1     deploy + wire everything into ~/.claude (idempotent)
 - `cl:switch` is the token-free interactive path; `/switch` is a slash command so
   it always costs a small model turn (Claude Code has no way to make a *custom*
   command instant — that path is reserved for built-ins).
+- **`apiKeyEnc` is per user+machine** — a DPAPI blob only decrypts on the Windows
+  account and machine that created it. Moving `cl-config.json` to another PC won't
+  decrypt it; run `cl set-key <id>` there to re-encrypt. It's not defense against
+  code already running as you (that could read the key when cl uses it) — it stops
+  offline theft of a copied config/file.
+- **Gateway usage (`usageUrl`) is provider-specific** — cl reads the common fields
+  (cost, tokens, per-model, limits) from a MATE-style `/v1/usage` shape and degrades
+  gracefully on anything else; a gateway with no usage endpoint just shows no usage.
 
 ## License
 
