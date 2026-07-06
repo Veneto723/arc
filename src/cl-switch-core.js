@@ -312,7 +312,11 @@ function readAddKey(tokens) {
 function probeGatewayModels(baseUrl, key) {
   let out;
   try {
-    out = execFileSync('curl.exe', ['-sS', '-m', '20', '-H', `Authorization: Bearer ${key}`, `${baseUrl.replace(/\/+$/, '')}/v1/models`],
+    // Send `anthropic-version` (like Claude Code does) so a dual Claude+GPT gateway
+    // keyed to ONE universal key returns its CLAUDE models here, not GPT ones.
+    out = execFileSync('curl.exe', ['-sS', '-m', '20',
+      '-H', `Authorization: Bearer ${key}`, '-H', 'anthropic-version: 2023-06-01',
+      `${baseUrl.replace(/\/+$/, '')}/v1/models`],
       { encoding: 'utf8', windowsHide: true, timeout: 25000 });
   } catch (e) { return { ok: false, error: `could not reach ${baseUrl}/v1/models (${String(e.message).split('\n')[0]})` }; }
   let j; try { j = JSON.parse(out); } catch { return { ok: false, error: `/v1/models did not return JSON (got: ${out.slice(0, 120).replace(/\s+/g, ' ')})` }; }
