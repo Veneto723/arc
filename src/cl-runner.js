@@ -429,6 +429,15 @@ function readUsageCache() {
   try { return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'usage-monitor-cache.json'), 'utf8')); } catch { return null; }
 }
 
+// True if this conversation has a saved transcript (so `--resume` works). A fresh
+// session where only a blocked cl: command ran (e.g. cl:add-account in a new
+// terminal) never persisted one — then `--resume` fails with "No conversation
+// found", and the caller must `--session-id` to (re)create it instead.
+function hasTranscript(convId) {
+  if (!convId) return false;
+  try { return !!require('./cl-sync').findTranscriptFile(convId); } catch { return false; }
+}
+
 // ---- interactive account picker (native arrow-key TUI, zero tokens) --------
 // Rendered by cl-runner itself after killing claude, so it owns the real
 // terminal. Returns the chosen account id, or null on cancel (keep current).
@@ -586,7 +595,18 @@ async function runAddWizard() {
 
   out.write('\x1b[2m  reading key + verifying gateway/models…\x1b[0m\n');
   const { key, src, error } = core.readAddKey([]); // clipboard
-  const r = core.addApiAccountResolved({ id, baseUrl: url, key, keySrc: src, keyErr: error, label });
+  const p = { id, baseUrl: url, key, keySrc: src, keyErr: error, label };
+  let r = core.addApiAccountResolved(p);
+  // If verification failed (e.g. a flaky gateway timing out), don't throw away all
+  // the input — offer to add it unverified (models fall back to Claude Code defaults).
+  if (!r.ok && /gateway check FAILED/i.test(r.message)) {
+    out.write(`\x1b[33m  ${r.message}\x1b[0m\n`);
+    const ans = await promptLine('add anyway WITHOUT verifying? (models = defaults) [y/N]: ');
+    if (ans && /^y(es)?$/i.test(ans.trim())) {
+      out.write('\x1b[2m  adding unverified…\x1b[0m\n');
+      r = core.addApiAccountResolved({ ...p, noVerify: true });
+    }
+  }
   out.write((r.ok ? '\x1b[32m' : '\x1b[31m') + r.message + '\x1b[0m\r\n');
 }
 
@@ -1133,7 +1153,11 @@ async function main() {
     } else {
       const a = stripConvArgs(passArgs); // no lingering --resume/--session-id to duplicate
       // On respawn (switch/restart), also re-apply the session's model + mode.
-      claudeArgs = convStarted
+      // Only --resume if the conversation was actually persisted; a fresh session
+      // that just ran a blocked cl: command has no transcript, so --resume would
+      // fail ("No conversation found") — (re)create it with --session-id instead.
+      const canResume = convStarted && hasTranscript(convId);
+      claudeArgs = canResume
         ? [...a, '--resume', convId, ...preservedFlags(convId), ...effFlag]
         : [...a, '--session-id', convId, ...effFlag];
     }
