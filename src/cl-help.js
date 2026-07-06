@@ -25,6 +25,8 @@ Add / manage accounts:
   cl:add-account <id> --api --url <gateway> [--label L --color #hex --default]
                                    add a GATEWAY/POOL (like mate): verifies it, auto-detects
                                    models, DPAPI-encrypts the key (from clipboard, or --file/--key)
+                                   advanced: --header Key:Value (repeat) · --model opus=<name> (pin,
+                                   repeat) · --no-verify (skip /v1/models probe for odd gateways)
   cl:remove-account <id>           remove an account (alias cl:delete-account) — asks, then 'confirm'
   cl set-key <id>                  re-encrypt an api account's key (clipboard/--file/--stdin), DPAPI
 

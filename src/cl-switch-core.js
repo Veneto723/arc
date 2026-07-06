@@ -288,6 +288,15 @@ function flagVal(tokens, name) {
   const i = tokens.indexOf(`--${name}`);
   return (i !== -1 && tokens[i + 1] && !tokens[i + 1].startsWith('--')) ? tokens[i + 1] : null;
 }
+// All values for a REPEATABLE flag (e.g. --header X:Y --header A:B). Values are
+// single tokens (no spaces) since the prompt is whitespace-split.
+function flagVals(tokens, name) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === `--${name}` && tokens[i + 1] && !tokens[i + 1].startsWith('--')) { out.push(tokens[i + 1]); i++; }
+  }
+  return out;
+}
 
 // Get the key from --key (inline), --file <path> (regex/whole), else the clipboard.
 function readAddKey(tokens) {
@@ -328,8 +337,9 @@ function probeGatewayModels(baseUrl, key) {
 
 // Pick the newest model in a family (e.g. opus → claude-opus-4-8). Version-aware:
 // compares numeric version parts, treating an 8-digit group as a date tiebreak.
+// Also matches a bare family alias ("opus") for gateways that name models that way.
 function pickFamilyModel(models, family) {
-  const cands = models.filter((m) => m === `claude-${family}` || m.startsWith(`claude-${family}-`));
+  const cands = models.filter((m) => m === family || m === `claude-${family}` || m.startsWith(`claude-${family}-`));
   if (!cands.length) return null;
   const score = (m) => {
     const nums = (m.slice(`claude-${family}`.length).match(/\d+/g) || []).map(Number);
@@ -348,41 +358,77 @@ function pickFamilyModel(models, family) {
 // that resolves the key from tokens, then delegates to addApiAccountResolved.
 function addApiAccount(tokens, id) {
   const { key, src, error } = readAddKey(tokens);
+  // --header Key:Value (repeatable) → custom headers. Delimiter required (values
+  // are single tokens — no spaces); empty values are rejected in the resolver.
+  const headers = {};
+  for (const h of flagVals(tokens, 'header')) {
+    const ci = h.indexOf(':');
+    if (ci <= 0) return { ok: false, message: `--header must be "Key:Value" with no spaces (got "${h}").` };
+    headers[h.slice(0, ci).trim()] = h.slice(ci + 1).trim();
+  }
+  // --model alias=model (repeatable) → pin/override a family's model.
+  const modelOverrides = {};
+  for (const m of flagVals(tokens, 'model')) {
+    const eq = m.indexOf('=');
+    if (eq <= 0) return { ok: false, message: `--model must be "alias=model" with no spaces (e.g. opus=claude-opus-4-6), got "${m}".` };
+    modelOverrides[m.slice(0, eq).trim().toLowerCase()] = m.slice(eq + 1).trim();
+  }
   return addApiAccountResolved({
     id, baseUrl: flagVal(tokens, 'url'), key, keySrc: src, keyErr: error,
     label: flagVal(tokens, 'label'), color: flagVal(tokens, 'color'), makeDefault: hasFlag(tokens, 'default'),
+    headers, modelOverrides, noVerify: hasFlag(tokens, 'no-verify'),
   });
 }
 
-// Verify + register an api account from STRUCTURED params (also used by the
-// interactive add wizard). Verifies the gateway, auto-detects models, DPAPI-
-// encrypts the key, writes the account (backup + validate, restore on failure).
-// Returns { ok, message }. Never throws.
-function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color, makeDefault }) {
+// Verify + register an api account from STRUCTURED params (also used by the add
+// wizard). Customization: `headers` (merged over the default x-title), `modelOverrides`
+// (alias→model, wins over auto-detected), `noVerify` (skip the /v1/models probe for
+// gateways that don't expose it / use non-standard model names). DPAPI-encrypts the
+// key, writes the account (backup + validate, restore on failure). Never throws.
+function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color, makeDefault, headers, modelOverrides, noVerify }) {
   const C = require('./cl-config');
   keySrc = keySrc || 'clipboard';
+  headers = headers || {}; modelOverrides = modelOverrides || {};
   if (!/^[a-z][a-z0-9_-]*$/i.test(id || '')) return { ok: false, message: `invalid id "${id || ''}" — letters/digits/dash/underscore, start with a letter.` };
   try { if (C.findAccount(C.loadConfig(), id)) return { ok: false, message: `account "${id}" already exists — pick a different id.` }; } catch {}
   if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) return { ok: false, message: 'a gateway/pool account needs a full http(s):// URL.' };
+  const badAlias = Object.keys(modelOverrides).find((a) => !['opus', 'sonnet', 'haiku', 'fable'].includes(a));
+  if (badAlias) return { ok: false, message: `--model alias must be opus/sonnet/haiku/fable (got "${badAlias}").` };
+  // Reject EMPTY override/header values from any caller — an empty model id would
+  // set ANTHROPIC_DEFAULT_*_MODEL='' and break that alias; an empty header is malformed.
+  const emptyModel = Object.entries(modelOverrides).find(([, v]) => !v);
+  if (emptyModel) return { ok: false, message: `--model ${emptyModel[0]} needs a non-empty model id (e.g. ${emptyModel[0]}=claude-${emptyModel[0]}-…).` };
+  const emptyHdr = Object.entries(headers).find(([, v]) => !v);
+  if (emptyHdr) return { ok: false, message: `--header "${emptyHdr[0]}" needs a non-empty value.` };
   if (!key) return { ok: false, message: `no key found in ${keySrc}${keyErr ? ` (${keyErr})` : ''} — copy the key to the clipboard, or pass --file <path> / --key <sk-…>.` };
 
-  // Verify the gateway + discover its Claude models before writing anything.
-  const probe = probeGatewayModels(baseUrl, key);
-  if (!probe.ok) return { ok: false, message: `gateway check FAILED — ${probe.error}. Account NOT added.` };
-  const claude = probe.models.filter((m) => /claude/i.test(m));
-  if (!claude.length) return { ok: false, message: `that gateway serves no Claude models (${probe.models.slice(0, 6).join(', ') || 'none'}). cl drives Claude Code, so it must expose claude-* models. Account NOT added.` };
-  const modelMap = {};
-  for (const fam of ['haiku', 'sonnet', 'opus', 'fable']) modelMap[fam] = pickFamilyModel(claude, fam) || fam;
+  // Build the modelMap: auto-detect from /v1/models (default), or trust overrides
+  // when --no-verify. Overrides always win. Unmapped families → Claude Code defaults.
+  let modelMap = {}, detail;
+  if (noVerify) {
+    modelMap = { ...modelOverrides };
+    detail = `models: ${Object.keys(modelMap).length ? Object.entries(modelMap).map(([k, v]) => `${k}→${v}`).join(', ') : 'Claude Code defaults'} (unverified)`;
+  } else {
+    const probe = probeGatewayModels(baseUrl, key);
+    if (!probe.ok) return { ok: false, message: `gateway check FAILED — ${probe.error}. Account NOT added. (If this gateway has no /v1/models, retry with --no-verify.)` };
+    const claude = probe.models.filter((m) => /claude/i.test(m) || ['opus', 'sonnet', 'haiku', 'fable'].includes(m));
+    if (!claude.length) return { ok: false, message: `that gateway serves no Claude models (${probe.models.slice(0, 6).join(', ') || 'none'}). If it's Claude-compatible under other names, add it with --no-verify [--model opus=<name> …]. Account NOT added.` };
+    for (const fam of ['haiku', 'sonnet', 'opus', 'fable']) { const p = pickFamilyModel(claude, fam); if (p) modelMap[fam] = p; }
+    Object.assign(modelMap, modelOverrides); // overrides win over auto-detected
+    detail = `models: ${Object.entries(modelMap).map(([k, v]) => `${k}→${v}`).join(', ')}`;
+  }
 
   // DPAPI-encrypt the key (no plaintext on disk), round-trip before committing.
   let enc; try { enc = C.dpapiEncrypt(key); if (C.dpapiDecrypt(enc) !== key) throw new Error('round-trip mismatch'); }
   catch (e) { return { ok: false, message: `DPAPI encrypt failed: ${e.message}` }; }
 
+  const mergedHeaders = { 'x-title': 'claude', ...headers }; // user headers override the default
   const acct = {
     id, label: label || id.toUpperCase(), type: 'api',
     baseUrl: baseUrl.replace(/\/+$/, ''), apiKeyEnc: enc,
-    headers: { 'x-title': 'claude' }, modelMap, disableConnectors: true,
+    headers: mergedHeaders, disableConnectors: true,
   };
+  if (Object.keys(modelMap).length) acct.modelMap = modelMap;
   if (color) acct.color = color;
 
   const bak = C.CONFIG_PATH + '.bak-' + Date.now();
@@ -398,11 +444,11 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
   try { if (C.resolveApiKey(C.findAccount(C.loadConfig(), id)) !== key) throw new Error('resolved key mismatch'); }
   catch (e) { fs.copyFileSync(bak, C.CONFIG_PATH); return { ok: false, message: `validation failed — restored backup. ${e.message}` }; }
 
-  const mm = Object.entries(modelMap).map(([k, v]) => `${k}→${v}`).join(', ');
+  const extraHdr = Object.keys(headers).length ? ` · headers: ${Object.keys(mergedHeaders).join(', ')}` : '';
   return {
     ok: true,
     message: `✓ added gateway account "${id}" (${acct.label}) → ${acct.baseUrl}\n` +
-      `  key ${key.slice(0, 7)}…${key.slice(-4)} DPAPI-encrypted (from ${keySrc}) · models: ${mm}` +
+      `  key ${key.slice(0, 7)}…${key.slice(-4)} DPAPI-encrypted (from ${keySrc}) · ${detail}${extraHdr}` +
       `${makeDefault ? '\n  set as the default account' : ''}\n  use it: cl:switch ${id}`,
   };
 }

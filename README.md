@@ -180,6 +180,15 @@ key is read from your **clipboard** by default (never typed into the prompt), or
 `--file <path>` / `--key <sk-…>`. Flags: `--label`, `--color`, `--default`. Runs inline
 (zero tokens, no session disruption). Re-encrypt/rotate later with `cl set-key <id>`.
 
+For less standard gateways, extra knobs: **`--header Key:Value`** (repeatable — custom
+headers, merged over the default `x-title`), **`--model opus=<name>`** (repeatable —
+pin/override a family's model, wins over auto-detect; alias ∈ opus/sonnet/haiku/fable),
+and **`--no-verify`** (skip the `/v1/models` probe entirely — for gateways that don't
+expose it or name models differently; combine with `--model` to set the map yourself).
+Unmapped families fall back to Claude Code's own default model ids. The probe sends
+`anthropic-version` so a dual Claude+GPT gateway (one universal key) returns its Claude
+models, not GPT ones.
+
 **Removing an account — `cl:remove-account <id>`** (double-confirmed): step 1
 shows exactly what will happen and arms a 2-minute confirmation; step 2
 (`cl:remove-account <id> confirm`) actually removes it. It backs up
