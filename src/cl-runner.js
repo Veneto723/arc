@@ -379,6 +379,30 @@ function resetTerminal() {
   try { process.stdout.write('\x1b[?1049l\x1b[?25h\x1b[0m'); } catch {}
 }
 
+// A short usage summary for an account, read from the statusline's cache
+// (usage-monitor-cache.json) — so the picker can show headroom without any
+// network call. oauth → the subscription's 5h/7d %; api+poolDb → the pool's
+// active-count and lowest 5h. '' when there's no data to show.
+function accountUsage(acc) {
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'usage-monitor-cache.json'), 'utf8'));
+    if (acc.type === 'oauth' && c.usage && c.usage.data && c.usage.data.five_hour) {
+      const d = c.usage.data;
+      const stale = c.usage.fetchedAt && Date.now() - c.usage.fetchedAt > 10 * 60_000;
+      return `5h ${Math.round(d.five_hour.utilization)}% · 7d ${Math.round(d.seven_day.utilization)}%${stale ? ' (stale)' : ''}`;
+    }
+    if (acc.type === 'api' && c.pool && Array.isArray(c.pool.rows) && c.pool.rows.length) {
+      const rows = c.pool.rows;
+      const active = rows.filter((r) => r.status === 'active' && r.reason_code !== 'rate_limited').length;
+      const fhs = rows.map((r) => r.fh).filter((v) => v != null);
+      const minFh = fhs.length ? Math.round(Math.min(...fhs)) : null;
+      const stale = c.pool.fetchedAt && Date.now() - c.pool.fetchedAt > 10 * 60_000;
+      return `pool: ${active}/${rows.length} active${minFh != null ? ` · 5h from ${minFh}%` : ''}${stale ? ' (stale)' : ''}`;
+    }
+  } catch {}
+  return '';
+}
+
 // ---- interactive account picker (native arrow-key TUI, zero tokens) --------
 // Rendered by cl-runner itself after killing claude, so it owns the real
 // terminal. Returns the chosen account id, or null on cancel (keep current).
@@ -397,10 +421,12 @@ function pickAccount(currentId) {
       out.write('\r\n  \x1b[1;36mSwitch cl account\x1b[0m   \x1b[2m↑/↓ move · 1-9 jump · Enter confirm · Esc keep current\x1b[0m\r\n\r\n');
       accounts.forEach((a, i) => {
         const cur = a.id === currentId ? '  \x1b[2m← current\x1b[0m' : '';
+        const use = accountUsage(a);
         const body = ` ${String(i + 1)}. ${a.id}  ·  ${a.label} [${a.type}] `;
+        const useDim = use ? `  \x1b[2m${use}\x1b[0m` : '';
         out.write(i === sel
-          ? `  \x1b[7m${body}\x1b[0m${cur}\r\n`   // reverse-video selection
-          : `   ${body}${cur}\r\n`);
+          ? `  \x1b[7m${body}\x1b[0m${useDim}${cur}\r\n`   // reverse-video selection
+          : `   ${body}${useDim}${cur}\r\n`);
       });
       // Footer reinforces the memorable entry points every time they switch.
       out.write('\r\n  \x1b[2mtip: `cl:switch <name>` jumps directly · `/cl` lists all commands\x1b[0m\r\n');
