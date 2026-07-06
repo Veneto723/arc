@@ -20,9 +20,12 @@ Switch account (keeps your conversation, preserves model/effort/mode):
   /switch ${example.padEnd(13)} switch directly, from the / menu
 
 Add / manage accounts:
-  cl:add-account <id>    guided browser login to add a subscription (in-session)
-  cl add-account <id>    same, run from a terminal
-  cl:remove-account <id> remove an account (alias cl:delete-account) — asks, then repeat with 'confirm'
+  cl:add-account <id>              add a SUBSCRIPTION via guided browser login (in-session)
+  cl:add-account <id> --api --url <gateway> [--label L --color #hex --default]
+                                   add a GATEWAY/POOL (like mate): verifies it, auto-detects
+                                   models, DPAPI-encrypts the key (from clipboard, or --file/--key)
+  cl:remove-account <id>           remove an account (alias cl:delete-account) — asks, then 'confirm'
+  cl set-key <id>                  re-encrypt an api account's key (clipboard/--file/--stdin), DPAPI
 
 Move chats between PCs (discrete export/import — no realtime sync):
   cl:export              archive the CURRENT conversation → ~/cl-export-<ts>.tgz

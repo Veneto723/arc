@@ -11,6 +11,7 @@
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'cache');
 
@@ -278,29 +279,144 @@ function requestPicker(session) {
   }
 }
 
-// Drop an add-account trigger → cl-runner kills claude and runs the guided
-// browser login on the freed TTY. Requires an id (bare cl:add-account → usage,
-// no trigger). `argStr` is everything after `cl:add-account` (id + flags).
-function requestAddAccount(session, argStr) {
-  if (!session) {
-    return { ok: false, message: 'NOT running under the cl wrapper (launch with `cl`).' };
+// ---- add an api (gateway/pool) account inline -------------------------------
+// No browser / TTY needed (unlike an oauth subscription), so this runs right in
+// the hook: verify the gateway, auto-detect its model names, DPAPI-encrypt the
+// key (no plaintext on disk), write the account. Mirrors how `mate` was added.
+function hasFlag(tokens, name) { return tokens.includes(`--${name}`); }
+function flagVal(tokens, name) {
+  const i = tokens.indexOf(`--${name}`);
+  return (i !== -1 && tokens[i + 1] && !tokens[i + 1].startsWith('--')) ? tokens[i + 1] : null;
+}
+
+// Get the key from --key (inline), --file <path> (regex/whole), else the clipboard.
+function readAddKey(tokens) {
+  const inline = flagVal(tokens, 'key');
+  if (inline) return { key: inline.trim(), src: 'inline' };
+  const file = flagVal(tokens, 'file');
+  if (file) {
+    try {
+      const raw = fs.readFileSync(require('./cl-config').expandHome(file), 'utf8');
+      const m = raw.match(/sk-[A-Za-z0-9-]+/);
+      return { key: (m ? m[0] : raw.trim()), src: file };
+    } catch (e) { return { key: '', src: file, error: e.message }; }
   }
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Clipboard -Raw'],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    return { key: (out || '').trim(), src: 'clipboard' };
+  } catch (e) { return { key: '', src: 'clipboard', error: e.message }; }
+}
+
+// GET <base>/v1/models with the key → { ok, models[] } or { ok:false, error }.
+function probeGatewayModels(baseUrl, key) {
+  let out;
+  try {
+    out = execFileSync('curl.exe', ['-sS', '-m', '20', '-H', `Authorization: Bearer ${key}`, `${baseUrl.replace(/\/+$/, '')}/v1/models`],
+      { encoding: 'utf8', windowsHide: true, timeout: 25000 });
+  } catch (e) { return { ok: false, error: `could not reach ${baseUrl}/v1/models (${String(e.message).split('\n')[0]})` }; }
+  let j; try { j = JSON.parse(out); } catch { return { ok: false, error: `/v1/models did not return JSON (got: ${out.slice(0, 120).replace(/\s+/g, ' ')})` }; }
+  if (j && j.error) return { ok: false, error: `gateway rejected the key: ${JSON.stringify(j.error).slice(0, 160)}` };
+  const arr = Array.isArray(j.data) ? j.data : (Array.isArray(j) ? j : null);
+  if (!arr) return { ok: false, error: 'unexpected /v1/models response shape' };
+  return { ok: true, models: arr.map((m) => m.id || m.name).filter(Boolean) };
+}
+
+// Pick the newest model in a family (e.g. opus → claude-opus-4-8). Version-aware:
+// compares numeric version parts, treating an 8-digit group as a date tiebreak.
+function pickFamilyModel(models, family) {
+  const cands = models.filter((m) => m === `claude-${family}` || m.startsWith(`claude-${family}-`));
+  if (!cands.length) return null;
+  const score = (m) => {
+    const nums = (m.slice(`claude-${family}`.length).match(/\d+/g) || []).map(Number);
+    let date = 0; const v = [];
+    for (const n of nums) { if (n >= 20200000) date = n; else v.push(n); }
+    return { v, date };
+  };
+  return cands.slice().sort((a, b) => {
+    const sa = score(a), sb = score(b);
+    for (let i = 0; i < Math.max(sa.v.length, sb.v.length); i++) { const d = (sb.v[i] || 0) - (sa.v[i] || 0); if (d) return d; }
+    return sb.date - sa.date;
+  })[0];
+}
+
+// Verify + register an api account. Returns { ok, message }. Never throws.
+function addApiAccount(tokens, id) {
+  const C = require('./cl-config');
+  const baseUrl = flagVal(tokens, 'url');
+  if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
+    return { ok: false, message: 'a gateway/pool account needs --url <https://gateway> (a full http(s) URL).' };
+  }
+  const { key, src, error } = readAddKey(tokens);
+  if (!key) return { ok: false, message: `no key found in ${src}${error ? ` (${error})` : ''} — copy the key to the clipboard, or pass --file <path> / --key <sk-…>.` };
+
+  // Verify the gateway + discover its Claude models before writing anything.
+  const probe = probeGatewayModels(baseUrl, key);
+  if (!probe.ok) return { ok: false, message: `gateway check FAILED — ${probe.error}. Account NOT added.` };
+  const claude = probe.models.filter((m) => /claude/i.test(m));
+  if (!claude.length) return { ok: false, message: `that gateway serves no Claude models (${probe.models.slice(0, 6).join(', ') || 'none'}). cl drives Claude Code, so the gateway must expose claude-* models. Account NOT added.` };
+  const modelMap = {};
+  for (const fam of ['haiku', 'sonnet', 'opus', 'fable']) modelMap[fam] = pickFamilyModel(claude, fam) || fam;
+
+  // DPAPI-encrypt the key (no plaintext on disk), round-trip before committing.
+  let enc; try { enc = C.dpapiEncrypt(key); if (C.dpapiDecrypt(enc) !== key) throw new Error('round-trip mismatch'); }
+  catch (e) { return { ok: false, message: `DPAPI encrypt failed: ${e.message}` }; }
+
+  const acct = {
+    id, label: flagVal(tokens, 'label') || id.toUpperCase(), type: 'api',
+    baseUrl: baseUrl.replace(/\/+$/, ''), apiKeyEnc: enc,
+    headers: { 'x-title': 'claude' }, modelMap, disableConnectors: true,
+  };
+  const color = flagVal(tokens, 'color'); if (color) acct.color = color;
+
+  const bak = C.CONFIG_PATH + '.bak-' + Date.now();
+  let raw; try { raw = JSON.parse(fs.readFileSync(C.CONFIG_PATH, 'utf8')); }
+  catch (e) { return { ok: false, message: `cl-config.json unreadable: ${e.message}` }; }
+  fs.copyFileSync(C.CONFIG_PATH, bak);
+  raw.accounts = (raw.accounts || []).filter((a) => a.id !== id);
+  raw.accounts.push(acct);
+  if (!Array.isArray(raw.switchOrder)) raw.switchOrder = raw.accounts.map((a) => a.id);
+  else if (!raw.switchOrder.includes(id)) raw.switchOrder.push(id);
+  if (hasFlag(tokens, 'default')) raw.defaultAccount = id;
+  fs.writeFileSync(C.CONFIG_PATH, JSON.stringify(raw, null, 2));
+  try { if (C.resolveApiKey(C.findAccount(C.loadConfig(), id)) !== key) throw new Error('resolved key mismatch'); }
+  catch (e) { fs.copyFileSync(bak, C.CONFIG_PATH); return { ok: false, message: `validation failed — restored backup. ${e.message}` }; }
+
+  const mm = Object.entries(modelMap).map(([k, v]) => `${k}→${v}`).join(', ');
+  return {
+    ok: true,
+    message: `✓ added gateway account "${id}" (${acct.label}) → ${acct.baseUrl}\n` +
+      `  key ${key.slice(0, 7)}…${key.slice(-4)} DPAPI-encrypted (from ${src}) · models: ${mm}` +
+      `${hasFlag(tokens, 'default') ? '\n  set as the default account' : ''}\n  use it: cl:switch ${id}`,
+  };
+}
+
+// Add an account. `--api`/`--url` → a gateway/pool account, done inline here.
+// Otherwise an oauth subscription → drop a trigger so cl-runner runs the guided
+// browser login on the freed TTY. `argStr` is everything after `cl:add-account`.
+function requestAddAccount(session, argStr) {
   const tokens = (argStr || '').trim().split(/\s+/).filter(Boolean);
-  const id = tokens.find((t) => !t.startsWith('-'));
+  const id = tokens.find((t) => !t.startsWith('-') && !/^sk-/.test(t)); // skip a bare key token
   if (!id) {
-    return { ok: false, message: 'usage: cl:add-account <id> [--label L] [--email E] [--console] [--default] — an account id is required.' };
+    return { ok: false, message: 'usage: cl:add-account <id>  (subscription: browser login)  ·  or  cl:add-account <id> --api --url <gateway> [--label L] [--color #hex] [--default]  (gateway/pool; key from clipboard, or --file/--key)' };
   }
   if (!/^[a-z][a-z0-9_-]*$/i.test(id)) {
     return { ok: false, message: `invalid id "${id}" — use letters/digits/dash/underscore, starting with a letter.` };
   }
-  // Reject an existing id up front (before killing claude) so an obvious mistake
-  // doesn't cost a disruptive kill+relaunch.
   try {
     const C = require('./cl-config');
     if (C.findAccount(C.loadConfig(), id)) {
       return { ok: false, message: `account "${id}" already exists — pick a different id (see /cl or cl doctor).` };
     }
   } catch {}
+
+  // Gateway/pool account: no browser, no TTY — verify + register right here.
+  if (hasFlag(tokens, 'api') || hasFlag(tokens, 'url')) return addApiAccount(tokens, id);
+
+  // oauth subscription: needs the browser + terminal → hand off to cl-runner.
+  if (!session) {
+    return { ok: false, message: 'adding a SUBSCRIPTION needs the cl wrapper (launch with `cl`). For a gateway/pool, use: cl:add-account ' + id + ' --api --url <gateway>.' };
+  }
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
     fs.writeFileSync(path.join(CACHE_DIR, `cl-addacct-${session}.trigger`), JSON.stringify({ at: Date.now(), args: argStr.trim() }));

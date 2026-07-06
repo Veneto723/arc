@@ -753,7 +753,16 @@ function doAddAccount(argv) {
 }
 
 // CLI entry: `cl add-account <id> ...` — run the flow, then exit.
-function cmdAddAccount(argv) { process.exit(doAddAccount(argv).code); }
+function cmdAddAccount(argv) {
+  // Gateway/pool account (--api/--url): verify + register inline (shared core), no
+  // browser. Otherwise fall through to the oauth guided-login flow.
+  if (argv.includes('--api') || argv.includes('--url')) {
+    const r = core.requestAddAccount('', argv.join(' '));
+    process.stdout.write(r.message + '\n');
+    process.exit(r.ok ? 0 : 1);
+  }
+  process.exit(doAddAccount(argv).code);
+}
 
 function cmdDoctor() {
   const lines = [];

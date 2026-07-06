@@ -171,6 +171,15 @@ pre-add login is restored, so the session you're on is undisturbed. Flags:
 The `cl:` form runs it right inside a session (the wrapper takes over the terminal
 for the login, then relaunches your conversation).
 
+**Adding a gateway/pool — `cl:add-account <id> --api --url <gateway>`** (or `cl add-account …`):
+no browser. cl calls the gateway's `/v1/models` to **verify the key works and it's a
+Claude gateway**, **auto-detects the model names** to build the `modelMap` (e.g.
+opus→`claude-opus-4-8`), **DPAPI-encrypts the key** into `apiKeyEnc` (no plaintext on
+disk), and registers the account — backing up + validating first, no-op on failure. The
+key is read from your **clipboard** by default (never typed into the prompt), or from
+`--file <path>` / `--key <sk-…>`. Flags: `--label`, `--color`, `--default`. Runs inline
+(zero tokens, no session disruption). Re-encrypt/rotate later with `cl set-key <id>`.
+
 **Removing an account — `cl:remove-account <id>`** (double-confirmed): step 1
 shows exactly what will happen and arms a 2-minute confirmation; step 2
 (`cl:remove-account <id> confirm`) actually removes it. It backs up
