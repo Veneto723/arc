@@ -37,7 +37,6 @@ Move chats between PCs (discrete export/import — no realtime sync):
 
 See usage:
   cl:peek                usage of ALL accounts + where a launch would land — ZERO tokens
-  /pool                  pool account usage % + reset times (from the / menu)
 
 Session:
   cl:restart   /restart  reload the wrapper + relaunch this conversation

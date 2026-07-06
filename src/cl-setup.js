@@ -112,7 +112,7 @@ async function main() {
     : await askChoice('\ndefault account at launch', accounts.map((a) => a.id), accounts[0].id);
 
   // Optional pool metrics DB (renders per-account utilization in the statusline
-  // and powers /pool + the pool MCP server). Fully optional.
+  // and powers the pool MCP server). Fully optional.
   let poolDb = null;
   if (accounts.some((a) => a.type === 'api')) {
     const want = await askChoice('\nconfigure a pool metrics DB (Neon Postgres pool_accounts/account_usage schema)?', ['y', 'n'], 'n');

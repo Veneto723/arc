@@ -26,9 +26,9 @@ Copy-Item (Join-Path $kit 'src\cl-focus.vbs') $scripts -Force
 Copy-Item (Join-Path $kit 'src\icons\make-icons.ps1') (Join-Path $scripts 'icons') -Force
 Write-Host "  scripts -> $scripts"
 
-# pool tooling (only used if cl-config has poolDb; harmless otherwise)
+# pool-DB metrics tooling (feeds the statusline + pool MCP tools when cl-config
+# has poolDb; harmless otherwise). No /pool slash command — it wasn't universal.
 Copy-Item (Join-Path $kit 'pool\pool-query.js') $scripts -Force
-Copy-Item (Join-Path $kit 'pool\pool-status.js') $scripts -Force
 Copy-Item (Join-Path $kit 'pool\pool-neon-url.js') $scripts -Force
 
 # cl MCP server (account management + pool metrics tools)
@@ -67,7 +67,7 @@ if (($userPath -split ';') -notcontains $bin) {
 
 # 3. slash commands
 Copy-Item (Join-Path $kit 'commands\*.md') $commands -Force
-Write-Host "  commands -> $commands (/switch /restart /pool /cl)"
+Write-Host "  commands -> $commands (/switch /restart /cl)"
 
 # 4. toast icons
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'icons\make-icons.ps1') | Out-Null

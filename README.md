@@ -116,7 +116,6 @@ sessions to load new wrapper code.
 | `cl:restart` | reload the wrapper + relaunch this conversation | **0** |
 | `/switch [n\|name]` | same picker / direct switch, from the `/` menu | small |
 | `/restart` | reload + relaunch | small |
-| `/pool` | pool account usage % + reset times | small |
 | `/cl` | print this cheat sheet | small |
 
 The `cl:` forms are plain messages caught by a hook **before** the model runs —
@@ -250,7 +249,7 @@ gateway reports one (that's an Anthropic-subscription concept). See `src/gw-usag
 
 **Optional pool metrics (`poolDb.neonUrl`):** point it at a Postgres DB with
 `pool_accounts` / `account_usage` tables to get per-account utilization in the
-statusline, the `/pool` table, and the `pool_status` / `pool_next_reset` MCP tools.
+statusline and the `pool_status` / `pool_next_reset` MCP tools.
 
 **Manage accounts conversationally (MCP):** the `cl` MCP server exposes
 `account_list` / `account_add` / `account_remove` / `account_update` /
@@ -353,7 +352,7 @@ src/            wrapper + hooks (cl-runner, cl-config, cl-signal, cl-switch-*,
                 cl-notify, cl-flag-retry, cl-help, cl-focus.*, usage-monitor,
                 gw-usage, cl-sync, cl-setup)
 mcp/            cl MCP server (account management + pool metrics tools)
-pool/           optional pool-DB tooling (pool-query, pool-status, pool-neon-url)
+pool/           optional pool-DB metrics tooling (pool-query, pool-neon-url)
 commands/       slash commands (/switch, /restart, /pool, /cl)
 install.ps1     deploy + wire everything into ~/.claude (idempotent)
 ```
