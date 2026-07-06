@@ -23,7 +23,8 @@ One config file fits any setup:
 ## Highlights
 
 - **Switch accounts mid-conversation** — same chat continues on the other account, preserving model, permission mode, and effort (including `ultracode`).
-- **Zero-token interactive picker** — type `cl:switch` for an ↑/↓ arrow-key account menu that costs **no model tokens** and works even when the current account is fully rate-limited.
+- **Zero-token interactive picker** — type `cl:switch` for an ↑/↓ arrow-key account menu that costs **no model tokens**, shows each account's live usage, and works even when the current account is fully rate-limited.
+- **Auto-selects the best account at launch** — every `cl` / `cl --resume` prefers your subscription while it has headroom and falls to the most-available pool only when it's exhausted. No flag; cost-aware; launch/resume only (never mid-session).
 - **Add a subscription in one command** — `cl add-account <id>` drives the native browser login and auto-captures the credential.
 - **Manage accounts conversationally** — an MCP server exposes `account_add` / `remove` / `update` / `config_update` to any session.
 - **Desktop toasts** labeled with the session's `/rename` name, with colored state icons; **click a toast to focus that terminal window**.
@@ -146,7 +147,7 @@ Everything lives in `~/.claude/cl-config.json` (created by `cl setup`):
   ],
   "switchOrder": ["max", "pool"],
   "thresholds": { "warnSessionPct": 85, "warnWeekPct": 90, "switchSessionPct": 92, "switchWeekPct": 95 },
-  "features": { "flagRetry": true, "rephraseAccount": "pool" },
+  "features": { "flagRetry": true, "rephraseAccount": "pool", "autoBest": true },
   "poolDb": { "neonUrl": "postgresql://..." }   // optional — enables pool metrics
 }
 ```
@@ -176,6 +177,18 @@ shows exactly what will happen and arms a 2-minute confirmation; step 2
 `cl-config.json` first, auto-fixes references (switch order / default / rephrase),
 and **never deletes the captured login file** — so removal is recoverable by
 restoring the backup. Refuses to remove the last account.
+
+**Auto-select the best account at launch (`features.autoBest`, default on):**
+every fresh `cl` and `cl --resume` picks the account with the most headroom so you
+never start on an exhausted one — *without* a flag. The policy is cost-aware: it
+**prefers a subscription** (any `oauth` account) while it still has 5h/7d headroom,
+and only falls to the most-available `api`/pool account when the subscription is
+exhausted (over `switchSessionPct` / `switchWeekPct`); if everything is exhausted
+it stays on the subscription (least-bad). It reads the statusline's usage cache —
+no extra network call — and does nothing if there's no cache yet. This is
+**launch/resume only**; there is no mid-session auto-switch. `cl --account <id>`
+overrides it for one launch; `"autoBest": false` disables it. `cl doctor` prints
+the account it *would* pick right now.
 
 **Optional pool metrics (`poolDb.neonUrl`):** point it at a Postgres DB with
 `pool_accounts` / `account_usage` tables to get per-account utilization in the

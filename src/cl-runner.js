@@ -4,11 +4,16 @@
 // accounts defined in ~/.claude/cl-config.json (oauth subscriptions and/or
 // API gateways — any number, any mix).
 //
-// Switching is MANUAL-only, driven by trigger files (not keystroke interception):
+// Switching is MANUAL mid-session, driven by trigger files (not keystroke
+// interception):
 //   - /switch [account] and /restart are REAL Claude Code slash commands whose
 //     `!`-bash drops a per-session trigger file (see commands/*.md + cl-signal.js).
 //     This runner polls for its own session's trigger.
-//   - There is NO usage-based auto-switch. Use /switch (or `cl --account <id>`).
+//   - There is NO MID-SESSION auto-switch (removed — it was disruptive).
+//   - At LAUNCH/RESUME only, cl auto-selects the best account: prefer a
+//     subscription while it has headroom, fall to the most-available pool only
+//     when the subscription is exhausted. Disable with features.autoBest=false;
+//     override per-launch with `cl --account <id>`.
 //
 // Subcommands:  cl setup           — interactive config wizard
 //               cl add-account <id> — drive native login + auto-capture a NEW account
@@ -403,6 +408,78 @@ function accountUsage(acc) {
   return '';
 }
 
+// ---- auto-select the best account at launch/resume -------------------------
+// Policy (user-chosen): PREFER the default account (your subscription) while it
+// has headroom; only when it's exhausted fall to the most-available alternative;
+// if everything is exhausted, stay on the preferred (least-bad). Launch/resume
+// only — NEVER mid-session (that's the auto-switch that was removed). Skipped
+// when `--account` forces one or `features.autoBest` is false.
+
+function readUsageCache() {
+  try { return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'usage-monitor-cache.json'), 'utf8')); } catch { return null; }
+}
+
+// Headroom score for an account from the usage cache: higher = more free.
+//   null = can't judge (no data)   ·   -1 = exhausted   ·   0..100 = % headroom
+function accountHeadroom(acc, cache, th) {
+  if (!cache) return null;
+  const SW_S = th.switchSessionPct ?? 92, SW_W = th.switchWeekPct ?? 95;
+  if (acc.type === 'oauth') {
+    if (!cache.usage || !cache.usage.data || !cache.usage.data.five_hour) return null;
+    const fh = cache.usage.data.five_hour.utilization, sd = cache.usage.data.seven_day.utilization;
+    if (fh >= SW_S || sd >= SW_W) return -1;              // over a switch threshold = exhausted
+    return 100 - fh;                                       // 5h is the binding short-term limit
+  }
+  if (acc.type === 'api') {
+    if (!cache.pool || !Array.isArray(cache.pool.rows) || !cache.pool.rows.length) return null;
+    const active = cache.pool.rows.filter((r) => r.status === 'active' && r.reason_code !== 'rate_limited' && r.fh != null);
+    if (!active.length) return -1;                         // every pool account in cooldown = exhausted
+    return 100 - Math.min(...active.map((r) => r.fh));     // headroom of the least-loaded pool account
+  }
+  return null;
+}
+
+// Decide the launch account (policy: PREFER a subscription — i.e. an oauth
+// account — while it has headroom; fall to the most-available api/pool only when
+// all subscriptions are exhausted). "Prefer subscription" is by account TYPE, not
+// by defaultAccount (which may be set to the pool). Returns { id, reason } or
+// null when nothing can be judged (no usage cache) → keep saved/default.
+function chooseLaunchAccount(cfg, cache) {
+  const th = cfg.thresholds || {};
+  const score = (a) => accountHeadroom(a, cache, th);
+  const oauth = cfg.accounts.filter((a) => a.type === 'oauth').map((a) => ({ a, s: score(a) }));
+  const oauthJudged = oauth.filter((x) => x.s != null);
+
+  // Subscriptions exist but none can be judged yet (no usage cache) → don't guess.
+  if (oauth.length && !oauthJudged.length) return null;
+
+  // Reasons DON'T lead with the picked account's label — callers prepend it.
+  // 1. Best subscription that still has headroom.
+  const oauthRoom = oauthJudged.filter((x) => x.s >= 0).sort((x, y) => y.s - x.s);
+  if (oauthRoom.length) return { id: oauthRoom[0].a.id, reason: `subscription has headroom` };
+
+  // 2. Subscriptions exhausted → most-available api/pool.
+  const apiRoom = cfg.accounts.filter((a) => a.type === 'api').map((a) => ({ a, s: score(a) }))
+    .filter((x) => x.s != null && x.s >= 0).sort((x, y) => y.s - x.s);
+  if (apiRoom.length) {
+    const subLabel = oauthJudged.length ? oauthJudged[0].a.label : 'subscription';
+    return { id: apiRoom[0].a.id, reason: `${subLabel} exhausted → most available` };
+  }
+
+  // 3. api-only config (no oauth): most-available api, else can't judge.
+  if (!oauth.length) {
+    const anyApi = cfg.accounts.map((a) => ({ a, s: score(a) })).filter((x) => x.s != null);
+    if (!anyApi.length) return null;
+    const best = anyApi.filter((x) => x.s >= 0).sort((x, y) => y.s - x.s)[0];
+    if (best) return { id: best.a.id, reason: `most available` };
+  }
+
+  // 4. Everything judged is exhausted → least-bad: a subscription if we have one,
+  // else the default account.
+  const lb = (oauthJudged[0] && oauthJudged[0].a) || C.findAccount(cfg, cfg.defaultAccount) || cfg.accounts[0];
+  return { id: lb.id, reason: `all accounts exhausted → least-bad` };
+}
+
 // ---- interactive account picker (native arrow-key TUI, zero tokens) --------
 // Rendered by cl-runner itself after killing claude, so it owns the real
 // terminal. Returns the chosen account id, or null on cancel (keep current).
@@ -754,6 +831,12 @@ function cmdDoctor() {
     lines.push(`  [${a.type}] ${a.id} "${a.label}" ${status} ${detail}`);
   }
   lines.push(`pool metrics: ${cfg.poolDb ? 'configured' : 'off'}`);
+  if (cfg.features.autoBest !== false && cfg.accounts.length > 1) {
+    const pick = chooseLaunchAccount(cfg, readUsageCache());
+    lines.push(`auto-select: on — ${pick ? `would launch on ${accountLabel(pick.id)}: ${pick.reason}` : 'no usage data yet → saved/default'}`);
+  } else {
+    lines.push(`auto-select: off (features.autoBest=false)`);
+  }
   // hook wiring
   try {
     const st = JSON.parse(fs.readFileSync(path.join(C.CLAUDE_DIR, 'settings.json'), 'utf8'));
@@ -817,6 +900,18 @@ async function main() {
       process.exit(1);
     }
     account = acc.id;
+  } else if (!respawning && cfg.features.autoBest !== false && cfg.accounts.length > 1) {
+    // Auto-select the launch account (fresh `cl` + `cl --resume`, NOT /switch or
+    // /restart which are respawns). Prefer the subscription; fall to the most
+    // available only when it's exhausted. No override when we can't judge (cache
+    // missing) — then the saved/default account stands.
+    const pick = chooseLaunchAccount(cfg, readUsageCache());
+    if (pick && pick.id !== account) {
+      process.stdout.write(`\x1b[2m[cl] auto-selected ${accountLabel(pick.id)} — ${pick.reason}\x1b[0m\n`);
+      account = pick.id;
+    } else if (pick && pick.id === account) {
+      process.stdout.write(`\x1b[2m[cl] ${pick.reason}\x1b[0m\n`);
+    }
   }
 
   // Pinned effort: from the --effort flag, else carried in state across /restart.
