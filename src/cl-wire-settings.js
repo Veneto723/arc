@@ -20,11 +20,22 @@ const S = scripts.replace(/\\/g, '/'); // forward slashes work in a hook command
 const settingsPath = path.join(CLAUDE_DIR, 'settings.json');
 
 let settings = {};
-try {
-  const raw = fs.readFileSync(settingsPath, 'utf8');
-  fs.writeFileSync(settingsPath + '.bak-cl-kit', raw);
-  settings = JSON.parse(raw.replace(/^﻿/, '')) || {};
-} catch { /* no existing settings — start fresh */ }
+let raw = null;
+try { raw = fs.readFileSync(settingsPath, 'utf8'); } catch { /* no settings.json yet — start fresh */ }
+if (raw != null) {
+  // Parse BEFORE touching anything. If the user's settings.json is malformed (a
+  // trailing comma, a stray edit), REFUSE — never silently overwrite their config
+  // with just cl's entries. (install.ps1 aborts here too.)
+  try {
+    settings = JSON.parse(raw.replace(/^﻿/, '')) || {}; // tolerate a leading BOM
+  } catch (e) {
+    process.stderr.write(`cl-wire-settings: ${settingsPath} is not valid JSON (${e.message}).\n` +
+      `  Refusing to overwrite it — fix the JSON and re-run. Nothing was changed.\n`);
+    process.exit(1);
+  }
+  // Back up the good original only now that we know we'll modify it.
+  try { fs.writeFileSync(settingsPath + '.bak-cl-kit', raw); } catch {}
+}
 
 // The hooks cl owns, per event. cl-switch-hook FIRST on UserPromptSubmit so the
 // classifier-immune switch fallback runs before anything else.

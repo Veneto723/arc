@@ -25,9 +25,11 @@ function readClipboard() {
 }
 
 // A short hint naming how to supply input when the clipboard isn't readable.
+// (On Linux the read can fail because no tool is installed OR the clipboard is
+// empty / the session is headless — so the hint covers both, not just "install".)
 function clipboardHint() {
-  if (process.platform === 'linux') return 'install xclip or wl-clipboard, or pass --file <path> / --stdin';
-  return 'pass --file <path> or --stdin';
+  if (process.platform === 'linux') return 'install xclip or wl-clipboard if missing (or the clipboard may be empty), or pass --file <path> / --stdin';
+  return 'the clipboard may be empty — or pass --file <path> / --stdin';
 }
 
 module.exports = { readClipboard, clipboardHint };
