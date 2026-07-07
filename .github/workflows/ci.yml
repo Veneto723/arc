@@ -1,0 +1,32 @@
+name: CI
+
+# Proves the platform-neutral core (account switching, per-account credential
+# isolation, trash, usage) actually runs on Windows, Linux, AND macOS — using the
+# free GitHub-hosted runners, so no need to own a Mac or a Linux box. The suite
+# uses a throwaway HOME and no interactive `claude`; the "platform probe" section
+# reports the OS-specific touchpoints (clipboard, notifier, symlink) it would take
+# to fully port the Windows-only extras.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} · node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Run portable test suite
+        run: node test/run.js
