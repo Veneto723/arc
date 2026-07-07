@@ -36,6 +36,26 @@ function block(reason) {
   process.exit(0);
 }
 
+// ---- consistent cl: alert colours -------------------------------------------
+// One palette across every cl: message: RED = destructive, GREEN = success,
+// CYAN = neutral action, YELLOW = refusal/error (the default). The host renders
+// ANSI in the block reason but re-emits each display row, dropping colour across a
+// soft-wrap — so paint() re-applies the colour PER LINE.
+const CLR = { red: '\x1b[1;91m', green: '\x1b[1;92m', cyan: '\x1b[1;96m', yellow: '\x1b[1;93m', rst: '\x1b[0m' };
+function alertColor(msg) {
+  if (/^✓/.test(msg)) return CLR.green;                                       // completed
+  if (/REMOVE account|DELETE the CURRENT conversation|⚠/.test(msg)) return CLR.red;  // destructive
+  if (/^(SWITCHING|RESTARTING|opening|adding|deleting)\b/i.test(msg)) return CLR.cyan; // in-progress
+  return CLR.yellow;                                                          // refusal / error / hint
+}
+function paint(text, ansi) {
+  return String(text).split('\n').map((l) => (l ? ansi + l + CLR.rst : '')).join('\n');
+}
+// Block with the "[cl] " prefix and a semantic colour applied to the message body.
+function clBlock(message) {
+  return block(`[cl] ${paint(message, alertColor(message))}`);
+}
+
 function run(raw) {
   let hook = {};
   try { hook = JSON.parse(raw || '{}'); } catch {}
@@ -55,37 +75,37 @@ function run(raw) {
   }
   if (action === 'restart') {
     const r = core.requestRestart(session);
-    return block(`[cl] ${r.message}`);
+    return clBlock(r.message);
   }
   if (action === 'add-account' || action === 'add') {
     const r = core.requestAddAccount(session, arg || '');
-    return block(`[cl] ${r.message}`);
+    return clBlock(r.message);
   }
   if (action === 'remove-account' || action === 'rm-account' || action === 'remove'
       || action === 'delete-account' || action === 'del-account') {
     const r = core.requestRemoveAccount(session, arg || '');
-    return block(`[cl] ${r.message}`);
+    return clBlock(r.message);
   }
   if (action === 'delete') {
     const r = core.requestDelete(session, arg || '');
-    return block(`[cl] ${r.message}`);
+    return clBlock(r.message);
   }
   if (action === 'export' || action === 'import') {
     // Pure file ops — run synchronously in the hook (zero tokens, no session
     // disruption). Loaded lazily so a plain cl:switch stays lightweight.
     const sync = require('./cl-sync');
     const r = action === 'export' ? sync.doExport(session, arg || '') : sync.doImport(session, arg || '');
-    return block(`[cl] ${r.message}`);
+    return clBlock(r.message);
   }
   // Bare `cl:switch` → open the interactive arrow-key picker (cl-runner renders
   // it on the freed TTY). An explicit `cl:switch <n|name>` → switch directly.
   if (!arg) {
     const r = core.requestPicker(session);
-    return block(`[cl] ${r.message}`);
+    return clBlock(r.message);
   }
   const r = core.requestSwitch(session, arg);
   const note = (!r.switching && !r.menu) ? '\n(typed cl:switch — no model/classifier involved, works even when rate-limited)' : '';
-  return block(`[cl] ${r.message}${note}`);
+  return clBlock(`${r.message}${note}`);
 }
 
 let data = '';

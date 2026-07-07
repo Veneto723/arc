@@ -577,19 +577,15 @@ function requestRemoveAccount(session, argStr) {
     ? ((cfg.accounts.find((a) => a.id !== acc.id) || {}).id || '?')
     : cfg.defaultAccount;
   const live = liveSessionsOn(acc.id);
-  // Loud bold-BRIGHT-RED alert. Colour is re-applied PER LINE (RL) and each line is
-  // kept short — the host renders the hook message line-by-line and DROPS ANSI across
-  // a soft-wrap, so a single long coloured run only tints its first physical row.
-  // Short, self-coloured lines keep the WHOLE warning red; CAPS + ⚠ stay loud even
-  // if ANSI is stripped entirely.
-  const A_RED = '\x1b[1;91m', A_RST = '\x1b[0m';
-  const RL = (t) => `${A_RED}${t}${A_RST}`;
+  // Plain text in short lines (CAPS + ⚠ for prominence even without colour). The
+  // hook paints the whole destructive message RED per-line, so short lines keep the
+  // colour across soft-wraps.
   const Subj = live > 1 ? 'They' : 'It', keep = live > 1 ? 'keep' : 'keeps', drop = live > 1 ? 'drop' : 'drops', them = live > 1 ? 'them' : 'it';
   const liveWarn = live > 0
-    ? RL(`⚠ ${live} LIVE SESSION${live > 1 ? 'S' : ''} STILL ON "${acc.id.toUpperCase()}"`) + '\n'
-      + '  ' + RL(`${Subj} ${keep} running (removal won't stop ${them}).`) + '\n'
-      + '  ' + RL(`${Subj} ${drop} to "${newDefault}" on next switch/restart.`) + '\n'
-      + '  ' + RL(`Move one off now: cl:switch ${newDefault} in it.`) + '\n'
+    ? `⚠ ${live} LIVE SESSION${live > 1 ? 'S' : ''} STILL ON "${acc.id.toUpperCase()}"\n`
+      + `  ${Subj} ${keep} running (removal won't stop ${them}).\n`
+      + `  ${Subj} ${drop} to "${newDefault}" on next switch/restart.\n`
+      + `  Move one off now: cl:switch ${newDefault} in it.\n`
     : '';
 
   if (!isConfirm) {
@@ -622,8 +618,8 @@ function requestRemoveAccount(session, argStr) {
     message:
       `✓ removed account "${acc.id}".${res.fixes.length ? ` (${res.fixes.join('; ')})` : ''}\n` +
       (live > 0
-        ? '  ' + RL(`${live} live session${live > 1 ? 's' : ''} ${keep} running (same key);`) + '\n'
-          + '  ' + RL(`${live > 1 ? 'they' : 'it'} will drop to "${newDefault}" on next switch/restart.`) + '\n'
+        ? `  ${live} live session${live > 1 ? 's' : ''} ${keep} running (same key);\n`
+          + `  ${live > 1 ? 'they' : 'it'} will drop to "${newDefault}" on next switch/restart.\n`
         : '') +
       (res.credFile ? `  its login file was KEPT at ${res.credFile} — delete it yourself if you want it gone.\n` : '') +
       `  reverse it by restoring the backup: ${res.backup}`,
@@ -650,11 +646,17 @@ function requestDelete(session, argStr) {
   const convId = sessionConvId(session);
   if (!convId) return { ok: false, message: 'no current conversation id yet (the statusline hasn\'t bridged it) — try again in a moment.' };
 
+  let fp = null;
+  try { fp = require('./cl-sync').findTranscriptFile(convId); } catch {}
+  if (!fp) {
+    // No transcript = an EMPTY session (no messages saved yet) → nothing to trash.
+    // This is the usual "cl:delete did nothing" case: you delete a chat, a fresh
+    // empty session starts, and deleting THAT finds nothing — so say so clearly
+    // instead of arming a confirm that then reports "(not found)".
+    return { ok: false, message: 'nothing to delete — this conversation has no saved messages yet. (An empty session leaves no transcript; just send a message first, or switch/exit.)' };
+  }
   let sizeStr = '';
-  try {
-    const fp = require('./cl-sync').findTranscriptFile(convId);
-    if (fp) { const b = fs.statSync(fp).size; sizeStr = b < 1024 ? ` (${b} B)` : b < 1048576 ? ` (${Math.round(b / 1024)} KB)` : ` (${(b / 1048576).toFixed(1)} MB)`; }
-  } catch {}
+  try { const b = fs.statSync(fp).size; sizeStr = b < 1024 ? ` (${b} B)` : b < 1048576 ? ` (${Math.round(b / 1024)} KB)` : ` (${(b / 1048576).toFixed(1)} MB)`; } catch {}
 
   const isConfirm = (argStr || '').trim().split(/\s+/).some((t) => CONFIRM_WORDS.has(t.toLowerCase()));
   if (!isConfirm) {
