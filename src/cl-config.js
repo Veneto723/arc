@@ -31,13 +31,8 @@ const CONFIG_PATH = path.join(CLAUDE_DIR, 'cl-config.json');
 const CACHE_DIR = path.join(CLAUDE_DIR, 'cache');
 const CRED_PATH = path.join(CLAUDE_DIR, '.credentials.json');
 const SCRIPTS_DIR = path.join(CLAUDE_DIR, 'scripts');
-const LEGACY_POOL_CONFIG = path.join(SCRIPTS_DIR, 'pool-config.json');
 
 const DEFAULT_THRESHOLDS = { warnSessionPct: 85, warnWeekPct: 90, switchSessionPct: 92, switchWeekPct: 95 };
-
-// Map legacy account ids (pre-universal cl state files) onto configured ids so
-// an in-flight session survives a migration mid-conversation.
-const LEGACY_IDS = { apihub: 'pool' };
 
 function expandHome(p) {
   if (!p) return p;
@@ -49,29 +44,16 @@ function loadRaw() {
   catch { return null; }
 }
 
-// Fall back to the classic personal layout (pool-config.json + MAX) so a
-// pre-migration install keeps working before cl-config.json exists.
+// Fall back to a minimal default (one MAX subscription account) so `cl` works
+// before cl-config.json exists — `cl doctor` flags it and points at `cl setup`.
 function legacyConfig() {
-  let pc = null;
-  try { pc = JSON.parse(fs.readFileSync(LEGACY_POOL_CONFIG, 'utf8')); } catch {}
-  const accounts = [{ id: 'max', label: 'MAX', color: '#D97757', type: 'oauth' }];
-  if (pc && pc.apihubBaseUrl) {
-    accounts.push({
-      id: 'pool', label: 'POOL', color: '#2DD4BF', type: 'api',
-      baseUrl: `https://${pc.apihubBaseUrl}`,
-      apiKeyFrom: { file: 'E:\\setup-claude-apihub.ps1', regex: 'apiKey\\s*=\\s*[“"](sk-whale-[^”"]+)[”"]' },
-      headers: { 'x-title': 'claude' },
-      modelMap: { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' },
-      disableConnectors: true,
-    });
-  }
   return {
     version: 1,
     defaultAccount: 'max',
-    accounts,
-    thresholds: (pc && pc.thresholds) || {},
+    accounts: [{ id: 'max', label: 'MAX', color: '#D97757', type: 'oauth' }],
+    thresholds: {},
     features: {},
-    poolDb: pc && pc.neonUrl ? { neonUrl: pc.neonUrl } : null,
+    poolDb: null,
     _legacy: true,
   };
 }
@@ -107,9 +89,7 @@ function loadConfig() {
 // Resolve a configured account id, tolerating legacy ids from old state files.
 function findAccount(cfg, id) {
   if (!id) return null;
-  return cfg.accounts.find((a) => a.id === id)
-    || cfg.accounts.find((a) => a.id === LEGACY_IDS[id])
-    || null;
+  return cfg.accounts.find((a) => a.id === id) || null;
 }
 
 // The account /switch moves to: an explicit valid target, else the next id in
