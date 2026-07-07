@@ -953,7 +953,7 @@ function cmdSetKey(argv) {
       src = 'stdin'; key = fs.readFileSync(0, 'utf8').trim();
     } else {
       const clip = require('./cl-platform').readClipboard();
-      if (clip == null) { process.stderr.write(`[cl] no clipboard tool available — ${require('./cl-platform').clipboardHint()}\n`); process.exit(1); }
+      if (clip == null) { process.stderr.write(`[cl] couldn't read the clipboard — ${require('./cl-platform').clipboardHint()}\n`); process.exit(1); }
       key = clip;
     }
   } catch (e) { process.stderr.write(`[cl] could not read key from ${src}: ${e.message}\n`); process.exit(1); }

@@ -218,6 +218,13 @@ try {
   const s2 = JSON.parse(fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8'));
   const stopCount = (s2.hooks.Stop || []).flatMap((g) => g.hooks || []).filter((x) => x.command.includes('cl-notify.js')).length;
   ok('re-run is idempotent (no duplicate hooks)', stopCount === 1);
+
+  // safety: a MALFORMED settings.json must NOT be silently overwritten (must abort, untouched)
+  const bad = '{ "theme": "dark", }'; // trailing comma → invalid JSON
+  fs.writeFileSync(path.join(CLAUDE, 'settings.json'), bad);
+  const rbad = spawnSync(process.execPath, [wire, scriptsDir], { encoding: 'utf8' });
+  ok('refuses malformed settings.json (non-zero exit)', rbad.status !== 0);
+  ok('leaves the malformed file untouched (no silent clobber)', fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8') === bad);
 } catch (e) { ok('cl-wire-settings works', false, e.message); }
 
 // ---- PROBE: OS-specific touchpoints (informational — never fails build) ------

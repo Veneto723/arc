@@ -349,7 +349,7 @@ function readAddKey(tokens) {
     } catch (e) { return { key: '', src: file, error: e.message }; }
   }
   const out = require('./cl-platform').readClipboard();
-  if (out == null) return { key: '', src: 'clipboard', error: `no clipboard tool available — ${require('./cl-platform').clipboardHint()}` };
+  if (out == null) return { key: '', src: 'clipboard', error: `couldn't read the clipboard — ${require('./cl-platform').clipboardHint()}` };
   return { key: out.trim(), src: 'clipboard' };
 }
 
