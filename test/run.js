@@ -24,6 +24,7 @@ const { spawnSync } = require('child_process');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'clkit-test-'));
 process.env.HOME = TMP;          // POSIX homedir()
 process.env.USERPROFILE = TMP;   // Windows homedir()
+process.env.CL_PEEK_NO_REFRESH = '1'; // hermetic: buildPeek must not spawn a network refresh in tests
 // Sanity: confirm the override took (libuv uv_os_homedir honors HOME/USERPROFILE).
 if (path.resolve(os.homedir()) !== path.resolve(TMP)) {
   console.error(`FATAL: could not sandbox HOME (homedir=${os.homedir()} tmp=${TMP})`);

@@ -59,6 +59,26 @@ function readUsageCache() {
   catch { return null; }
 }
 
+// cl:peek is an explicit "show me current usage" — it must NOT show stale data.
+// Unlike the statusline (which paints instantly and refreshes DETACHED for next
+// time), peek SYNCHRONOUSLY refreshes the cache first (subscription + gateways),
+// bounded so it never hangs, and skips the fetch when the cache is already fresh.
+// On timeout/failure it falls back to whatever's cached (still shown with its age).
+function refreshUsageForPeek() {
+  if (process.env.CL_PEEK_NO_REFRESH === '1') return; // opt out → instant, cache-only peek
+  const PEEK_FRESH_MS = 15_000; // a re-peek within 15s reuses the cache, no refetch
+  try {
+    const cache = readUsageCache();
+    const now = Date.now();
+    const usageAge = cache && cache.usage && cache.usage.fetchedAt ? now - cache.usage.fetchedAt : Infinity;
+    const gwAges = cache && cache.gwUsage ? Object.values(cache.gwUsage).map((g) => (g && g.fetchedAt ? now - g.fetchedAt : Infinity)) : [];
+    const oldestGw = gwAges.length ? Math.max(...gwAges) : 0;
+    if (usageAge < PEEK_FRESH_MS && oldestGw < PEEK_FRESH_MS) return; // already fresh
+    const mon = path.join(__dirname, 'usage-monitor.js');
+    execFileSync(process.execPath, [mon, '--refresh', '--with-pool'], { timeout: 10_000, stdio: 'ignore', windowsHide: true });
+  } catch { /* refresh timed out / failed — fall back to cached data */ }
+}
+
 // Headroom score for an account from the usage cache: higher = more free.
 //   null = can't judge (no data)   ·   -1 = exhausted   ·   0..100 = % headroom
 function accountHeadroom(acc, cache, th) {
@@ -142,6 +162,7 @@ function buildPeek(session) {
   let C, cfg;
   try { C = require('./cl-config'); cfg = C.loadConfig(); }
   catch (e) { return { ok: false, message: `cl usage — config unreadable (${e.message}). Fix ~/.claude/cl-config.json or run \`cl setup\`.` }; }
+  refreshUsageForPeek(); // fire a fresh fetch first — peek must not show stale data
   const cache = readUsageCache();
   const current = session ? currentAccount(C, cfg, session) : null;
   const pct = (v) => (v == null ? '  ?' : String(Math.round(v)).padStart(3));
