@@ -30,6 +30,7 @@ const { spawn, spawnSync } = require('child_process');
 
 const C = require('./cl-config');
 const core = require('./cl-switch-core'); // shared launch-account decision + peek
+const { pickConvId } = require('./cl-conv'); // pure convId reconciliation (testable)
 
 const CACHE_DIR = C.CACHE_DIR;
 const TRIGGER_POLL_MS = 1_000;    // how often to check for a slash-command trigger
@@ -1134,6 +1135,21 @@ async function main() {
   process.on('exit', releaseOnExit);
   process.on('SIGINT', () => { releaseOnExit(); process.exit(130); });
   process.on('SIGTERM', () => { releaseOnExit(); process.exit(143); });
+  // Heal a PHANTOM convId inherited from state on a re-exec (/restart) or crash
+  // recovery: if what we're about to launch has NO transcript but the statusline
+  // bridge still points at a REAL conversation, adopt the real one BEFORE the
+  // first launch. Otherwise the first --session-id would mint a new empty session
+  // before the post-run reconcile could correct it — which would make /restart
+  // (the very way a user picks up this fix) briefly open an empty chat.
+  if (respawning && convId && !userManagesConv && !hasTranscript(convId)) {
+    const bridged = readActiveConv();
+    if (bridged && bridged !== convId && hasTranscript(bridged)) {
+      releaseConv(convId);
+      logLine(`pre-launch reconcile: phantom ${convId.slice(0, 8)} → ${bridged.slice(0, 8)} (statusline bridge)`);
+      convId = bridged;
+      if (!(forceDup ? null : liveOwnerOf(convId))) claimConv(convId);
+    }
+  }
   logLine(`launch account=${account} conv=${guardConv || '(picker/new)'} cwd=${process.cwd()}${forceDup ? ' [FORCED DUP]' : ''}`);
 
   for (;;) {
@@ -1183,26 +1199,40 @@ async function main() {
     // After the first successful launch the conversation exists; from now on we
     // must --resume it, never re-create it with --session-id.
     convStarted = true;
-    // Learn the ACTUAL session id claude used (via the statusline bridge). For a
-    // `cl --resume` picker session, this is the id the user picked — adopt it so
-    // switches re-resume it precisely AND preserve its model/mode/effort.
-    if (userManagesConv) {
-      const actual = readActiveConv();
-      if (actual) {
-        convId = actual; userManagesConv = false;
-        // Now that a bare picker resume revealed its real id, enforce the guard:
-        // if another live cl already owns it, we collided — warn (can't un-launch
-        // retroactively, but flag it) — otherwise claim it so the NEXT launch and
-        // other terminals see it as taken.
-        const owner = !forceDup ? liveOwnerOf(convId) : null;
-        if (owner) {
-          process.stderr.write(`\x1b[31m[cl] WARNING — the resumed conversation ${convId.slice(0, 8)} is ALSO open in cl pid ${owner.pid} (${owner.cwd}). Two sessions on one conversation can corrupt/crash. Close one.\x1b[0m\n`);
-          logLine(`duplicate detected post-adopt conv=${convId} other pid=${owner.pid}`);
-        } else {
-          claimConv(convId);
-        }
+    // Reconcile our tracked convId with the GROUND TRUTH the statusline bridges —
+    // the conversation claude is ACTUALLY showing. Adopt the bridged id when it
+    // diverges. This covers BOTH:
+    //   (a) a `cl --resume` picker session whose id cl never assigned (userManagesConv), and
+    //   (b) a MANAGED session that DRIFTED — our convId points at a phantom with no
+    //       transcript (e.g. the user used claude's own resume, or the real id
+    //       diverged from the minted one). Without this, a switch/restart re-opens
+    //       the phantom via --session-id and mints a brand-new EMPTY session — the
+    //       "cl:switch opens a new session instead of resuming" bug.
+    // Guard (managed case) via hasTranscript: only adopt a bridged id that is a
+    // REAL persisted conversation, never a transient/bogus one. (pickConvId in
+    // cl-conv.js is the pure, unit-tested decision.)
+    const actual = readActiveConv();
+    const resolved = pickConvId(convId, actual, userManagesConv, hasTranscript);
+    if (resolved !== convId) {
+      const prev = convId;
+      convId = resolved;
+      if (prev) releaseConv(prev); // drop the stale/phantom claim we no longer track
+      // Enforce the duplicate-session guard on the newly-revealed real id: if
+      // another live cl already owns it we collided — warn (can't un-launch
+      // retroactively) — otherwise claim it so the NEXT launch and other
+      // terminals see it as taken.
+      const owner = !forceDup ? liveOwnerOf(convId) : null;
+      if (owner) {
+        process.stderr.write(`\x1b[31m[cl] WARNING — the resumed conversation ${convId.slice(0, 8)} is ALSO open in cl pid ${owner.pid} (${owner.cwd}). Two sessions on one conversation can corrupt/crash. Close one.\x1b[0m\n`);
+        logLine(`duplicate detected post-adopt conv=${convId} other pid=${owner.pid}`);
+      } else {
+        claimConv(convId);
       }
+      logLine(`reconciled convId ${prev ? prev.slice(0, 8) : '(none)'} → ${convId.slice(0, 8)} (statusline bridge)`);
     }
+    // Once the statusline has revealed the real id we track, the managed path owns
+    // it (--resume), so a switch/restart re-opens THIS chat instead of the picker.
+    if (actual && convId === actual) userManagesConv = false;
 
     if (reason === 'restart') {
       // Re-exec the whole wrapper so freshly-edited on-disk code loads too. State

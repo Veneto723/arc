@@ -247,6 +247,39 @@ try {
   ok('leaves the malformed file untouched (no silent clobber)', fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8') === bad);
 } catch (e) { ok('cl-wire-settings works', false, e.message); }
 
+// ---- cl-conv (convId reconciliation — the "switch resumes a new session" fix) --
+section('cl-conv (convId reconciliation)');
+try {
+  const { pickConvId } = require(path.join(SRC, 'cl-conv.js'));
+  // hasTranscript predicate over a fixed set of "real" (persisted) ids.
+  const real = new Set(['live-28118b62']);
+  const has = (id) => real.has(id);
+
+  // Managed session DRIFTED: we track a phantom (no transcript); the statusline
+  // bridged the real live id → must adopt the real one (else --session-id mints a
+  // new empty session — the reported bug).
+  ok('adopts real bridged id over a phantom tracked id',
+    pickConvId('phantom-62babd46', 'live-28118b62', false, has) === 'live-28118b62');
+
+  // Bare picker resume (`cl --resume`): cl assigned no id → always adopt the
+  // bridged id the user picked.
+  ok('picker resume adopts the bridged id (userManagesConv)',
+    pickConvId(null, 'live-28118b62', true, has) === 'live-28118b62');
+
+  // Healthy managed session: what we track already matches reality → no change.
+  ok('keeps tracked id when it matches the bridge',
+    pickConvId('live-28118b62', 'live-28118b62', false, has) === 'live-28118b62');
+
+  // Do NOT adopt a bridged id that has no transcript (transient/bogus) over a
+  // tracked managed id — only real persisted conversations are adopted.
+  ok('ignores a bogus bridged id with no transcript (managed)',
+    pickConvId('live-28118b62', 'ghost-00000000', false, has) === 'live-28118b62');
+
+  // No bridge yet (statusline hasn't rendered) → keep whatever we track.
+  ok('keeps tracked id when bridge is empty',
+    pickConvId('live-28118b62', null, false, has) === 'live-28118b62');
+} catch (e) { ok('cl-conv pickConvId works', false, e.message); }
+
 // ---- PROBE: OS-specific touchpoints (informational — never fails build) ------
 section('platform probe (informational — what a full port would wire up)');
 function has(cmd, args) { try { const r = spawnSync(cmd, args || ['--version'], { encoding: 'utf8', timeout: 5000, windowsHide: true }); return r.status === 0 || (r.stdout || r.stderr || '').length > 0; } catch { return false; } }
