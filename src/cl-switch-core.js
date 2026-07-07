@@ -75,7 +75,9 @@ function refreshUsageForPeek() {
     const oldestGw = gwAges.length ? Math.max(...gwAges) : 0;
     if (usageAge < PEEK_FRESH_MS && oldestGw < PEEK_FRESH_MS) return; // already fresh
     const mon = path.join(__dirname, 'usage-monitor.js');
-    execFileSync(process.execPath, [mon, '--refresh', '--with-pool'], { timeout: 10_000, stdio: 'ignore', windowsHide: true });
+    // --force bypasses the per-slice TTLs: a 3-min-old gateway value is "fresh" to
+    // the normal refresh (5-min TTL), but peek must show CURRENT data.
+    execFileSync(process.execPath, [mon, '--refresh', '--with-pool', '--force'], { timeout: 10_000, stdio: 'ignore', windowsHide: true });
   } catch { /* refresh timed out / failed — fall back to cached data */ }
 }
 

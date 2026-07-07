@@ -126,10 +126,10 @@ function appendHistory(history, data) {
   return next.filter((h) => h.t >= cutoff);
 }
 
-async function getUsageCached() {
+async function getUsageCached(force) {
   const cache = readCacheFile();
   const cached = cache.usage;
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.data;
+  if (!force && cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.data;
   try {
     const data = await fetchUsage();
     // Re-read at write time: the sibling getPoolCached() in the same --refresh
@@ -202,10 +202,10 @@ function readCachedPool() {
 // Cached under cache.gwUsage[accountId]. resolveApiKey may DPAPI-decrypt (a
 // PowerShell shell-out) — fine in the detached refresh child, never on the hot
 // render path (renders only READ readCachedGwUsage).
-async function getGwUsageCached(acc) {
+async function getGwUsageCached(acc, force) {
   if (!GW.usageUrlFor(acc)) return null;
   const cached = (readCacheFile().gwUsage || {})[acc.id];
-  if (cached && Date.now() - cached.fetchedAt < GW_CACHE_TTL_MS) return cached.data;
+  if (!force && cached && Date.now() - cached.fetchedAt < GW_CACHE_TTL_MS) return cached.data;
   let key; try { key = C.resolveApiKey(acc); } catch { return cached ? cached.data : null; }
   const data = await GW.fetchGatewayUsage(acc, key);
   if (!data) return cached ? cached.data : null;
@@ -239,13 +239,13 @@ function triggerBackgroundRefresh(wantPool) {
 }
 
 // Runs in the detached child: refresh caches, then release the lock.
-async function runRefresh(wantPool) {
+async function runRefresh(wantPool, force) {
   const apiAccts = ((cfg && cfg.accounts) || []).filter((a) => a.type === 'api' && GW.usageUrlFor(a));
   try {
     await Promise.all([
-      getUsageCached(),
+      getUsageCached(force),
       wantPool && poolConfigured() ? getPoolCached() : Promise.resolve(null),
-      ...apiAccts.map((a) => getGwUsageCached(a)), // each gateway's own /v1/usage
+      ...apiAccts.map((a) => getGwUsageCached(a, force)), // each gateway's own /v1/usage
     ]);
   } catch {}
   try { fs.unlinkSync(`${CACHE_PATH}.refresh.lock`); } catch {}
@@ -657,9 +657,10 @@ async function main() {
   const compact = args.includes('--compact') || args.includes('-c');
   const refresh = args.includes('--refresh');
 
-  // Detached refresh worker: repopulate caches, then exit.
+  // Detached refresh worker: repopulate caches, then exit. `--force` bypasses the
+  // per-slice TTLs (used by cl:peek, which must show truly current data).
   if (refresh) {
-    await runRefresh(args.includes('--with-pool') || args.includes('--apihub')); // --apihub = legacy spelling
+    await runRefresh(args.includes('--with-pool') || args.includes('--apihub'), args.includes('--force')); // --apihub = legacy spelling
     return;
   }
 
