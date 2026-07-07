@@ -345,6 +345,62 @@ function trashDirDate(name) {
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : '?';
 }
 
+// Strip command wrappers / tags / boilerplate from a user message so it reads as
+// a topic snippet (fallback title when a conversation has no custom/ai title).
+function cleanSnippet(s) {
+  return String(s || '')
+    .replace(/<command-[a-z]+>[\s\S]*?<\/command-[a-z]+>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Pull identifying metadata from a transcript so the trash list is recognisable:
+//   { customTitle, aiTitle, firstPrompt, turns, lastActive (ISO), cwd }
+// customTitle = a /rename'd name; aiTitle = Claude Code's auto title. Very large
+// transcripts (>30 MB) are read header-only (titles/cwd/first prompt) with the
+// file mtime as last-active, so listing never stalls on a giant chat.
+function transcriptMeta(fp) {
+  const meta = { customTitle: null, aiTitle: null, firstPrompt: null, turns: null, lastActive: null, cwd: null };
+  let size = 0; try { size = fs.statSync(fp).size; } catch { return meta; }
+  const HEADER_ONLY = size > 30 * 1024 * 1024;
+
+  let text;
+  try {
+    if (HEADER_ONLY) {
+      const fd = fs.openSync(fp, 'r');
+      const buf = Buffer.alloc(Math.min(size, 131072));
+      fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd);
+      text = buf.toString('utf8');
+      try { meta.lastActive = fs.statSync(fp).mtime.toISOString(); } catch {}
+    } else {
+      text = fs.readFileSync(fp, 'utf8');
+      meta.turns = 0;
+    }
+  } catch { return meta; }
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    let e; try { e = JSON.parse(line); } catch { continue; } // header-only: trailing partial line just fails to parse
+    if (e.type === 'custom-title' && e.customTitle && !meta.customTitle) meta.customTitle = String(e.customTitle).slice(0, 80);
+    else if (e.type === 'ai-title' && e.aiTitle && !meta.aiTitle) meta.aiTitle = String(e.aiTitle).slice(0, 80);
+    if (!meta.cwd && typeof e.cwd === 'string') meta.cwd = e.cwd;
+    if (!HEADER_ONLY && typeof e.timestamp === 'string' && (!meta.lastActive || e.timestamp > meta.lastActive)) meta.lastActive = e.timestamp;
+    if ((e.type === 'user' || e.type === 'assistant') && e.message && !e.isMeta) {
+      if (!HEADER_ONLY) meta.turns++;
+      if (e.type === 'user' && !meta.firstPrompt) {
+        let c = e.message.content;
+        if (Array.isArray(c)) c = c.filter((x) => x && x.type === 'text').map((x) => x.text).join(' ');
+        if (typeof c === 'string') {
+          const t = cleanSnippet(c);
+          if (t && !/^(This session is being continued|Continue from where you left off)/i.test(t)) meta.firstPrompt = t.slice(0, 100);
+        }
+      }
+    }
+  }
+  return meta;
+}
+
 // Every trashed conversation, newest first:
 // { convId, proj, dir, file, sidecar, bytes, deletedAt }.
 function listTrash() {
@@ -406,4 +462,4 @@ function emptyTrash() {
   return { ok: failed === 0, count: entries.length, bytes, failed };
 }
 
-module.exports = { doExport, doImport, discover, findTranscriptFile, trashSession, listTrash, restoreSession, emptyTrash, human };
+module.exports = { doExport, doImport, discover, findTranscriptFile, trashSession, listTrash, restoreSession, emptyTrash, transcriptMeta, human };

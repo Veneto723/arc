@@ -15,6 +15,15 @@ const { execFileSync } = require('child_process');
 
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'cache');
 
+// ISO timestamp → "MM-DD HH:MM" (local) for compact trash-list display.
+function shortStamp(iso) {
+  try {
+    const d = new Date(iso); if (isNaN(d)) return '?';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  } catch { return '?'; }
+}
+
 // Resolve this session's CURRENT account from its state file (fallback: default).
 function currentAccount(C, cfg, session) {
   try {
@@ -744,11 +753,22 @@ function requestTrash(session, argStr) {
   const entries = sync.listTrash();
   if (!entries.length) return { ok: true, plain: true, message: 'trash — empty. (cl:delete moves conversations here; nothing is hard-deleted until cl:trash empty.)' };
   const bytes = entries.reduce((s, e) => s + e.bytes, 0);
-  const lines = [`trash — ${entries.length} deleted conversation${entries.length > 1 ? 's' : ''}, ${sync.human(bytes)} total`];
+  const lines = [`trash — ${entries.length} deleted conversation${entries.length > 1 ? 's' : ''}, ${sync.human(bytes)} total (newest deletion first)`, ''];
   for (const e of entries) {
-    lines.push(`  ${e.convId.slice(0, 8)}  ${sync.human(e.bytes).padStart(9)}  deleted ${e.deletedAt}  ${e.proj}${e.sidecar ? '  (+sidecar)' : ''}`);
+    let m = {}; try { m = sync.transcriptMeta(e.file); } catch {}
+    // Title: a /rename'd name is most meaningful; show the AI title alongside it
+    // when both exist and differ; else the AI title, else a first-prompt snippet.
+    let title = m.customTitle && m.aiTitle && m.aiTitle !== m.customTitle
+      ? `${m.customTitle} — ${m.aiTitle}`
+      : (m.customTitle || m.aiTitle || m.firstPrompt || null);
+    title = title ? (title.length > 64 ? title.slice(0, 63) + '…' : title) : '(untitled)';
+    const used = m.lastActive ? `last used ${shortStamp(m.lastActive)}` : `deleted ${e.deletedAt.slice(5)}`;
+    const turns = m.turns == null ? 'large' : `${m.turns} msg${m.turns === 1 ? '' : 's'}`;
+    const where = m.cwd || e.proj;
+    lines.push(`  ${e.convId.slice(0, 8)}  ${title}`);
+    lines.push(`            ${turns} · ${used} · ${sync.human(e.bytes)} · ${where}${e.sidecar ? ' · +files' : ''}`);
   }
-  lines.push('', '  restore one:  cl:trash restore <id>        purge all:  cl:trash empty');
+  lines.push('', '  restore one:  cl:trash restore <id>   (then: cl --resume <id>)        purge all:  cl:trash empty');
   return { ok: true, plain: true, message: lines.join('\n') };
 }
 
