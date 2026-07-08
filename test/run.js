@@ -281,6 +281,27 @@ try {
     pickConvId('live-28118b62', null, false, has) === 'live-28118b62');
 } catch (e) { ok('cl-conv pickConvId works', false, e.message); }
 
+// ---- cl-help + the cl:help hook (zero-token cheat sheet) --------------------
+section('cl-help + cl:help hook');
+try {
+  const renderHelp = require(path.join(SRC, 'cl-help.js'));
+  ok('cl-help exports a render function', typeof renderHelp === 'function');
+  const sheet = renderHelp();
+  ok('cheat sheet lists cl:help and cl:switch', /cl:help/.test(sheet) && /cl:switch/.test(sheet));
+
+  // End-to-end: the hook must BLOCK cl:help / cl:cl (case-insensitive) and return
+  // the sheet as the reason — zero model tokens, exactly like cl:peek.
+  const hook = path.join(SRC, 'cl-switch-hook.js');
+  for (const trig of ['cl:help', 'cl:cl', 'CL:HELP']) {
+    const r = spawnSync(process.execPath, [hook], { input: JSON.stringify({ prompt: trig }), encoding: 'utf8' });
+    let out = {}; try { out = JSON.parse(r.stdout || '{}'); } catch {}
+    ok(`hook blocks "${trig}" with the cheat sheet`, out.decision === 'block' && /cl — commands/.test(out.reason || ''));
+  }
+  // A non-cl prompt must pass straight through (no block, empty stdout).
+  const pass = spawnSync(process.execPath, [hook], { input: JSON.stringify({ prompt: 'hello world' }), encoding: 'utf8' });
+  ok('non-cl prompt passes through (no block)', (pass.stdout || '').trim() === '');
+} catch (e) { ok('cl:help hook works', false, e.message); }
+
 // ---- PROBE: OS-specific touchpoints (informational — never fails build) ------
 section('platform probe (informational — what a full port would wire up)');
 function has(cmd, args) { try { const r = spawnSync(cmd, args || ['--version'], { encoding: 'utf8', timeout: 5000, windowsHide: true }); return r.status === 0 || (r.stdout || r.stderr || '').length > 0; } catch { return false; } }

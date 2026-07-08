@@ -12,6 +12,7 @@
 //   cl:switch            → cycle to the next account
 //   cl:switch <id>       → switch to a named account
 //   cl:restart           → reload the wrapper + relaunch, same account
+//   cl:help  (cl:cl)     → print the command cheat sheet (zero tokens)
 //   cl:peek              → read-only usage readout of all accounts (no switch)
 //   cl:remove-account <id> → remove an account (alias: cl:delete-account <id>)
 //   … plus add-account / export / import / delete (delete = the current CHAT)
@@ -29,7 +30,7 @@ const core = require('./cl-switch-core');
 // NOTE: delete-account / del-account MUST precede the bare `delete` alternative,
 // else `cl:delete-account` matches `delete` (+ `\b` at the hyphen) and misfires as
 // a CONVERSATION delete. They route to remove-account (account removal), not delete.
-const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|add-account|add|remove-account|rm-account|remove|delete-account|del-account|export|import|delete|peek|usage|trash|restore)\b\s*(.*)$/i;
+const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|add-account|add|remove-account|rm-account|remove|delete-account|del-account|export|import|delete|peek|usage|trash|restore|help|cl)\b\s*(.*)$/i;
 
 function block(reason) {
   // UserPromptSubmit: block the prompt from reaching the model, show `reason`.
@@ -68,6 +69,11 @@ function run(raw) {
   const action = m[1].toLowerCase();
   const arg = (m[2] || '').trim() || null;
 
+  if (action === 'help' || action === 'cl') {
+    // Cheat sheet — rendered here from cl-help (no trigger, no relaunch, ZERO
+    // tokens). Self-contained (own header), so no `[cl]` prefix.
+    return block(require('./cl-help')());
+  }
   if (action === 'peek' || action === 'usage') {
     // Read-only usage readout — rendered entirely here (no trigger, no relaunch).
     // Its message is self-contained (own header), so no `[cl]` prefix.
