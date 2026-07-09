@@ -139,6 +139,11 @@ To update later: `git pull`, re-run the installer, and `cl:restart` any live ses
 | `cl:trash restore <id>` (or `cl:restore <id>`) | restore a deleted conversation from trash | **0** |
 | `cl:trash empty` | **permanently** purge the trash (double-confirmed) | **0** |
 | `cl:restart` | reload the wrapper + relaunch this conversation | **0** |
+| `cl:role <name>` | claim a role in this repo's **fridge** (survives restart + switch) | **0** |
+| `cl:role` | who am I, and who else is working in this repo? | **0** |
+| `cl:note <role\|all> <text>` | stick a note on the fridge for a roommate | **0** |
+| `cl:notes` | read your unread notes (they also arrive automatically) | **0** |
+| `cl:notes all` | the whole fridge, nothing marked read | **0** |
 | `cl:help` (`cl:cl`) | print this cheat sheet | **0** |
 
 The `cl:` forms are plain messages caught by a hook **before** the model runs —
@@ -148,6 +153,56 @@ runs on the exhausted account). That deadlock is exactly why `cl:switch` /
 `cl:restart` / `cl:help` replaced the old `/switch`, `/restart`, and `/cl` slash
 commands — cl-kit ships **no slash commands** now; everything is a zero-token
 `cl:` sentinel.
+
+### The fridge — two sessions, one repo
+
+Run a research session and a coding session on the same repo and they can't see each
+other's work. The fridge is a shared sticky-note board for exactly that: a **room** is
+the git repo root, so every `cl` session started anywhere inside it are roommates.
+
+```
+# terminal 1                      # terminal 2
+cl:role research                  cl:role coding
+cl:note coding P-014 spec changed
+                                  ← statusline shows: 📌 1 from research
+                                  ← the note is in the agent's context on your next prompt
+```
+
+Two things happen without you doing anything. **Notes arrive by themselves** at the
+start of your next turn (an agent can't be interrupted mid-turn, so a turn boundary is
+the only moment a note can land). And the statusline shows `📌 N from research` while
+anything is waiting — counted from the files, so it can't be forgotten or wrong.
+
+Notes are never consumed. Reading one only advances *your* cursor; every other roommate
+still sees it. The board lives in `.plan/`, which ignores itself, so it never enters the
+repo's history.
+
+### "Done" comes from git, not from the agent
+
+Telling an agent to "tick the item off when you're finished" doesn't work — bookkeeping
+is the first thing dropped when context runs short. (Anthropic's own agent-teams docs
+admit it: *"teammates sometimes fail to mark tasks as completed."*) So cl doesn't ask.
+
+When an agent marks a task complete, cl diffs the repo against the `HEAD` it recorded
+when the task was created and **posts the note itself**, carrying the commit sha and the
+changed files:
+
+```
+#3  from coding  ✓ done: Document the fridge + done-gate in README
+    refs: {"task":"3","sha":"a1b2c3d","files":["README.md"]}
+```
+
+Ticking the task *is* the handoff, and it arrives with evidence. Set the policy with
+`features.doneGate` in `~/.claude/cl-config.json` (or `CL_DONE_GATE`):
+
+| mode | behaviour |
+|---|---|
+| `note` *(default)* | always posts; a completion with no commit is posted and flagged `UNVERIFIED` |
+| `strict` | **refuses** to mark a task done when no commit backs it, and tells the agent why |
+| `off` | no notes, no gate |
+
+`note` is the default on purpose: "investigate the flaky test" is a real task that
+produces no commit, and a gate that blocked it would be correct and unusable.
 
 > Trade-off: `cl:` sentinels are plain text, so they don't get the `/` menu's
 > autocomplete (Claude Code's completion is hardcoded to `/` and `@`, with no
