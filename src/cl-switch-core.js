@@ -106,9 +106,11 @@ function accountHeadroom(acc, cache, th) {
   return null;
 }
 
-// Decide the launch account: PREFER a subscription (oauth) with headroom; fall to
-// the most-available api/pool only when all subscriptions are exhausted; else the
-// least-bad. Returns { id, reason } or null when nothing can be judged (no cache).
+// Decide the launch account: PREFER a subscription (oauth) with headroom; when every
+// subscription is exhausted, fall to an API gateway — one with measured pool headroom,
+// or (crucially) a plain gateway with no tracked limit, which counts as available. Only
+// when everything measurable is exhausted do we settle for the least-bad (an exhausted
+// sub). Returns { id, reason } or null when nothing can be judged (no cache).
 function chooseLaunchAccount(cfg, cache) {
   const C = require('./cl-config');
   const th = cfg.thresholds || {};
@@ -121,20 +123,22 @@ function chooseLaunchAccount(cfg, cache) {
   const oauthRoom = oauthJudged.filter((x) => x.s >= 0).sort((x, y) => y.s - x.s);
   if (oauthRoom.length) return { id: oauthRoom[0].a.id, reason: 'subscription has headroom' };
 
-  const apiRoom = cfg.accounts.filter((a) => a.type === 'api').map((a) => ({ a, s: score(a) }))
-    .filter((x) => x.s != null && x.s >= 0).sort((x, y) => y.s - x.s);
-  if (apiRoom.length) {
-    const subLabel = oauthJudged.length ? oauthJudged[0].a.label : 'subscription';
-    return { id: apiRoom[0].a.id, reason: `${subLabel} exhausted → most available` };
-  }
+  // Fall to an API gateway. TWO kinds are usable, and missing the second is the bug
+  // this comment guards: (1) a gateway with measured pool headroom (s >= 0); and (2) a
+  // gateway with NO usage metrics at all (s === null). A plain pay-per-use gateway has
+  // no rate limit to be "full", so "we can't measure it" means AVAILABLE, not "skip it".
+  // Excluding the null case launched onto a 100%-exhausted subscription while a
+  // perfectly usable gateway sat right there. A gateway MEASURED as exhausted (s === -1,
+  // e.g. every pool account in cooldown) is genuinely not usable and correctly drops
+  // through to least-bad below.
+  const apiScored = cfg.accounts.filter((a) => a.type === 'api').map((a) => ({ a, s: score(a) }));
+  const apiRoom = apiScored.filter((x) => x.s != null && x.s >= 0).sort((x, y) => y.s - x.s);
+  const apiPresumed = apiScored.filter((x) => x.s == null);   // no metrics → assumed available
+  const via = oauthJudged.length ? `${oauthJudged[0].a.label} exhausted → ` : '';
+  if (apiRoom.length) return { id: apiRoom[0].a.id, reason: `${via}most available gateway` };
+  if (apiPresumed.length) return { id: apiPresumed[0].a.id, reason: `${via}gateway (assumed available)` };
 
-  if (!oauth.length) {                                    // api-only config
-    const anyApi = cfg.accounts.map((a) => ({ a, s: score(a) })).filter((x) => x.s != null);
-    if (!anyApi.length) return null;
-    const best = anyApi.filter((x) => x.s >= 0).sort((x, y) => y.s - x.s)[0];
-    if (best) return { id: best.a.id, reason: 'most available' };
-  }
-
+  // Everything we CAN measure is exhausted (sub over threshold, any gateway in cooldown).
   const lb = (oauthJudged[0] && oauthJudged[0].a) || C.findAccount(cfg, cfg.defaultAccount) || cfg.accounts[0];
   return { id: lb.id, reason: 'all accounts exhausted → least-bad' };
 }

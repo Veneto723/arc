@@ -88,6 +88,30 @@ try {
   ok('claudeBin resolves to a string', typeof C.claudeBin(cfg) === 'string' && C.claudeBin(cfg).length > 0);
 } catch (e) { ok('cl-config loads', false, e.message); }
 
+// ---- 2b. cl-switch-core: chooseLaunchAccount (launch account selection) -------
+// Regression: a plain API gateway with NO usage metrics (headroom=null) was excluded
+// as a candidate, so launch fell back to a 100%-EXHAUSTED subscription instead of the
+// available gateway. A gateway with no tracked limit must count as available.
+section('cl-switch-core (launch account selection)');
+try {
+  const core = require(path.join(SRC, 'cl-switch-core.js'));
+  const SUB = { id: 'max', type: 'oauth', label: 'MAX' };
+  const GW = { id: 'whale', type: 'api', label: 'GW', baseUrl: 'https://x' };
+  const cfg = (accts) => ({ accounts: accts, defaultAccount: accts[0].id, thresholds: {} });
+  const subUse = (fh) => ({ usage: { data: { five_hour: { utilization: fh }, seven_day: { utilization: 0 } } } });
+  const withPool = (c, fh, status = 'active') => ({ ...c, pool: { rows: [{ status, reason_code: status === 'active' ? null : 'rate_limited', fh }] } });
+  const pick = (c, cache) => (core.chooseLaunchAccount(c, cache) || {}).id;
+
+  ok('sub with headroom wins (prefer the subscription)', pick(cfg([SUB, GW]), subUse(10)) === 'max');
+  ok('THE FIX: exhausted sub + no-metrics gateway -> the GATEWAY', pick(cfg([SUB, GW]), subUse(100)) === 'whale');
+  ok('exhausted sub + gateway with measured headroom -> gateway', pick(cfg([SUB, GW]), withPool(subUse(100), 20)) === 'whale');
+  ok('exhausted sub + gateway measured in cooldown -> least-bad sub', pick(cfg([SUB, GW]), withPool(subUse(100), 100, 'cooldown')) === 'max');
+  ok('no cache -> null (do not guess)', core.chooseLaunchAccount(cfg([SUB, GW]), null) === null);
+  ok('api-only config, no metrics -> the gateway', pick(cfg([GW]), subUse(100)) === 'whale');
+  const r = core.chooseLaunchAccount(cfg([SUB, GW]), subUse(100));
+  ok('reason names the gateway + why', /gateway/.test(r.reason) && /exhausted/.test(r.reason));
+} catch (e) { ok('chooseLaunchAccount works', false, e.message); }
+
 // ---- 3. cl-profile — the per-account credential ISOLATION fix ----------------
 section('cl-profile (credential isolation)');
 try {
