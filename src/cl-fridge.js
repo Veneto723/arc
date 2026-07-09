@@ -202,32 +202,44 @@ function injection(session, cwd) {
     const u = R.unreadFor(room, role);
     if (!u.count) return null;                                        // no delta -> inject NOTHING
 
-    // Rank: [!] high priority first, then newest first.
-    const ranked = [...u.notes].sort((a, b) =>
-      (b.priority === 'high') - (a.priority === 'high') || b.seq - a.seq);
-
-    const lines = [];
-    let used = 0, shown = 0;
-    for (const n of ranked) {
+    const rowFor = (n) => {
       const body = n.body.length > BODY_CLIP ? n.body.slice(0, BODY_CLIP) + '…' : n.body;
-      const row = `  #${n.seq}  from ${n.from}${n.to ? '' : ' (broadcast)'}${n.priority === 'high' ? '  [!]' : ''}\n` +
+      return `  #${n.seq}  from ${n.from}${n.to ? '' : ' (broadcast)'}${n.priority === 'high' ? '  [!]' : ''}\n` +
         `      ${body.replace(/\n/g, '\n      ')}` +
         (n.refs ? `\n      refs: ${JSON.stringify(n.refs).slice(0, 200)}` : '');
-      if (used + row.length > INJECT_MAX) break;
-      lines.push(row); used += row.length; shown++;
+    };
+
+    // Deliver OLDEST unread first (u.notes is already seq-ascending). This makes the
+    // batch a contiguous seq-prefix, so the cursor can advance over EXACTLY what we
+    // delivered — never past an un-shown note. A roommate back from a long absence
+    // catches up in chronological order, batch by batch, and the tail is NEVER
+    // consumed. (The old code ranked newest-first, capped, then marked ALL read — so
+    // the oldest overflow was silently lost. That is the bug this fixes.)
+    const picked = [];
+    let used = 0;
+    for (const n of u.notes) {
+      const row = rowFor(n);
+      if (picked.length && used + row.length > INJECT_MAX) break;     // always show ≥1
+      picked.push(n); used += row.length;
     }
-    const more = u.count - shown;
+    const more = u.count - picked.length;
+    const newCursor = picked[picked.length - 1].seq;                  // last DELIVERED note
+
+    // Display: float [!] high-priority to the top of THIS batch for readability (this
+    // only reorders what we're already showing; the cursor still advances by seq).
+    const display = [...picked].sort((a, b) =>
+      (b.priority === 'high') - (a.priority === 'high') || a.seq - b.seq);
 
     const text =
       `[cl fridge] ${u.count} unread note(s) for "${role}" in room "${room.name}" ` +
       `(left by another cl session working in this folder):\n` +
-      lines.join('\n') +
-      (more > 0 ? `\n  …and ${more} more — run \`cl:notes\` to see them all.` : '') +
-      `\n(They are now marked read. Tell the user what you received before acting on it. ` +
+      display.map(rowFor).join('\n') +
+      (more > 0 ? `\n  …and ${more} more still unread — run \`cl:notes\` to read the next batch.` : '') +
+      `\n(These are now marked read. Tell the user what you received before acting on it. ` +
       `\`cl:notes all\` shows the whole fridge.)`;
 
-    R.markRead(room, role);   // delivered — rd()-only, the notes stay for everyone else
-    return { text, count: u.count, role, room: room.name, shown };
+    R.writeCursor(room, role, newCursor);   // advance ONLY over what we delivered — lossless
+    return { text, count: u.count, role, room: room.name, shown: picked.length };
   } catch { return null; }    // the fridge must NEVER wedge a prompt
 }
 

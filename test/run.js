@@ -869,6 +869,22 @@ try {
   ok('a burst is capped, not dumped', big && big.text.length < 10000);
   ok('and the overflow is summarised', /…and \d+ more/.test(big.text));
   ok('while still reporting the true total', big.count === 80);
+
+  // CATCH-UP after an absence: a roommate back from a long trip must lose NOTHING.
+  // The capped burst above must NOT have consumed the overflow — the cursor advances
+  // only over what was actually delivered, so the rest stay unread. (Regression for the
+  // bug where injection showed ~30 but marked ALL 80 read, silently dropping the tail.)
+  ok('the capped burst did NOT consume the overflow', R2.unreadFor(room2, 'coding').count === 80 - big.shown && big.shown < 80);
+  let drained = big.shown, guard = 0;
+  while (R2.unreadFor(room2, 'coding').count && guard++ < 30) drained += F.injection('sb', repo2).shown;
+  ok('the whole backlog drains over turns — every note once, none skipped',
+    drained === 80 && R2.unreadFor(room2, 'coding').count === 0);
+  // and a returning session catches up in ONE uncapped `cl:notes`
+  R2.writeCursor(room2, 'coding', 0);
+  const expected = R2.unreadFor(room2, 'coding').count;
+  const catchUp = F.requestNotes('sb', '', repo2);
+  ok('cl:notes catches a returning roommate up in one uncapped call',
+    (catchUp.message.match(/#\s*\d+/g) || []).length === expected && expected > 40 && R2.unreadFor(room2, 'coding').count === 0);
 } catch (e) { ok('cl-fridge works', false, e.message); }
 
 // ---- PROBE: environment touchpoints (informational — never fails build) ------
