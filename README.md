@@ -158,6 +158,14 @@ start of your next turn (an agent can't be interrupted mid-turn, so a turn bound
 the only moment a note can land). And the statusline shows `📌 N from research` while
 anything is waiting — counted from the files, so it can't be forgotten or wrong.
 
+**The agents can post too.** An agent can't *type* `cl:note` (the hook eats it before
+the model), but it can **run** the CLI form via its Bash tool — `cl note all "<line>"`,
+`cl note <role> "<line>"`, `cl role`, `cl notes`. The bundled `share-with-roommate`
+skill makes the agent aware it has a roommate and cues *when* to broadcast (a shared
+API/schema change, a decision, a blocker) — and, importantly, when NOT to (routine
+steps). So the two sessions leave each other high-signal notes on their own judgment,
+the way agent-team teammates message each other.
+
 Notes are never consumed. Reading one only advances *your* cursor; every other roommate
 still sees it. The board lives in `.plan/`, which ignores itself, so it never enters the
 repo's history.

@@ -1042,6 +1042,25 @@ async function main() {
   if (userArgs[0] === 'set-key') return cmdSetKey(userArgs.slice(1));
   if (userArgs[0] === 'doctor') return cmdDoctor();
 
+  // Fridge CLI — the AGENT-facing way to leave a roommate a note. The `cl:note`
+  // sentinel is eaten by the UserPromptSubmit hook before the model, so an agent can
+  // never TYPE it; but it can RUN `cl note ...` via its Bash tool, which lands here in a
+  // fresh process (no session restart needed). Reuses the same cl-fridge functions the
+  // sentinels do. Output mirrors the CLI form (`cl note`, not `cl:note`).
+  if (userArgs[0] === 'role' || userArgs[0] === 'note' || userArgs[0] === 'notes') {
+    const fridge = require('./cl-fridge');
+    const session = process.env.CL_SESSION || '';
+    const arg = userArgs.slice(1).join(' ');
+    const cwd = process.cwd();
+    const r = userArgs[0] === 'role' ? fridge.requestRole(session, arg, cwd)
+      : userArgs[0] === 'note' ? fridge.requestNote(session, arg, cwd)
+        : fridge.requestNotes(session, arg, cwd);
+    const msg = String(r.message)
+      .replace(/cl:role/g, 'cl role').replace(/cl:notes/g, 'cl notes').replace(/cl:note/g, 'cl note');
+    process.stdout.write(msg + '\n');
+    process.exit(r.ok ? 0 : 1);
+  }
+
   let respawning = process.env.CL_RESPAWNED === '1';
   if (!respawning) { sweepStaleStates(); migrateProfilesOnce(); } // only the original launch; not re-execs
   // Snapshot the terminal window now, while it is still foreground (before claude

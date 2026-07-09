@@ -587,6 +587,40 @@ try {
   }
 } catch (e) { ok('cl-postcommit works', false, e.message); }
 
+// ---- cl-runner fridge CLI (cl note / cl role — the AGENT-facing surface) --------
+// The agent can't TYPE cl:note (the hook eats it), but it can RUN `cl note ...` via
+// Bash. This exercises that dispatch end to end through the real cl-runner process.
+section('cl-runner fridge CLI (cl note / cl role)');
+try {
+  const runner = path.join(SRC, 'cl-runner.js');
+  const RM = require(path.join(SRC, 'cl-room.js'));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clicli-'));
+  fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  const room = RM.resolveRoom(repo); RM.ensureRoom(room);
+  const S = 'clicli-sess';
+  fs.mkdirSync(path.join(CLAUDE, 'cache'), { recursive: true });
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `cl-role-${S}.json`), JSON.stringify({ room: room.root, role: 'android' }));
+  const env = { ...process.env, CL_SESSION: S };
+
+  const post = spawnSync(process.execPath, [runner, 'note', 'all', 'shared: /login is 202 now'], { cwd: repo, env, encoding: 'utf8' });
+  ok('`cl note` exits 0', post.status === 0, (post.stderr || '').split('\n')[0]);
+  ok('`cl note` posts to the fridge, attributed to the role',
+    RM.allNotes(room).some((n) => /login is 202/.test(n.body) && n.from === 'android'));
+  ok('`cl note` output leaks no cl: sentinel form', !/cl:(note|role|notes)/.test(post.stdout));
+
+  const role = spawnSync(process.execPath, [runner, 'role'], { cwd: repo, env, encoding: 'utf8' });
+  ok('`cl role` reports your role', /your role: android/.test(role.stdout));
+
+  // a session with no role can't post; the hint is rewritten to the CLI form (this is
+  // where the cl:role -> cl role rewrite is actually exercised).
+  const noRole = spawnSync(process.execPath, [runner, 'note', 'all', 'x'], { cwd: repo, env: { ...process.env, CL_SESSION: 'no-role-sess' }, encoding: 'utf8' });
+  const out = noRole.stdout + noRole.stderr;
+  ok('`cl note` with no role is refused and points to `cl role`', noRole.status !== 0 && /cl role/.test(out) && !/cl:role/.test(out));
+
+  fs.rmSync(repo, { recursive: true, force: true });
+  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `cl-role-${S}.json`)); } catch {}
+} catch (e) { ok('cl-runner fridge CLI works', false, e.message); }
+
 // ---- cl-profile: adoptIntoShared (migrate a real dir into the shared one) -------
 // Regression: `tasks` joined SHARED_DIRS. The old code did rmSync(recursive) on the
 // profile's REAL dir before junctioning — which would have DELETED every profile's

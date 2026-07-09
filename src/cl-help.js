@@ -93,6 +93,14 @@ In your terminal (not inside a session):
   cl trash [restore <id>|empty]   manage the deleted-conversation trash
   cl doctor              health check    ·    cl setup    reconfigure
 
+Fridge from a terminal (also how an AGENT posts — it can RUN these, though it can't
+TYPE the cl: form, which the hook eats before the model):
+  cl role                who's in this repo's room, and what's my role?
+  cl note all "<text>"   broadcast a note to every roommate
+  cl note <role> "<text>" leave a note for one roommate
+  cl notes               read your unread notes
+  (the share-with-roommate skill teaches the agent WHEN to broadcast)
+
 Configured accounts: ${accounts.join(', ') || '(none — run `cl setup`)'}
 `;
 }
