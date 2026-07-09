@@ -61,6 +61,13 @@ fi
 # 4. no slash commands — every cl action is a zero-token cl: sentinel (cl:switch,
 #    cl:restart, cl:peek, cl:help, …) caught by the UserPromptSubmit hook.
 
+# 4b. agent skills — capabilities any agent can discover + invoke (show-image: put
+#     an image in front of the human, since Read shows it only to the model).
+skills="$claude_dir/skills"
+mkdir -p "$skills"
+cp -r "$kit"/skills/* "$skills"/ 2>/dev/null || true
+say "  skills -> $skills (show-image)"
+
 # 5. settings.json: hooks + statusline (shared Node wiring)
 node "$scripts/cl-wire-settings.js" "$scripts"
 

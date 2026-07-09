@@ -73,7 +73,13 @@ function fmtDur(ms) {
 // Icons live in scripts/icons/ (regen: make-icons.ps1). Raw toast XML instead of
 // the ToastText02 template because templates can't carry appLogoOverride.
 const ICONS_DIR = path.join(__dirname, 'icons');
-function toast(title, text, kind, focusPid) {
+// `launchUri` (optional) overrides the click action with any protocol URI — e.g. a
+// `file:///…` so clicking the toast opens that file in its default app. Falls back
+// to the cl-focus: click-to-focus protocol when only focusPid is given.
+// `opts.logoUri` replaces the state icon with an arbitrary image (square, uncropped) —
+// e.g. a thumbnail of the very image being announced, which beats any generic glyph.
+// `opts.heroUri` adds a wide banner image above the text.
+function toast(title, text, kind, focusPid, launchUri, opts) {
   // POSIX: no WinRT and no cl-focus: click-to-focus protocol — show a plain desktop
   // notification via the OS notifier (notify-send / osascript), degrading to a
   // silent no-op if none is available. (Icons + click-to-focus are Windows-only.)
@@ -83,16 +89,24 @@ function toast(title, text, kind, focusPid) {
   }
   const q = (s) => String(s).replace(/'/g, "''"); // PowerShell single-quote escape
   const xe = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); // XML escape
+  const o = opts || {};
   const iconFile = path.join(ICONS_DIR, `${kind || 'done'}.png`);
-  const icon = fs.existsSync(iconFile)
-    ? `<image placement="appLogoOverride" hint-crop="circle" src="file:///${xe(iconFile.replace(/\\/g, '/'))}"/>`
-    : '';
+  // A caller-supplied logoUri (e.g. the announced image itself) wins over the state
+  // icon, and is NOT circle-cropped — a QR must stay square to be recognisable.
+  const icon = o.logoUri
+    ? `<image placement="appLogoOverride" src="${xe(o.logoUri)}"/>`
+    : (fs.existsSync(iconFile)
+      ? `<image placement="appLogoOverride" hint-crop="circle" src="file:///${xe(iconFile.replace(/\\/g, '/'))}"/>`
+      : '');
+  const hero = o.heroUri ? `<image placement="hero" src="${xe(o.heroUri)}"/>` : '';
   // Clicking the toast launches the cl-focus: protocol (HKCU-registered →
   // cl-focus.vbs → cl-focus.ps1), which foregrounds the terminal window that
   // hosts this session's claude pid.
-  const activate = focusPid ? ` activationType="protocol" launch="cl-focus:${focusPid}"` : '';
+  const clickUri = launchUri || (focusPid ? `cl-focus:${focusPid}` : null);
+  const activate = clickUri ? ` activationType="protocol" launch="${xe(clickUri)}"` : '';
   const xml =
     `<toast duration="long"${activate}><visual><binding template="ToastGeneric">` + // long ≈ 25s banner
+    hero +
     icon +
     `<text>${xe(title)}</text><text>${xe(text)}</text>` +
     `</binding></visual></toast>`;
@@ -111,6 +125,60 @@ function toast(title, text, kind, focusPid) {
       { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, timeout: 10_000, encoding: 'utf8' });
     if (r.status !== 0) trace(`toast-error status=${r.status} ${String(r.stderr || '').slice(0, 200).replace(/\s+/g, ' ')}`);
   } catch (e) { trace(`toast-error ${String(e && e.message).slice(0, 200)}`); }
+}
+
+// ---- "did this turn just hand off to background work?" ------------------------
+// Stop fires even when the turn ended ONLY because the assistant launched
+// background work (a Workflow, a background Agent/Task, a background Bash). Claude
+// Code auto-resumes the session when that work finishes, so the human is NOT needed
+// and a "ready" toast is a lie. Claude Code exposes no hook field for this (checked
+// against the docs), so we read the transcript the Stop payload points at and
+// inspect ONLY the current turn.
+//
+// FAIL-OPEN: any trouble parsing → return false → we still toast. A spurious toast
+// is annoying; a MISSING one means you wait forever without knowing.
+const BG_SCAN_BYTES = 512 * 1024; // tail only — transcripts reach tens of MB
+const BG_SCAN_ENTRIES = 400;
+
+function isBackgroundLaunch(tu) {
+  const n = tu && tu.name, inp = (tu && tu.input) || {};
+  if (n === 'Workflow') return true;                                        // always background
+  if (n === 'Task' || n === 'Agent') return inp.run_in_background !== false; // background by default
+  if (n === 'Bash') return inp.run_in_background === true;
+  return false;
+}
+
+// A real user PROMPT marks the turn boundary — a tool_result carrier does not.
+function isUserPrompt(o) {
+  if (!o || o.type !== 'user') return false;
+  const c = o.message && o.message.content;
+  if (typeof c === 'string') return true;
+  if (!Array.isArray(c)) return false;
+  return !c.some((x) => x && x.type === 'tool_result');
+}
+
+function turnLaunchedBackgroundWork(transcriptPath) {
+  try {
+    if (!transcriptPath || !fs.existsSync(transcriptPath)) return false;
+    const size = fs.statSync(transcriptPath).size;
+    const start = Math.max(0, size - BG_SCAN_BYTES);
+    const fd = fs.openSync(transcriptPath, 'r');
+    const buf = Buffer.alloc(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    fs.closeSync(fd);
+    let lines = buf.toString('utf8').split('\n').filter(Boolean);
+    if (start > 0) lines.shift();                 // drop the partial first line
+    lines = lines.slice(-BG_SCAN_ENTRIES);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+      if (isUserPrompt(o)) return false;          // hit the turn boundary — nothing found
+      if (o.type === 'assistant') {
+        const c = o.message && o.message.content;
+        if (Array.isArray(c) && c.some((x) => x && x.type === 'tool_use' && isBackgroundLaunch(x))) return true;
+      }
+    }
+    return false;
+  } catch { return false; }
 }
 
 let handled = false;
@@ -142,6 +210,14 @@ function run(raw) {
     const name0 = info0.name || proj0 || (sid ? sid.slice(0, 8) : 'session');
     trace(`wait sid=${sid.slice(0, 8)} name=${name0} msg=${msg.slice(0, 60)}`);
     toast(`${name0} — needs you`, msg.slice(0, 100) || 'Waiting for permission', 'wait', info0.pid);
+    process.exit(0);
+  }
+
+  // A turn that ended by handing off to BACKGROUND work is not "ready" — Claude Code
+  // auto-resumes it. Stay silent, and leave the turn timer running so the LATER,
+  // truthful Stop reports the full elapsed time. ('fail' still always toasts.)
+  if (mode === 'done' && turnLaunchedBackgroundWork(hook.transcript_path)) {
+    trace(`skip-bg sid=${sid.slice(0, 8)} handed off to background work — no toast`);
     process.exit(0);
   }
 
@@ -179,8 +255,15 @@ function run(raw) {
   process.exit(0);
 }
 
-let input = '';
-process.stdin.on('data', (c) => { input += c; });
-process.stdin.on('end', () => run(input));
-process.stdin.on('error', () => run(''));
-setTimeout(() => run(''), 500).unref(); // safety net if stdin never closes
+// Only bootstrap as a HOOK when run directly. Guarded so other tools (e.g. the
+// show-image skill's `notify` mode) can `require` this and reuse toast() without
+// the stdin listener + safety-net timer firing run('') and exiting their process.
+if (require.main === module) {
+  let input = '';
+  process.stdin.on('data', (c) => { input += c; });
+  process.stdin.on('end', () => run(input));
+  process.stdin.on('error', () => run(''));
+  setTimeout(() => run(''), 500).unref(); // safety net if stdin never closes
+}
+
+module.exports = { toast, turnLaunchedBackgroundWork };
