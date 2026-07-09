@@ -72,26 +72,29 @@ function switchTargetLabel(fromId) {
   return next ? next.label : null;
 }
 
-function getToken() {
-  // Each account's login now lives in its own profile dir (~/.claude/cl-profiles/
-  // <id>/.credentials.json), not the shared file. Read the token of the oauth
-  // account whose usage this endpoint reports: the active account if it's oauth,
-  // otherwise the primary oauth account (shown as the secondary "frees up" segment
-  // while an api account is active). Fall back to the shared file pre-migration /
-  // under plain `claude`.
+// The oauth account whose subscription numbers we DISPLAY: the active one when it
+// is oauth, else the primary oauth (shown as the "frees up" segment under a gateway).
+function subscriptionAccount() {
   const a = activeAccount();
-  const oa = (a && a.type === 'oauth') ? a : oauthPrimary();
-  let file = oa ? require('./cl-profile').credsPath(oa.id) : C.CRED_PATH;
+  return (a && a.type === 'oauth') ? a : primaryOauth();
+}
+
+// Read ONE account's token from its own profile dir (~/.claude/cl-profiles/<id>/
+// .credentials.json). Taking the account as an argument — instead of resolving the
+// active one inside — is what lets a refresh fetch EVERY oauth account's usage with
+// the right token, so each account's numbers can be cached under its own id.
+// Falls back to the shared file (pre-migration, or under plain `claude`).
+function tokenFor(acc) {
+  let file = acc ? require('./cl-profile').credsPath(acc.id) : C.CRED_PATH;
   if (!fs.existsSync(file)) file = C.CRED_PATH;
   const creds = JSON.parse(fs.readFileSync(file, 'utf8'));
   return creds.claudeAiOauth.accessToken;
 }
 
-async function fetchUsage() {
-  const token = getToken();
+async function fetchUsageFor(acc) {
   const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${tokenFor(acc)}`,
       'anthropic-version': '2023-06-01',
     },
   });
@@ -126,23 +129,44 @@ function appendHistory(history, data) {
   return next.filter((h) => h.t >= cutoff);
 }
 
-async function getUsageCached(force) {
+// Subscription usage is cached PER ACCOUNT (cache.usageByAccount[id]), with each
+// account's ETA series under cache.historyByAccount[id] — mirroring how gateway
+// accounts are already keyed (cache.gwUsage[id]).
+//
+// The old single `cache.usage` slice carried no account id, so nothing could tell
+// whose numbers it held. Fetched with whatever account was active, it was then read
+// back for ANY oauth account: right after a switch the still-TTL-fresh numbers of the
+// PREVIOUS account were painted under the new account's label (and, looking fresh,
+// suppressed the background refresh that would have corrected them), while cl:peek
+// and auto-select scored every oauth account off that one blob.
+async function getUsageCachedFor(acc, force) {
+  if (!acc) return null;
   const cache = readCacheFile();
-  const cached = cache.usage;
+  const cached = (cache.usageByAccount || {})[acc.id];
   if (!force && cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.data;
   try {
-    const data = await fetchUsage();
-    // Re-read at write time: the sibling getPoolCached() in the same --refresh
-    // worker may have written the pool slice during our await. Spreading the
+    const data = await fetchUsageFor(acc);
+    // Re-read at write time: a sibling slice (pool, another account) in the same
+    // --refresh worker may have been written during our await. Spreading the
     // start-of-call snapshot would clobber it.
     const fresh = readCacheFile();
-    const history = appendHistory(fresh.history, data);
-    writeCacheFile({ ...fresh, usage: { fetchedAt: Date.now(), data }, history });
+    writeCacheFile({
+      ...fresh,
+      usageByAccount: { ...(fresh.usageByAccount || {}), [acc.id]: { fetchedAt: Date.now(), data } },
+      historyByAccount: {
+        ...(fresh.historyByAccount || {}),
+        [acc.id]: appendHistory((fresh.historyByAccount || {})[acc.id], data),
+      },
+    });
     return data;
   } catch (e) {
     // Endpoint is lightly rate-limited; fall back to last known-good data.
     if (cached) {
-      writeCacheFile({ ...readCacheFile(), usage: { fetchedAt: Date.now(), data: cached.data } });
+      const fresh = readCacheFile();
+      writeCacheFile({
+        ...fresh,
+        usageByAccount: { ...(fresh.usageByAccount || {}), [acc.id]: { fetchedAt: Date.now(), data: cached.data } },
+      });
       return cached.data;
     }
     throw e;
@@ -189,8 +213,8 @@ async function getPoolCached() {
 // fetch (the pool query alone can take seconds). A separate detached process
 // refreshes the cache so the next tick is fresh.
 
-function readCachedUsage() {
-  const c = readCacheFile().usage;
+function readCachedUsageFor(accId) {
+  const c = (readCacheFile().usageByAccount || {})[accId];
   return { data: c ? c.data : null, fresh: c ? Date.now() - c.fetchedAt < CACHE_TTL_MS : false };
 }
 function readCachedPool() {
@@ -240,13 +264,29 @@ function triggerBackgroundRefresh(wantPool) {
 
 // Runs in the detached child: refresh caches, then release the lock.
 async function runRefresh(wantPool, force) {
-  const apiAccts = ((cfg && cfg.accounts) || []).filter((a) => a.type === 'api' && GW.usageUrlFor(a));
+  const accts = (cfg && cfg.accounts) || [];
+  const oauthAccts = accts.filter((a) => a.type === 'oauth');
+  const apiAccts = accts.filter((a) => a.type === 'api' && GW.usageUrlFor(a));
+  // allSettled, not all: one account's expired/absent token must not abort the
+  // refresh of the others (each fetch already falls back to its own cached slice).
+  // Fetching EVERY oauth account — not just the active one — is what keeps cl:peek
+  // and auto-select honest, exactly as each gateway is already refreshed.
+  await Promise.allSettled([
+    ...oauthAccts.map((a) => getUsageCachedFor(a, force)),
+    wantPool && poolConfigured() ? getPoolCached() : Promise.resolve(null),
+    ...apiAccts.map((a) => getGwUsageCached(a, force)), // each gateway's own /v1/usage
+  ]);
+  // Forget accounts that no longer exist. Per-account slices otherwise accumulate
+  // forever after a remove/rename, and a ghost's ancient timestamp would make
+  // cl:peek's "is the cache fresh?" check age off an account nobody has.
+  // Guarded on accts.length so an unreadable config can never empty the cache.
   try {
-    await Promise.all([
-      getUsageCached(force),
-      wantPool && poolConfigured() ? getPoolCached() : Promise.resolve(null),
-      ...apiAccts.map((a) => getGwUsageCached(a, force)), // each gateway's own /v1/usage
-    ]);
+    if (accts.length) {
+      const live = new Set(accts.map((a) => a.id));
+      const cur = readCacheFile();
+      const keep = (o) => Object.fromEntries(Object.entries(o || {}).filter(([id]) => live.has(id)));
+      writeCacheFile({ ...cur, usageByAccount: keep(cur.usageByAccount), historyByAccount: keep(cur.historyByAccount), gwUsage: keep(cur.gwUsage) });
+    }
   } catch {}
   try { fs.unlinkSync(`${CACHE_PATH}.refresh.lock`); } catch {}
 }
@@ -680,10 +720,10 @@ async function main() {
     for (;;) {
       try {
         const [data, poolRows] = await Promise.all([
-          fetchUsage(),
+          fetchUsageFor(subscriptionAccount()),
           isApi && poolConfigured() ? getPoolCached() : Promise.resolve(null),
         ]);
-        const history = readCacheFile().history;
+        const history = (readCacheFile().historyByAccount || {})[(subscriptionAccount() || {}).id] || [];
         const sessionEta = computeEtaMinutes(history, 'session', data.five_hour.utilization);
         const weekEta = computeEtaMinutes(history, 'week', data.seven_day.utilization);
         process.stdout.write('\x1Bc'); // clear screen
@@ -703,7 +743,10 @@ async function main() {
   writeActiveConv(); // bridge cl<->claude session id so `cl` can preserve this session on switch
   const stdinUsage = usageFromStdin(sl);
 
-  const usage = readCachedUsage();
+  // Read the slice belonging to the account whose numbers we're showing — never a
+  // slice that some other account happened to populate.
+  const subAcc = subscriptionAccount();
+  const usage = readCachedUsageFor(subAcc && subAcc.id);
   const usageData = stdinUsage || usage.data; // stdin is fresher/more accurate
   const pool = isApi && poolConfigured() ? readCachedPool() : { rows: null, fresh: true };
 
@@ -722,7 +765,9 @@ async function main() {
   const needRefresh = !usage.fresh || (isApi && poolConfigured() && !pool.fresh) || anyGwStale;
   if (needRefresh) triggerBackgroundRefresh(isApi);
 
-  const history = readCacheFile().history;
+  // This account's OWN series — a shared one interleaved both accounts' utilization
+  // and produced a nonsense trend (and ETA) across a switch.
+  const history = (readCacheFile().historyByAccount || {})[subAcc && subAcc.id] || [];
   const sessionEta = usageData ? computeEtaMinutes(history, 'session', usageData.five_hour.utilization) : null;
   const weekEta = usageData ? computeEtaMinutes(history, 'week', usageData.seven_day.utilization) : null;
 

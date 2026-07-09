@@ -445,9 +445,15 @@ function accountUsage(acc) {
   try {
     const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'usage-monitor-cache.json'), 'utf8'));
     const stale = (t) => (t && Date.now() - t > 10 * 60_000 ? ' (stale)' : '');
-    if (acc.type === 'oauth' && c.usage && c.usage.data && c.usage.data.five_hour) {
-      const d = c.usage.data;
-      return `5h ${Math.round(d.five_hour.utilization)}% · 7d ${Math.round(d.seven_day.utilization)}%${stale(c.usage.fetchedAt)}`;
+    if (acc.type === 'oauth') {
+      // This account's OWN slice (see cl-switch-core.oauthUsageSlice) — the picker
+      // must not show every subscription the same numbers.
+      const sub = core.oauthUsageSlice(acc, c, cfg);
+      const d = sub && sub.data;
+      if (d && d.five_hour) {
+        const sd = d.seven_day || {};
+        return `5h ${Math.round(d.five_hour.utilization)}% · 7d ${Math.round(sd.utilization)}%${stale(sub.fetchedAt)}`;
+      }
     }
     if (acc.type === 'api') {
       const gw = c.gwUsage && c.gwUsage[acc.id];
@@ -1334,7 +1340,8 @@ async function main() {
       // Interactive account picker: claude is dead, cl-runner owns the TTY.
       reloadCfg(); // reflect accounts added/edited since launch
       const chosen = await pickAccount(account);
-      if (chosen && chosen !== account) {
+      const moved = !!(chosen && chosen !== account);
+      if (moved) {
         switchCount++;
         account = chosen;
         process.stdout.write(`\x1b[36m[cl] switching to ${accountLabel(account)} — continuing conversation...\x1b[0m\n`);
@@ -1342,6 +1349,7 @@ async function main() {
         process.stdout.write(`\x1b[2m[cl] staying on ${accountLabel(account)}.\x1b[0m\n`);
       }
       writeState({ account, switchCount, convId, pinnedEffort });
+      if (moved) core.refreshUsageNow(6_000); // same as cl:switch — don't paint the old account's usage
       await new Promise(r => setTimeout(r, 200));
       continue; // loop top relaunches --resume convId on `account`
     }
@@ -1377,6 +1385,10 @@ async function main() {
       // The loop top re-opens THIS conversation via --resume convId (convStarted
       // is now true), so the same chat continues on the other account.
       process.stdout.write(`\x1b[36m[cl] switching to ${accountLabel(account)} — continuing conversation...\x1b[0m\n`);
+      // The caches still hold the PREVIOUS account's usage, and it still looks fresh
+      // to the TTL — so without this the new account's statusline would show the old
+      // account's numbers. Refresh before claude repaints. Bounded; never throws.
+      if (next) core.refreshUsageNow(6_000);
       await new Promise(r => setTimeout(r, 400));
       continue;
     }

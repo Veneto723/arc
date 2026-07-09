@@ -66,16 +66,23 @@ function readUsageCache() {
 // time), peek SYNCHRONOUSLY refreshes the cache first (subscription + gateways),
 // bounded so it never hangs, and skips the fetch when the cache is already fresh.
 // On timeout/failure it falls back to whatever's cached (still shown with its age).
-function refreshUsageForPeek() {
+function refreshUsageForPeek(cfg) {
   if (process.env.CL_PEEK_NO_REFRESH === '1') return; // opt out → instant, cache-only peek
   const PEEK_FRESH_MS = 15_000; // a re-peek within 15s reuses the cache, no refetch
   try {
     const cache = readUsageCache();
     const now = Date.now();
-    const usageAge = cache && cache.usage && cache.usage.fetchedAt ? now - cache.usage.fetchedAt : Infinity;
-    const gwAges = cache && cache.gwUsage ? Object.values(cache.gwUsage).map((g) => (g && g.fetchedAt ? now - g.fetchedAt : Infinity)) : [];
-    const oldestGw = gwAges.length ? Math.max(...gwAges) : 0;
-    if (usageAge < PEEK_FRESH_MS && oldestGw < PEEK_FRESH_MS) return; // already fresh
+    const accts = (cfg && cfg.accounts) || [];
+    // Age only the slices of accounts that STILL EXIST. The cache keeps entries for
+    // removed accounts, and one of those (forever old) would otherwise make every
+    // peek look stale and refetch.
+    const ageOf = (slice) => (slice && slice.fetchedAt ? now - slice.fetchedAt : Infinity);
+    const oldest = (ages) => (ages.length ? Math.max(...ages) : 0); // nothing to age = fresh
+    const oldestSub = oldest(accts.filter((a) => a.type === 'oauth')
+      .map((a) => ageOf(cache && cache.usageByAccount && cache.usageByAccount[a.id])));
+    const oldestGw = oldest(accts.filter((a) => a.type === 'api')
+      .map((a) => ageOf(cache && cache.gwUsage && cache.gwUsage[a.id])));
+    if (oldestSub < PEEK_FRESH_MS && oldestGw < PEEK_FRESH_MS) return; // already fresh
     const mon = path.join(__dirname, 'usage-monitor.js');
     // --force bypasses the per-slice TTLs: a 3-min-old gateway value is "fresh" to
     // the normal refresh (5-min TTL), but peek must show CURRENT data.
@@ -83,14 +90,45 @@ function refreshUsageForPeek() {
   } catch { /* refresh timed out / failed — fall back to cached data */ }
 }
 
+// A bounded, FORCED refresh of every account's usage. Called the moment the account
+// changes (cl:switch / the picker), when the caches still hold the old account's
+// numbers. A switch already kills and relaunches claude — a visible pause — so
+// spending ~a second here buys a first statusline render that is both correctly
+// attributed and fresh, instead of the new account's label over the old one's data.
+// The refresh worker fetches EVERY oauth account, so it does not depend on the
+// session state file having been rewritten first. Bounded; never throws.
+function refreshUsageNow(timeoutMs) {
+  try {
+    const mon = path.join(__dirname, 'usage-monitor.js');
+    execFileSync(process.execPath, [mon, '--refresh', '--with-pool', '--force'],
+      { timeout: timeoutMs || 6_000, stdio: 'ignore', windowsHide: true });
+    return true;
+  } catch { return false; } // slow network must never wedge a switch; the statusline catches up
+}
+
+// One oauth account's usage slice, by id. Subscription usage is cached per account
+// (cache.usageByAccount[id]) because the endpoint reports whoever's token was used.
+// The legacy un-keyed cache.usage records no owner, so it is only attributable when
+// exactly ONE oauth account is configured; with two, trusting it hands one account's
+// numbers to the other (which is precisely how every account came out "exhausted").
+// `cfg` omitted → assume the single-account case, preserving the old behaviour.
+function oauthUsageSlice(acc, cache, cfg) {
+  if (!cache) return null;
+  const keyed = cache.usageByAccount && cache.usageByAccount[acc.id];
+  if (keyed) return keyed;
+  const oauthCount = cfg ? (cfg.accounts || []).filter((a) => a.type === 'oauth').length : 1;
+  return oauthCount <= 1 && cache.usage ? cache.usage : null;
+}
+
 // Headroom score for an account from the usage cache: higher = more free.
 //   null = can't judge (no data)   ·   -1 = exhausted   ·   0..100 = % headroom
-function accountHeadroom(acc, cache, th) {
+function accountHeadroom(acc, cache, th, cfg) {
   if (!cache) return null;
   const SW_S = (th && th.switchSessionPct) != null ? th.switchSessionPct : 92;
   const SW_W = (th && th.switchWeekPct) != null ? th.switchWeekPct : 95;
   if (acc.type === 'oauth') {
-    const d = cache.usage && cache.usage.data;
+    const slice = oauthUsageSlice(acc, cache, cfg);
+    const d = slice && slice.data;
     if (!d || !d.five_hour || typeof d.five_hour.utilization !== 'number') return null;
     const fh = d.five_hour.utilization;                   // seven_day may be absent in a partial cache
     const sd = d.seven_day && typeof d.seven_day.utilization === 'number' ? d.seven_day.utilization : 0;
@@ -114,7 +152,7 @@ function accountHeadroom(acc, cache, th) {
 function chooseLaunchAccount(cfg, cache) {
   const C = require('./cl-config');
   const th = cfg.thresholds || {};
-  const score = (a) => accountHeadroom(a, cache, th);
+  const score = (a) => accountHeadroom(a, cache, th, cfg);
   const oauth = cfg.accounts.filter((a) => a.type === 'oauth').map((a) => ({ a, s: score(a) }));
   const oauthJudged = oauth.filter((x) => x.s != null);
 
@@ -175,7 +213,7 @@ function buildPeek(session) {
   let C, cfg;
   try { C = require('./cl-config'); cfg = C.loadConfig(); }
   catch (e) { return { ok: false, message: `cl usage — config unreadable (${e.message}). Fix ~/.claude/cl-config.json or run \`cl setup\`.` }; }
-  refreshUsageForPeek(); // fire a fresh fetch first — peek must not show stale data
+  refreshUsageForPeek(cfg); // fire a fresh fetch first — peek must not show stale data
   const cache = readUsageCache();
   const current = session ? currentAccount(C, cfg, session) : null;
   const pct = (v) => (v == null ? '  ?' : String(Math.round(v)).padStart(3));
@@ -186,12 +224,13 @@ function buildPeek(session) {
     const mark = a.id === current ? '   ← current' : '';
     const label = a.label || a.id;
     if (a.type === 'oauth') {
-      if (cache && cache.usage && cache.usage.data && cache.usage.data.five_hour) {
-        const d = cache.usage.data;
+      const slice = oauthUsageSlice(a, cache, cfg); // THIS account's numbers, not whoever refreshed last
+      if (slice && slice.data && slice.data.five_hour) {
+        const d = slice.data;
         const sd = d.seven_day || {};                    // partial cache may lack seven_day
         const reset = fmtReset(d.five_hour.resets_at) || fmtReset(sd.resets_at);
         const rp = reset ? `  (resets ${reset})` : '';
-        lines.push(`  ${label} [subscription]   5h ${pct(d.five_hour.utilization).trim()}%  ·  7d ${pct(sd.utilization).trim()}%${rp}   ${ageStr(cache.usage.fetchedAt)}${mark}`);
+        lines.push(`  ${label} [subscription]   5h ${pct(d.five_hour.utilization).trim()}%  ·  7d ${pct(sd.utilization).trim()}%${rp}   ${ageStr(slice.fetchedAt)}${mark}`);
       } else {
         lines.push(`  ${label} [subscription]   (no usage data)${mark}`);
       }
@@ -888,4 +927,4 @@ function requestTrash(session, argStr) {
   return { ok: true, plain: true, message: lines.join('\n') };
 }
 
-module.exports = { requestSwitch, requestRestart, requestPicker, requestAddAccount, requestRemoveAccount, requestRename, doRename, requestDelete, requestTrash, currentAccount, buildPeek, chooseLaunchAccount, accountHeadroom, readUsageCache, addApiAccountResolved, readAddKey, CACHE_DIR };
+module.exports = { requestSwitch, requestRestart, requestPicker, requestAddAccount, requestRemoveAccount, requestRename, doRename, requestDelete, requestTrash, currentAccount, buildPeek, chooseLaunchAccount, accountHeadroom, oauthUsageSlice, refreshUsageNow, readUsageCache, addApiAccountResolved, readAddKey, CACHE_DIR };

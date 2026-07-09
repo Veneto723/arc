@@ -117,6 +117,54 @@ try {
   ok('busy gateway is labelled "optimistic"', /optimistic/.test(reason(cfg([SUB, GW]), withPool(subUse(100), 100, 'cooldown'))));
 } catch (e) { ok('chooseLaunchAccount works', false, e.message); }
 
+// ---- 2b. per-account subscription usage attribution --------------------------
+// Regression: subscription usage lived in ONE un-keyed slice (cache.usage), fetched
+// with whichever account happened to be active. Right after a switch it was still
+// TTL-fresh, so the PREVIOUS account's numbers were painted under the new account's
+// label (and, looking fresh, suppressed the refresh that would have fixed them);
+// cl:peek and auto-select scored every oauth account off that same blob.
+section('cl-switch-core (per-account usage attribution)');
+try {
+  const core = require(path.join(SRC, 'cl-switch-core.js'));
+  const A = { id: 'veneto', type: 'oauth', label: 'veneto' };
+  const B = { id: 'whale', type: 'oauth', label: 'whale' };
+  const cfg2 = { accounts: [A, B], defaultAccount: 'veneto', thresholds: {} }; // two subs
+  const cfg1 = { accounts: [A], defaultAccount: 'veneto', thresholds: {} };    // one sub
+  const slice = (fh, sd) => ({ fetchedAt: Date.now(), data: { five_hour: { utilization: fh }, seven_day: { utilization: sd } } });
+
+  const keyed = { usageByAccount: { veneto: slice(96, 52), whale: slice(17, 96) } };
+  const sA = core.oauthUsageSlice(A, keyed, cfg2);
+  const sB = core.oauthUsageSlice(B, keyed, cfg2);
+  ok('each oauth account reads its OWN slice', sA.data.five_hour.utilization === 96 && sB.data.five_hour.utilization === 17);
+
+  const TH = { switchSessionPct: 92, switchWeekPct: 95 };
+  ok('veneto exhausted via its own 5h (96 >= 92)', core.accountHeadroom(A, keyed, TH, cfg2) === -1);
+  ok('whale exhausted via its own 7d (96 >= 95)', core.accountHeadroom(B, keyed, TH, cfg2) === -1);
+
+  // A healthy account must keep its headroom even when its roommate is exhausted.
+  const mixed = { usageByAccount: { veneto: slice(10, 10), whale: slice(99, 99) } };
+  ok('healthy account keeps headroom while roommate is exhausted',
+    core.accountHeadroom(A, mixed, {}, cfg2) === 90 && core.accountHeadroom(B, mixed, {}, cfg2) === -1);
+  ok('auto-select picks the account that actually has headroom',
+    (core.chooseLaunchAccount(cfg2, mixed) || {}).id === 'veneto');
+
+  // THE BUG: an un-keyed legacy blob has no owner. With two subs it must not be
+  // handed to either — better to admit ignorance than to mis-attribute.
+  const legacy = { usage: slice(5, 5) };
+  ok('legacy un-keyed blob is applied to NEITHER of two oauth accounts',
+    core.oauthUsageSlice(A, legacy, cfg2) === null && core.oauthUsageSlice(B, legacy, cfg2) === null);
+  ok('...so auto-select refuses to guess rather than mis-attribute',
+    core.chooseLaunchAccount(cfg2, legacy) === null);
+
+  // With exactly ONE oauth account the legacy blob is unambiguous — still honoured,
+  // so an existing single-subscription install keeps working across the upgrade.
+  ok('legacy blob still honoured when a single oauth account owns it',
+    core.oauthUsageSlice(A, legacy, cfg1).data.five_hour.utilization === 5);
+
+  const both = { usage: slice(1, 1), usageByAccount: { veneto: slice(42, 7) } };
+  ok('a keyed slice beats the legacy blob', core.oauthUsageSlice(A, both, cfg1).data.five_hour.utilization === 42);
+} catch (e) { ok('per-account usage attribution works', false, e.message); }
+
 // ---- 3. cl-profile — the per-account credential ISOLATION fix ----------------
 section('cl-profile (credential isolation)');
 try {
