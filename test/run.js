@@ -263,6 +263,153 @@ try {
   ok('leaves the malformed file untouched (no silent clobber)', fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8') === bad);
 } catch (e) { ok('cl-wire-settings works', false, e.message); }
 
+// ---- cl-anchor (has a doc's claim about the code gone stale?) -------------------
+section('cl-anchor (doc/code staleness)');
+try {
+  const A = require(path.join(SRC, 'cl-anchor.js'));
+  const RM = require(path.join(SRC, 'cl-room.js'));
+  const { execFileSync } = require('child_process');
+
+  // --- parsing ---
+  const doc = 'blah\n<!-- cl:anchor src/auth.ts#handleLogin -->\nit validates the nonce\n'
+    + '# cl:anchor lib/db.py#connect\n';
+  const parsed = A.parseAnchors(doc, 'docs/plan.md');
+  ok('finds anchors in any comment syntax', parsed.length === 2);
+  ok('splits file#symbol', parsed[0].file === 'src/auth.ts' && parsed[0].symbol === 'handleLogin');
+
+  // --- definition detection (the fingerprint) ---
+  ok('js function', A.isDefinitionLine('function handleLogin(req) {', 'handleLogin'));
+  ok('js const arrow', A.isDefinitionLine('const handleLogin = (req) => {', 'handleLogin'));
+  ok('python def', A.isDefinitionLine('def connect(dsn):', 'connect'));
+  ok('object method', A.isDefinitionLine('  handleLogin(req) {', 'handleLogin'));
+  ok('a MENTION is not a definition', !A.isDefinitionLine('  return handleLogin;', 'handleLogin'));
+  ok('a COMMENT mentioning it is not a definition', !A.isDefinitionLine('// handleLogin does the thing', 'handleLogin'));
+
+  // --- block extraction + hashing ---
+  const src = ['const x = 1;', 'function handleLogin(req) {', '  check(req);', '  return ok;', '}', 'const y = 2;'].join('\n');
+  const f = A.findSymbol(src, 'handleLogin');
+  ok('block starts at the definition line', f.startLine === 2);
+  ok('block ends at the closing brace (indent <= base)', f.endLine === 5);
+  ok('missing symbol -> null', A.findSymbol(src, 'nope') === null);
+  // the brace fix must not swallow the next block in an indentation-scoped language
+  const py = ['import os', 'def connect(dsn):', '    return db(dsn)', '', 'def close():', '    pass'].join('\n');
+  const pf = A.findSymbol(py, 'connect');
+  ok('python block stops before the next def', pf.startLine === 2 && pf.endLine === 3);
+  ok('python block excludes the following function', !/def close/.test(pf.slice));
+  ok('hash is stable across trailing whitespace + CRLF',
+    A.hashSlice('a\nb') === A.hashSlice('a  \r\nb\t'));
+  ok('hash CHANGES when the body changes', A.hashSlice('a\nb') !== A.hashSlice('a\nc'));
+
+  // --- the honest limitation, asserted rather than hidden ---
+  const renamed = src.replace('handleLogin', 'handleSignIn');
+  ok('a RENAME reports gone, not renamed (fingerprint, not AST)', A.findSymbol(renamed, 'handleLogin') === null);
+
+  // --- end to end against a real repo ---
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'anchor-'));
+  const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  g('init', '-q'); g('config', 'user.email', 't@t.t'); g('config', 'user.name', 't');
+  fs.mkdirSync(path.join(repo, 'src')); fs.mkdirSync(path.join(repo, 'docs'));
+  fs.writeFileSync(path.join(repo, 'src', 'auth.js'), src);
+  fs.writeFileSync(path.join(repo, 'docs', 'plan.md'),
+    '<!-- cl:anchor src/auth.js#handleLogin -->\nhandleLogin validates the request.\n');
+  g('add', '-A'); g('commit', '-qm', 'seed');
+
+  const room = RM.resolveRoom(repo);
+  ok('git grep finds the anchored doc', A.anchorDocs(room.root).includes('docs/plan.md'));
+  // an UNCOMMITTED doc still makes claims about the code — --untracked, not just tracked
+  fs.writeFileSync(path.join(repo, 'docs', 'draft.md'), '<!-- cl:anchor src/auth.js#handleLogin -->\n');
+  ok('and finds an uncommitted one too', A.anchorDocs(room.root).includes('docs/draft.md'));
+  fs.rmSync(path.join(repo, 'docs', 'draft.md'));
+  // …but never an ignored one
+  fs.writeFileSync(path.join(repo, '.gitignore'), 'secret/\n');
+  fs.mkdirSync(path.join(repo, 'secret'));
+  fs.writeFileSync(path.join(repo, 'secret', 'x.md'), '<!-- cl:anchor src/auth.js#handleLogin -->\n');
+  ok('ignored paths are never scanned', !A.anchorDocs(room.root).some((d) => d.startsWith('secret/')));
+  fs.rmSync(path.join(repo, 'secret'), { recursive: true, force: true });
+  fs.rmSync(path.join(repo, '.gitignore'));
+
+  let rep = A.inspect(room);
+  ok('first sighting SEALS the anchor', rep.results.length === 1 && rep.results[0].status === 'sealed');
+  A.writeState(room, rep.next);
+
+  // A doc EXAMPLE (`cl:anchor src/auth.ts#handleLogin` in a README) points at nothing
+  // and never has. It must never nag — cl-kit's own README contains exactly this.
+  fs.writeFileSync(path.join(repo, 'docs', 'readme.md'),
+    'Put one next to a claim: <!-- cl:anchor src/nowhere.ts#imaginary -->\n');
+  g('add', '-A'); g('commit', '-qm', 'add a doc with an example anchor');
+  const ex = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+  const exRes = ex.results.find((r) => r.symbol === 'imaginary');
+  ok('a never-resolved anchor is "unresolved", not stale', exRes.status === 'unresolved');
+  ok('and posts no note (a doc example must not nag)', ex.posted === 0);
+  // Regression: the `unresolved` state entry must not count as "previously sealed",
+  // or the example flips to stale on the SECOND run and nags forever.
+  const ex2 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+  ok('and it STAYS quiet on the second run', ex2.posted === 0
+    && ex2.results.find((r) => r.symbol === 'imaginary').status === 'unresolved');
+
+  rep = A.inspect(room);
+  ok('unchanged code -> ok', rep.results[0].status === 'ok');
+  ok('and head is unchanged, so a check would be skipped', rep.headChanged === false);
+  A.writeState(room, rep.next);
+
+  // change the code -> stale
+  fs.writeFileSync(path.join(repo, 'src', 'auth.js'), src.replace('  check(req);', '  skipCheck(req);'));
+  g('add', '-A'); g('commit', '-qm', 'weaken the check');
+  rep = A.inspect(room);
+  ok('changed code -> changed', rep.results[0].status === 'changed');
+  ok('and head moved, so the check runs', rep.headChanged === true);
+
+  // notify: a [!] note, once
+  const S = 'clanchortest';
+  const F = require(path.join(SRC, 'cl-fridge.js'));
+  const rf = F.roleFile(S);
+  fs.mkdirSync(path.dirname(rf), { recursive: true });
+  fs.writeFileSync(rf, JSON.stringify({ room: room.root, role: 'coding' }));
+  try {
+    const n1 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    ok('a newly stale anchor posts exactly one note', n1.posted === 1);
+    const note = RM.allNotes(room).pop();
+    ok('the note is HIGH priority (jumps the queue)', note.priority === 'high');
+    ok('the note names the doc AND the anchor', /docs\/plan\.md/.test(note.body) && /auth\.js#handleLogin/.test(note.body));
+    ok('and carries machine-readable refs', note.refs.why === 'changed' && note.refs.doc === 'docs/plan.md');
+
+    const n2 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    ok('an ALREADY-stale anchor does not nag again', n2.posted === 0);
+
+    // delete the file -> a NEW kind of staleness, so it speaks again
+    fs.rmSync(path.join(repo, 'src', 'auth.js'));
+    g('add', '-A'); g('commit', '-qm', 'drop auth');
+    const n3 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    ok('a gone FILE is reported (status escalated)', n3.results[0].status === 'gone-file');
+
+    // reseal: the current code becomes the baseline again
+    const rr = A.requestAnchors(S, 'reseal', repo);
+    ok('cl:anchors reseal clears the stale flags', /resealed 2 anchor\(s\)/.test(rr.message));
+    // Reseal means "the current code is the baseline", NOT "stop telling me". An anchor
+    // whose target file is still gone is still a lie, so it speaks again on the next
+    // check. Only fixing the doc (or deleting the anchor) actually silences it.
+    ok('reseal does NOT silence an anchor that is still broken',
+      A.checkAndNotify(room, 'coding', { force: true, quiet: true }).posted === 1);
+    // Deleting the anchor from the doc is what ends it.
+    fs.writeFileSync(path.join(repo, 'docs', 'plan.md'), 'handleLogin used to validate the request.\n');
+    const after = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    ok('removing the anchor ends the alarm', after.posted === 0 && after.checked === 1);
+
+    // head-unchanged short-circuit
+    const n4 = A.checkAndNotify(room, 'coding');
+    ok('no new commit -> the check is skipped entirely', n4.skipped === 'head-unchanged');
+
+    // no repo -> no anchors, no crash
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'noanchor-'));
+    const rb = A.requestAnchors(S, '', bare);
+    ok('outside a git repo it says so, rather than throwing', rb.ok === false && /not a git repo/.test(rb.message));
+    fs.rmSync(bare, { recursive: true, force: true });
+  } finally {
+    try { fs.unlinkSync(rf); } catch {}
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+} catch (e) { ok('cl-anchor works', false, e.message); }
+
 // ---- cl-done (derive "done" from git, not from the agent's word) ---------------
 section('cl-done (git-derived completion)');
 try {

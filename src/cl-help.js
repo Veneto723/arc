@@ -50,6 +50,12 @@ The fridge — sticky notes between sessions working in the same folder:
                          (a room = the git repo root you started in. The statusline
                           shows "📌 N from research" when notes are waiting.)
 
+  cl:anchors             which doc claims about the code have gone STALE — ZERO tokens
+  cl:anchors reseal      after fixing the docs: the current code becomes the baseline
+                         (put <!-- cl:anchor src/auth.ts#handleLogin --> next to a claim
+                          in a doc. When a commit rewrites that symbol, a [!] note lands
+                          on the fridge and the other session sees it on its next turn.)
+
   Completing a task POSTS ITSELF. When an agent marks a task done, cl diffs the repo
   against the HEAD sha it recorded when the task was created, and sticks a note on the
   fridge carrying the commit sha and the changed files. Nobody has to remember to say

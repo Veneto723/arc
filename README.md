@@ -144,6 +144,8 @@ To update later: `git pull`, re-run the installer, and `cl:restart` any live ses
 | `cl:note <role\|all> <text>` | stick a note on the fridge for a roommate | **0** |
 | `cl:notes` | read your unread notes (they also arrive automatically) | **0** |
 | `cl:notes all` | the whole fridge, nothing marked read | **0** |
+| `cl:anchors` | which doc claims about the code have gone **stale** | **0** |
+| `cl:anchors reseal` | after fixing the docs, make the current code the baseline | **0** |
 | `cl:help` (`cl:cl`) | print this cheat sheet | **0** |
 
 The `cl:` forms are plain messages caught by a hook **before** the model runs —
@@ -203,6 +205,39 @@ Ticking the task *is* the handoff, and it arrives with evidence. Set the policy 
 
 `note` is the default on purpose: "investigate the flaky test" is a real task that
 produces no commit, and a gate that blocked it would be correct and unusable.
+
+### When a doc's claim about the code goes stale
+
+`done` notes prove work *happened*. The other half of drift is a doc that quietly stops
+being true. Put an **anchor** next to the claim:
+
+```markdown
+<!-- cl:anchor src/auth.ts#handleLogin -->
+P-014: handleLogin validates the nonce before issuing a session.
+```
+
+cl seals the anchor the first time it sees it (hashing that symbol's block) and
+re-checks on every commit. Rewrite `handleLogin` and a **high-priority** note lands on
+the fridge — which the research session receives at the top of its next turn, ranked
+above everything else, plus a desktop toast:
+
+```
+#2  from coding  [!]
+    STALE: docs/plan.md describes src/auth.ts#handleLogin, but the code it points at CHANGED.
+    refs: {"doc":"docs/plan.md","anchor":"src/auth.ts#handleLogin","why":"changed"}
+```
+
+`cl:anchors` lists them; `cl:anchors reseal` re-baselines after you've fixed the docs.
+
+Honest limits. This is a **fingerprint, not a parse** — cl-kit has zero dependencies and
+must run on Windows, macOS and Linux, so tree-sitter (which is the *right* answer, see
+[fiberplane/drift](https://github.com/fiberplane/drift)) is out. It finds the first line
+that defines the symbol and hashes the block down to the next line indented no deeper.
+So: a **rename** reports "gone", not "renamed"; a **reformat** reports "changed" even
+when the meaning didn't. It over-reports rather than under-reports, which is the right
+bias for an alarm — a false STALE costs you a glance, a missed one costs a wrong
+decision. An anchor that never resolved (a doc *example*, or a typo) is reported as
+`unresolved` and never nags.
 
 > Trade-off: `cl:` sentinels are plain text, so they don't get the `/` menu's
 > autocomplete (Claude Code's completion is hardcoded to `/` and `@`, with no

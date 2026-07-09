@@ -16,6 +16,7 @@
 //   cl:role <name>       → claim a role in this room (the "fridge" — see cl-room.js)
 //   cl:note <to> <text>  → leave a sticky note for a roommate ("all" = broadcast)
 //   cl:notes [all]       → read your unread notes (marks read); `all` = whole fridge
+//   cl:anchors [reseal]  → which doc claims about the code have gone STALE (see cl-anchor.js)
 //   cl:peek              → read-only usage readout of all accounts (no switch)
 //   cl:remove-account <id> → remove an account (alias: cl:delete-account <id>)
 //   … plus add-account / export / import / delete (delete = the current CHAT)
@@ -35,7 +36,7 @@ const core = require('./cl-switch-core');
 // a CONVERSATION delete. They route to remove-account (account removal), not delete.
 // `notes` MUST precede `note` (a plain alternation would try `note` first and only
 // backtrack; being explicit costs nothing and documents the intent).
-const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|help|cl)\b\s*(.*)$/i;
+const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|anchors|help|cl)\b\s*(.*)$/i;
 
 function block(reason) {
   // UserPromptSubmit: block the prompt from reaching the model, show `reason`.
@@ -124,6 +125,12 @@ function run(raw) {
     const r = action === 'role' ? fridge.requestRole(session, arg || '', cwd)
       : action === 'note' ? fridge.requestNote(session, arg || '', cwd)
         : fridge.requestNotes(session, arg || '', cwd);
+    return r.plain ? block(r.message) : clBlock(r.message);
+  }
+  if (action === 'anchors') {
+    // Doc-vs-code staleness readout. Pure file ops + a git grep — zero tokens.
+    const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
+    const r = require('./cl-anchor').requestAnchors(session, arg || '', cwd);
     return r.plain ? block(r.message) : clBlock(r.message);
   }
   if (action === 'peek' || action === 'usage') {

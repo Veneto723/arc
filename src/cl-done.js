@@ -212,7 +212,13 @@ function onTaskCompleted(payload, session) {
   const role = F.getRole(session, room);
   if (!v.post || !role) return { block: false };
   try { R.appendNote(room, buildNote(payload, evidence, v.proven, role)); } catch {}
-  return { block: false, posted: true, proven: v.proven };
+
+  // A completion is the moment the code most recently moved, so it is also the moment
+  // to ask whether the DOCS still describe it. Any anchor that just went stale becomes
+  // a [!] note, which the research session receives at the top of its next turn.
+  let stale = 0;
+  try { stale = require('./cl-anchor').checkAndNotify(room, role).posted || 0; } catch {}
+  return { block: false, posted: true, proven: v.proven, stale };
 }
 
 module.exports = { git, head, evidenceSince, recordBaseline, readBaseline, verdict, buildNote, onTaskCreated, onTaskCompleted, mode, baselineFile };
