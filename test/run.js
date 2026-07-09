@@ -542,6 +542,51 @@ try {
   }
 } catch (e) { ok('cl-done works', false, e.message); }
 
+// ---- cl-postcommit (every commit -> a fridge note, no task list needed) --------
+section('cl-postcommit (commit -> fridge note)');
+try {
+  const PC = require(path.join(SRC, 'cl-postcommit.js'));
+  const RM = require(path.join(SRC, 'cl-room.js'));
+  const { execFileSync } = require('child_process');
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+  const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
+  g('init', '-q'); g('config', 'user.email', 't@t.t'); g('config', 'user.name', 't');
+  const room = RM.resolveRoom(repo); RM.ensureRoom(room);
+  // arm a role for our session (cache is under the sandbox HOME)
+  const cacheDir = path.join(os.homedir(), '.claude', 'cache');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  fs.writeFileSync(path.join(cacheDir, 'cl-role-pcsess.json'), JSON.stringify({ room: room.root, role: 'android' }));
+
+  // no CL_SESSION -> no note (a non-cl commit must not spam the fridge)
+  fs.writeFileSync(path.join(repo, 'a.js'), 'x'); g('add', '-A'); g('commit', '-qm', 'first');
+  delete process.env.CL_SESSION;
+  ok('a commit with no CL_SESSION posts nothing', PC.run(repo).posted === false);
+  ok('  and the fridge is still empty', RM.allNotes(room).length === 0);
+
+  // CL_SESSION with a role -> a note attributed to that role
+  fs.writeFileSync(path.join(repo, 'feature.js'), 'y'); g('add', '-A'); g('commit', '-qm', 'add the overlay fix');
+  process.env.CL_SESSION = 'pcsess';
+  try {
+    const r = PC.run(repo);
+    ok('a cl commit posts a note', r.posted === true && r.role === 'android');
+    const n = RM.allNotes(room).pop();
+    ok('  from the committing role, broadcast', n.from === 'android' && n.to === null);
+    ok('  body names the commit subject', /committed: add the overlay fix/.test(n.body));
+    ok('  refs carry the real sha + files', n.refs.sha === PC.git(repo, ['rev-parse', '--short', 'HEAD']) && n.refs.files.includes('feature.js'));
+    ok('  the roommate sees it, the committer does not',
+      RM.unreadFor(room, 'frontend').count === 1 && RM.unreadFor(room, 'android').count === 0);
+
+    // a role claimed in a DIFFERENT room does not attribute here
+    fs.writeFileSync(path.join(cacheDir, 'cl-role-elsewhere.json'), JSON.stringify({ room: 'z:\\other', role: 'x' }));
+    ok('roleFor ignores a role from another room', PC.roleFor('elsewhere', room) === null);
+  } finally {
+    delete process.env.CL_SESSION;
+    try { fs.unlinkSync(path.join(cacheDir, 'cl-role-pcsess.json')); } catch {}
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+} catch (e) { ok('cl-postcommit works', false, e.message); }
+
 // ---- cl-profile: adoptIntoShared (migrate a real dir into the shared one) -------
 // Regression: `tasks` joined SHARED_DIRS. The old code did rmSync(recursive) on the
 // profile's REAL dir before junctioning — which would have DELETED every profile's

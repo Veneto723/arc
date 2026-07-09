@@ -189,6 +189,24 @@ Ticking the task *is* the handoff, and it arrives with evidence. Set the policy 
 `note` is the default on purpose: "investigate the flaky test" is a real task that
 produces no commit, and a gate that blocked it would be correct and unusable.
 
+### Every commit as a note (post-commit hook)
+
+The `done` note above needs the agent to use the task list. If your sessions just
+**commit** (no task list), install a `post-commit` hook and every commit becomes a note
+on its own — the other session sees "android committed X, touching these files" at its
+next turn, no one typing anything:
+
+```sh
+# in the repo the two sessions share:
+printf '#!/bin/sh\nnode "$HOME/.claude/scripts/cl-postcommit.js" >/dev/null 2>&1 || true\n' \
+  > .git/hooks/post-commit && chmod +x .git/hooks/post-commit
+```
+
+It attributes the commit to the fridge role of whoever ran `git commit` (`CL_SESSION` →
+role), broadcasts a note with the sha + changed files, and is a **no-op** for any commit
+made outside a cl session (so manual commits don't spam). It runs after the commit, so
+it can never block or fail it. Remove the hook file to disable.
+
 ### When a doc's claim about the code goes stale
 
 `done` notes prove work *happened*. The other half of drift is a doc that quietly stops
