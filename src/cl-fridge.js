@@ -181,4 +181,54 @@ function badge(session, cwd) {
   } catch { return null; }
 }
 
-module.exports = { requestRole, requestNote, requestNotes, refreshRole, badge, getRole, sessionPid, roleFile };
+// ---- the fridge AT THE DOOR ---------------------------------------------------
+// Turn-start injection. A hook cannot interrupt an agent mid-turn, and Claude Code
+// only fires UserPromptSubmit on a HUMAN prompt — so a turn boundary is the one and
+// only moment a roommate's note can be delivered. You read the fridge when you walk
+// into the kitchen, never while you're asleep. That's not a limitation of this
+// design; it is the design.
+//
+// Hook output is capped at 10,000 characters, so this MUST be a ranked digest, never
+// a dump: high-priority first, then newest, bodies clipped, overflow summarised.
+const INJECT_MAX = 4000;      // well under the 10k cap, leaving room for the frame
+const BODY_CLIP = 400;
+
+function injection(session, cwd) {
+  try {
+    if (!session || !fs.existsSync(roleFile(session))) return null;   // cheapest early-out
+    const room = R.resolveRoom(resolveCwd(session, cwd));
+    const role = getRole(session, room);
+    if (!role) return null;
+    const u = R.unreadFor(room, role);
+    if (!u.count) return null;                                        // no delta -> inject NOTHING
+
+    // Rank: [!] high priority first, then newest first.
+    const ranked = [...u.notes].sort((a, b) =>
+      (b.priority === 'high') - (a.priority === 'high') || b.seq - a.seq);
+
+    const lines = [];
+    let used = 0, shown = 0;
+    for (const n of ranked) {
+      const body = n.body.length > BODY_CLIP ? n.body.slice(0, BODY_CLIP) + '…' : n.body;
+      const row = `  #${n.seq}  from ${n.from}${n.to ? '' : ' (broadcast)'}${n.priority === 'high' ? '  [!]' : ''}\n` +
+        `      ${body.replace(/\n/g, '\n      ')}` +
+        (n.refs ? `\n      refs: ${JSON.stringify(n.refs).slice(0, 200)}` : '');
+      if (used + row.length > INJECT_MAX) break;
+      lines.push(row); used += row.length; shown++;
+    }
+    const more = u.count - shown;
+
+    const text =
+      `[cl fridge] ${u.count} unread note(s) for "${role}" in room "${room.name}" ` +
+      `(left by another cl session working in this folder):\n` +
+      lines.join('\n') +
+      (more > 0 ? `\n  …and ${more} more — run \`cl:notes\` to see them all.` : '') +
+      `\n(They are now marked read. Tell the user what you received before acting on it. ` +
+      `\`cl:notes all\` shows the whole fridge.)`;
+
+    R.markRead(room, role);   // delivered — rd()-only, the notes stay for everyone else
+    return { text, count: u.count, role, room: room.name, shown };
+  } catch { return null; }    // the fridge must NEVER wedge a prompt
+}
+
+module.exports = { requestRole, requestNote, requestNotes, refreshRole, badge, injection, getRole, sessionPid, roleFile };

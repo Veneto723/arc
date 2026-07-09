@@ -6,6 +6,12 @@
 // second pair on one repo? Give it a git worktree — a different folder is a
 // different room, so the FILESYSTEM does the isolation, not a config field.
 //
+// The room follows the session's CURRENT cwd, which Claude Code reports per prompt
+// and which can DRIFT. Moving around inside a repo is harmless (we walk up to the
+// git root), but `cd`-ing into a DIFFERENT repo genuinely changes rooms — the role
+// claimed in the old room stops applying, and `cl:role` will say you have none.
+// That is intended ("you moved flats"), but it is surprising, so: documented.
+//
 // Design notes (each one earned; see docs/research/agent-handoff/SUMMARY.md):
 //  * APPEND-ONLY, never consumed. Linda tuple spaces distinguish rd() (read, tuple
 //    stays) from in() (take, tuple removed). This is rd()-only: a note is never
@@ -56,7 +62,9 @@ function repoRoot(startDir) {
 // The room a session started in `cwd` belongs to.
 function resolveRoom(cwd) {
   const root = canonical(repoRoot(cwd || process.cwd()));
-  return { root, planDir: path.join(root, PLAN_DIR), name: path.basename(root) };
+  // basename of a drive root ("e:\") is "" — fall back to the path so a room is
+  // never nameless. (Yes, people really do keep a git repo at a drive root.)
+  return { root, planDir: path.join(root, PLAN_DIR), name: path.basename(root) || root };
 }
 
 // Create .plan/ + its self-ignore. Idempotent; cheap to call every time.

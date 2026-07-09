@@ -63,12 +63,48 @@ function clBlock(message) {
   return block(`[cl] ${paint(message, alertColor(message))}`);
 }
 
+// An ordinary prompt — i.e. a TURN BOUNDARY, the only moment a roommate's note can
+// be delivered (an agent cannot be interrupted mid-turn). Hand over anything waiting
+// on the fridge as `additionalContext`, then let the prompt through untouched.
+//
+// No unread notes → exit 0 with EMPTY stdout, which injects nothing. That is exactly
+// what this hook has always done for ordinary prompts, so the "stay silent when there
+// is no delta" path is the already-proven one, not a new assumption.
+// Opt-in diagnostic (CL_FRIDGE_DEBUG=1): record exactly what Claude Code hands this
+// hook. It earned its keep — a hand-supplied `cwd` in a test masked the fact that the
+// session's real cwd had drifted to a different room. Off by default; never throws.
+function fridgeTrace(o) {
+  if (process.env.CL_FRIDGE_DEBUG !== '1') return;
+  try {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    fs.appendFileSync(path.join(os.homedir(), '.claude', 'cache', 'cl-fridge-hook.log'),
+      `${new Date().toISOString()} ${JSON.stringify(o)}\n`);
+  } catch {}
+}
+
+function deliverFridge(hook) {
+  const session = (process.env.CL_SESSION || '').trim();
+  const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
+  let injected = false, err = null;
+  try {
+    const inj = require('./cl-fridge').injection(session, cwd);
+    if (inj) {
+      injected = true;
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: inj.text },
+      }));
+    }
+  } catch (e) { err = String(e && e.message).slice(0, 120); /* NEVER wedge a prompt */ }
+  fridgeTrace({ session: session || null, cwd, payloadKeys: Object.keys(hook), injected, err });
+  process.exit(0);
+}
+
 function run(raw) {
   let hook = {};
   try { hook = JSON.parse(raw || '{}'); } catch {}
   const prompt = typeof hook.prompt === 'string' ? hook.prompt : '';
   const m = prompt.match(TRIGGER_RX);
-  if (!m) process.exit(0); // not a cl: command — let the prompt through
+  if (!m) deliverFridge(hook); // not a cl: command — deliver waiting notes, let it through
 
   const session = (process.env.CL_SESSION || '').trim();
   const action = m[1].toLowerCase();

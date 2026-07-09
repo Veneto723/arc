@@ -44,7 +44,8 @@ The fridge — sticky notes between sessions working in the same folder:
                          restart + switch, like your model and effort
   cl:role                who am I, who else is here?
   cl:note <role> <text>  leave a note for a roommate  ·  cl:note all <text> broadcasts
-  cl:notes               read YOUR unread notes (marks them read) — ZERO tokens
+  cl:notes               read YOUR unread notes now (they also arrive AUTOMATICALLY
+                         at the start of your next turn) — ZERO tokens
   cl:notes all           the whole fridge, nothing marked read
                          (a room = the git repo root you started in. The statusline
                           shows "📌 N from research" when notes are waiting.)

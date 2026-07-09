@@ -316,6 +316,7 @@ try {
   ok('room resolves to the git repo root from a subdir', rTop.root === rDeep.root);
   const outside = path.join(base, 'loose'); fs.mkdirSync(outside);
   ok('no repo → the folder itself is the room', R.resolveRoom(outside).root === R.canonical(outside));
+  ok('a room is never nameless', !!R.resolveRoom(repo).name && !!R.resolveRoom(process.platform === 'win32' ? 'C:\\' : '/').name);
 
   // 2) the fridge self-ignores
   R.ensureRoom(rTop);
@@ -426,6 +427,29 @@ try {
   // FAIL-OPEN: a truncated ledger must not silently swallow notes
   R2.writeCursor(room2, 'coding', 999);                    // cursor past the end
   ok('a cursor past the end re-reads rather than skipping', R2.unreadFor(room2, 'coding').count > 0);
+
+  // ---- turn-start injection (the "fridge at the door") ----
+  // Proven live: a hook's additionalContext really does reach the model.
+  R2.markRead(room2, 'coding');
+  ok('injection is null when there is no delta (hook stays silent)', F.injection('sb', repo2) === null);
+  ok('injection is null with no role', F.injection('zz', repo2) === null);
+  R2.appendNote(room2, { from: 'research', to: 'coding', body: 'ordinary note' });
+  R2.appendNote(room2, { from: 'research', to: 'coding', priority: 'high', body: 'URGENT anchor broke' });
+  const countBeforeInject = R2.noteCount(room2);
+  const inj = F.injection('sb', repo2);
+  ok('injection returns a digest for unread notes', inj && inj.count === 2);
+  ok('digest names the room + role', /room "proj"/.test(inj.text) && /for "coding"/.test(inj.text));
+  ok('HIGH priority is ranked first', inj.text.indexOf('URGENT anchor broke') < inj.text.indexOf('ordinary note'));
+  ok('digest stays far under the 10k hook cap', inj.text.length < 10000);
+  ok('injection marks them read — delivered exactly once', F.injection('sb', repo2) === null);
+  ok('but the notes stay on the fridge (rd()-only)', R2.noteCount(room2) === countBeforeInject);
+
+  // a burst must be ranked + summarised, never dumped (the 10k cap is a hard limit)
+  for (let i = 0; i < 80; i++) R2.appendNote(room2, { from: 'research', to: 'coding', body: 'filler '.repeat(40) + i });
+  const big = F.injection('sb', repo2);
+  ok('a burst is capped, not dumped', big && big.text.length < 10000);
+  ok('and the overflow is summarised', /…and \d+ more/.test(big.text));
+  ok('while still reporting the true total', big.count === 80);
 } catch (e) { ok('cl-fridge works', false, e.message); }
 
 // ---- PROBE: OS-specific touchpoints (informational — never fails build) ------
