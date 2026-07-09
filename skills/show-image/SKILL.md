@@ -38,7 +38,7 @@ It opens the image in the OS default viewer and prints a one-line confirmation. 
 
 Flags: `--dry` prints the command without opening (for testing).
 
-**`CL_SHOW_IMAGE` — the human controls how intrusive this may be:**
+**The human controls how intrusive this may be.** The mode comes from `CL_SHOW_IMAGE`, else from `features.showImage` in `~/.claude/cl-config.json` (a standing preference), else `open`:
 
 | mode | behaviour |
 |---|---|
@@ -51,4 +51,4 @@ In `notify`/`off` the script prints the path and exits 0. **Do not fall back to 
 ## Notes
 - Works on Windows (`start`), macOS (`open`), Linux (`xdg-open`). No dependencies.
 - Headless/SSH sessions have no viewer — the script says so and prints the path instead of failing silently.
-- For a **QR code** you may ALSO render it as scannable text in the chat (block characters) if you have the encoded URL — that needs no window at all and is often nicer. Use this skill when you only have the image file.
+- In `notify` mode the toast previews the image itself: a **wide** image (screenshot) uses the 2:1 banner, a **square-ish** one (QR, diagram) uses an uncropped square thumbnail.
