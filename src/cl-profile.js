@@ -175,4 +175,23 @@ function renameProfile(oldId, newId) {
   return true;
 }
 
-module.exports = { PROFILES_DIR, profileDir, credsPath, ensureProfile, hasCreds, seedCreds, renameProfile, SHARED_DIRS, adoptIntoShared };
+// Quarantine an account's profile dir (its login + local data) when the account is
+// removed. MOVE it to PROFILES_DIR/.trash/<id>-<ts> rather than leaving it behind —
+// an abandoned dir is an orphan that clutters the profile list and can still carry
+// stale per-profile state (e.g. an MCP registration) — or hard-deleting it (removal
+// stays recoverable: move the dir back to restore). The `.` prefix keeps the trash
+// out of the profile namespace (account ids can't start with a dot). Returns the
+// trash path, or null if there was no dir. THROWS if the dir can't be moved because
+// a live session on that account still holds it open (EPERM/EBUSY) — the caller
+// leaves it in place and tells the user to remove it once that session exits.
+function removeProfile(accId) {
+  const dir = profileDir(accId);
+  if (!fs.existsSync(dir)) return null;
+  const trashRoot = path.join(PROFILES_DIR, '.trash');
+  fs.mkdirSync(trashRoot, { recursive: true });
+  const dest = path.join(trashRoot, `${accId}-${Date.now()}`);
+  fs.renameSync(dir, dest); // atomic within the volume; throws if a live session holds it
+  return dest;
+}
+
+module.exports = { PROFILES_DIR, profileDir, credsPath, ensureProfile, hasCreds, seedCreds, renameProfile, removeProfile, SHARED_DIRS, adoptIntoShared };

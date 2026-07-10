@@ -32,6 +32,13 @@ const C = (() => {
   }
   throw new Error('cl-config.js not found next to cl-mcp');
 })();
+// cl-profile lives alongside cl-config (../src in the repo, ../ when deployed).
+const P = (() => {
+  for (const p of ['../src/cl-profile.js', '../cl-profile.js']) {
+    try { return require(p); } catch {}
+  }
+  return null; // optional: account_remove degrades to config-only if unavailable
+})();
 
 // ---- config file I/O ---------------------------------------------------------
 
@@ -181,6 +188,11 @@ function toolAccountRemove(args) {
   }
   const backup = writeRaw(raw);
 
+  // Quarantine the per-account profile dir to recoverable trash — same as the
+  // cl:remove-account hook — so a removal never leaves an orphan in cl-profiles.
+  let profileTrash = null, profileInUse = false;
+  if (P) { try { profileTrash = P.removeProfile(args.id); } catch (e) { profileInUse = true; } }
+
   const out = {
     removed: args.id,
     fixes,
@@ -189,9 +201,11 @@ function toolAccountRemove(args) {
     backup,
     note: LIVE_NOTE + ' Sessions currently RUNNING on the removed account keep working until they exit or cl:switch.',
   };
+  if (profileTrash) { out.profileTrash = profileTrash; out.note += ` Its profile (login + local data) was MOVED to recoverable trash (${profileTrash}) — move it back to restore.`; }
+  if (profileInUse) out.note += ' Its profile dir was left in place (a live session is using it) — remove it after that session exits.';
   if (removed.type === 'oauth' && removed.credentials && fs.existsSync(removed.credentials)) {
     out.credentialsFile = removed.credentials;
-    out.note += ` The captured login file was NOT deleted (${removed.credentials}) — remove it yourself if unwanted.`;
+    out.note += ` A legacy login file was NOT deleted (${removed.credentials}) — remove it yourself if unwanted.`;
   }
   return out;
 }

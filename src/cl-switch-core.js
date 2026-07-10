@@ -638,8 +638,8 @@ const CONFIRM_WORDS = new Set(['confirm', '--confirm', 'yes', '--yes', 'y']);
 function pendingRmPath(session) { return path.join(CACHE_DIR, `cl-rmpending-${session}.json`); }
 
 // Remove `id` from cl-config.json: backup → remove → fix references → validate
-// (rollback on failure). NEVER deletes the captured credential file (recoverable).
-// Returns { backup, fixes[], credFile }.
+// (rollback on failure) → quarantine the account's profile dir to recoverable trash.
+// Nothing is hard-deleted. Returns { backup, fixes[], credFile, profileTrash, profileInUse }.
 function removeAccountFromConfig(C, id) {
   const bak = C.CONFIG_PATH + '.bak-' + Date.now();
   const raw = JSON.parse(fs.readFileSync(C.CONFIG_PATH, 'utf8'));
@@ -655,7 +655,13 @@ function removeAccountFromConfig(C, id) {
   try { C.loadConfig(); }
   catch (e) { fs.copyFileSync(bak, C.CONFIG_PATH); throw new Error(`config rejected (${e.message}) — restored`); }
   const credFile = (removed.type === 'oauth' && removed.credentials && fs.existsSync(removed.credentials)) ? removed.credentials : null;
-  return { backup: bak, fixes, credFile };
+  // Quarantine the per-account profile dir so removal doesn't leave an orphan in
+  // cl-profiles (the bug that stranded MAX/work). Recoverable (moved, not deleted).
+  // If a live session still holds the dir the move fails — leave it and report.
+  let profileTrash = null, profileInUse = false;
+  try { profileTrash = require('./cl-profile').removeProfile(id); }
+  catch (e) { profileInUse = true; }
+  return { backup: bak, fixes, credFile, profileTrash, profileInUse };
 }
 
 // Rename an account in cl-config.json: id + (one-name) label + all references
@@ -786,7 +792,7 @@ function requestRemoveAccount(session, argStr) {
         `REMOVE account "${acc.id}"${acc.label && acc.label !== acc.id.toUpperCase() ? ` (${acc.label})` : ''}` +
         ` · ${acc.type}${acc.email ? ` · ${acc.email}` : ''}?` + '\n' +
         `  • cl-config.json is backed up first; references (switch order / default) are auto-fixed\n` +
-        `  • its captured login file is KEPT (never deleted) so removal is recoverable\n` +
+        `  • its profile (login + local data) is MOVED to recoverable trash (cl-profiles/.trash), never hard-deleted\n` +
         `  CONFIRM within 2 min:  cl:remove-account ${acc.id} confirm     ·     or ignore this to cancel`,
     };
   }
@@ -809,8 +815,10 @@ function requestRemoveAccount(session, argStr) {
         ? `  ${live} live session${live > 1 ? 's' : ''} ${keep} running (same key);\n`
           + `  ${live > 1 ? 'they' : 'it'} will drop to "${newDefault}" on next switch/restart.\n`
         : '') +
-      (res.credFile ? `  its login file was KEPT at ${res.credFile} — delete it yourself if you want it gone.\n` : '') +
-      `  reverse it by restoring the backup: ${res.backup}`,
+      (res.profileTrash ? `  its profile (login + local data) → recoverable trash: ${res.profileTrash}\n` : '') +
+      (res.profileInUse ? `  ⚠ profile dir left in place — a live session is using it; remove cl-profiles/${acc.id} after it exits.\n` : '') +
+      (res.credFile ? `  its legacy login file was KEPT at ${res.credFile} — delete it yourself if you want it gone.\n` : '') +
+      `  reverse it by restoring the backup: ${res.backup}${res.profileTrash ? ' (and moving the profile dir back)' : ''}`,
   };
 }
 

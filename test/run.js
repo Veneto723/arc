@@ -239,6 +239,21 @@ try {
     fs.readFileSync(P.credsPath('acctA'), 'utf8').includes('tok-TEST') &&
     fs.readFileSync(P.credsPath('acctB'), 'utf8').includes('tok-OTHER'));
   ok('ensureProfile is idempotent', P.ensureProfile('acctA') === dirA);
+
+  // removeProfile: account removal must QUARANTINE the profile dir (recoverable),
+  // never abandon it in place — that abandonment is what stranded MAX/work.
+  const dirB = P.profileDir('acctB');
+  const trashed = P.removeProfile('acctB');
+  ok('removeProfile returns a .trash path (moved, not hard-deleted)',
+    !!trashed && trashed.startsWith(path.join(P.PROFILES_DIR, '.trash')) && fs.existsSync(trashed));
+  ok('...the original profile dir is GONE (no orphan left in cl-profiles)', !fs.existsSync(dirB));
+  ok('...the login survives in trash, so removal is recoverable',
+    fs.existsSync(path.join(trashed, '.credentials.json')) &&
+    fs.readFileSync(path.join(trashed, '.credentials.json'), 'utf8').includes('tok-OTHER'));
+  ok('removing one account leaves the others untouched', fs.existsSync(P.profileDir('acctA')));
+  ok('removeProfile on a nonexistent account is a safe no-op (null)', P.removeProfile('never-existed') === null);
+  // the graveyard must never be mistaken for a profile: account ids can't start with '.'
+  ok('.trash is outside the account namespace', !/^[a-z]/i.test(path.basename(path.join(P.PROFILES_DIR, '.trash'))));
 } catch (e) { ok('cl-profile works', false, e.message); }
 
 // ---- 4. cl-sync — trash (list / restore / empty / transcriptMeta) ------------
