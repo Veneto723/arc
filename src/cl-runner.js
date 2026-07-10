@@ -1101,6 +1101,13 @@ async function main() {
   const state = readState();
   let account = state.account;
   let switchCount = state.switchCount;
+  // Fresh `cl` launch (not a switch/restart respawn): if the cached usage is stale,
+  // fetch it NOW — synchronously, bounded — so BOTH the auto-selection just below
+  // and the very first statusline render use current numbers. Claude Code streams
+  // live limits only AFTER its first API response, so without this the first paint
+  // falls back to whatever the cache last held (possibly hours old). Skipped when
+  // the cache is already fresh, so back-to-back relaunches don't refetch.
+  if (!respawning && !core.usageCacheFresh(cfg, 60_000)) core.refreshUsageNow(6_000);
   if (!respawning && forceAccount) {
     const acc = C.findAccount(cfg, forceAccount);
     if (!acc) {

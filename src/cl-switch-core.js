@@ -106,6 +106,31 @@ function refreshUsageNow(timeoutMs) {
   } catch { return false; } // slow network must never wedge a switch; the statusline catches up
 }
 
+// True when EVERY configured account that CAN report usage has a slice younger than
+// `withinMs`. Ages only accounts that still exist (a removed account's ancient slice
+// must not make the cache look forever stale). Used to decide whether a fresh launch
+// needs a synchronous refresh before claude paints. No config / no accounts / no
+// cache → false (nothing to trust yet), so the caller refreshes.
+function usageCacheFresh(cfg, withinMs, cache) {
+  cache = cache || readUsageCache(); // fixture-injectable for tests; disk by default
+  if (!cache) return false;
+  const accts = (cfg && cfg.accounts) || [];
+  if (!accts.length) return false;
+  const now = Date.now();
+  const fresh = (slice) => !!(slice && slice.fetchedAt && (now - slice.fetchedAt) < withinMs);
+  let GW = null; try { GW = require('./gw-usage'); } catch {}
+  return accts.every((a) => {
+    if (a.type === 'oauth') return fresh((cache.usageByAccount || {})[a.id]);
+    if (a.type === 'api') {
+      // A gateway with no usage endpoint never gets a slice — it can't be "stale",
+      // so it must not hold the whole cache stale forever.
+      if (!GW || !GW.usageUrlFor(a)) return true;
+      return fresh((cache.gwUsage || {})[a.id]);
+    }
+    return true;
+  });
+}
+
 // One oauth account's usage slice, by id. Subscription usage is cached per account
 // (cache.usageByAccount[id]) because the endpoint reports whoever's token was used.
 // The legacy un-keyed cache.usage records no owner, so it is only attributable when
@@ -927,4 +952,4 @@ function requestTrash(session, argStr) {
   return { ok: true, plain: true, message: lines.join('\n') };
 }
 
-module.exports = { requestSwitch, requestRestart, requestPicker, requestAddAccount, requestRemoveAccount, requestRename, doRename, requestDelete, requestTrash, currentAccount, buildPeek, chooseLaunchAccount, accountHeadroom, oauthUsageSlice, refreshUsageNow, readUsageCache, addApiAccountResolved, readAddKey, CACHE_DIR };
+module.exports = { requestSwitch, requestRestart, requestPicker, requestAddAccount, requestRemoveAccount, requestRename, doRename, requestDelete, requestTrash, currentAccount, buildPeek, chooseLaunchAccount, accountHeadroom, oauthUsageSlice, refreshUsageNow, usageCacheFresh, readUsageCache, addApiAccountResolved, readAddKey, CACHE_DIR };

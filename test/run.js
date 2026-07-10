@@ -163,6 +163,20 @@ try {
 
   const both = { usage: slice(1, 1), usageByAccount: { veneto: slice(42, 7) } };
   ok('a keyed slice beats the legacy blob', core.oauthUsageSlice(A, both, cfg1).data.five_hour.utilization === 42);
+
+  // usageCacheFresh gates the launch-time refresh: fresh cache → skip, stale/missing
+  // → refresh. Ages only accounts that still exist; never throws. (3rd arg injects
+  // a fixture cache; on the real call site it reads the on-disk cache.)
+  const aged = (ms) => ({ fetchedAt: Date.now() - ms, data: { five_hour: { utilization: 1 }, seven_day: { utilization: 1 } } });
+  const freshBoth = { usageByAccount: { veneto: aged(1000), whale: aged(2000) } };
+  ok('both accounts fresh → cache is fresh (skip launch refresh)', core.usageCacheFresh(cfg2, 60_000, freshBoth) === true);
+  ok('one account stale → not fresh (refresh)', core.usageCacheFresh(cfg2, 60_000, { usageByAccount: { veneto: aged(1000), whale: aged(120_000) } }) === false);
+  ok('one account missing its slice → not fresh (refresh)', core.usageCacheFresh(cfg2, 60_000, { usageByAccount: { veneto: aged(1000) } }) === false);
+  ok('a removed account\'s ancient slice is IGNORED (only configured accounts aged)',
+    core.usageCacheFresh(cfg2, 60_000, { usageByAccount: { veneto: aged(1000), whale: aged(2000), GHOST: aged(9_000_000) } }) === true);
+  ok('empty cache → not fresh', core.usageCacheFresh(cfg2, 60_000, {}) === false);
+  ok('no accounts → not fresh (caller must refresh)', core.usageCacheFresh({ accounts: [] }, 60_000, freshBoth) === false);
+  ok('null cfg → not fresh', core.usageCacheFresh(null, 60_000, freshBoth) === false);
 } catch (e) { ok('per-account usage attribution works', false, e.message); }
 
 // ---- 3. cl-profile — the per-account credential ISOLATION fix ----------------
