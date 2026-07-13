@@ -919,6 +919,63 @@ try {
   fs.rmSync(repo, { recursive: true, force: true });
 } catch (e) { ok('cl-watch works', false, e.message); }
 
+// ---- cl-transpile (Claude transcript -> text-first codex messages) --------------
+// Proven live end to end: these messages, injected into a Codex rollout, let `codex
+// resume` recall a fact that only existed in the Claude session. This locks the pure
+// conversion: text at full fidelity, tools as short markers, noise dropped.
+section('cl-transpile (Claude -> Codex text-first)');
+try {
+  const T = require(path.join(SRC, 'cl-transpile.js'));
+  const recs = [
+    { type: 'system', subtype: 'x' },                                                    // meta -> skip
+    { type: 'user', message: { role: 'user', content: 'Add retries to the task_log schema.' } },
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'thinking', thinking: 'internal deliberation' },                            // dropped
+      { type: 'text', text: 'Reading the schema first.' },
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'grep -n retries db.sql' } }] } },
+    { type: 'user', isSidechain: true, message: { role: 'user', content: 'subagent noise' } }, // sidechain -> skip
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'db.sql: no match', is_error: false }] } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Added retries INT DEFAULT 0.' }] } },
+  ];
+  const { messages, stats } = T.transpile(recs);
+  ok('meta + sidechain turns are dropped', stats.records === 6 && messages.length === 4 && stats.droppedTurns === 1);
+  ok('user string content becomes a user turn', messages[0].role === 'user' && /Add retries/.test(messages[0].text));
+  ok('thinking is dropped', !/internal deliberation/.test(JSON.stringify(messages)));
+  ok('tool_use renders as a short text marker (Bash -> command)', /\[ran Bash: grep -n retries db\.sql\]/.test(messages[1].text));
+  ok('tool_result renders as a short text marker on a user turn', /\[result: db\.sql: no match\]/.test(messages[2].text));
+  ok('an errored tool_result is flagged', /\(error\)/.test(T.blockToText({ type: 'tool_result', content: 'boom', is_error: true })));
+  ok('history alternates and starts on a user turn', messages[0].role === 'user' && messages[3].role === 'assistant');
+  // huge tool output is clipped, not dumped
+  ok('a giant tool result is clipped', T.blockToText({ type: 'tool_result', content: 'x'.repeat(5000) }).length < 400);
+  // keepLast tail-cap keeps the recent messages and never starts on assistant
+  const many = []; for (let i = 0; i < 10; i++) many.push({ type: i % 2 ? 'assistant' : 'user', message: { role: i % 2 ? 'assistant' : 'user', content: `m${i}` } });
+  const tail = T.transpile(many, { keepLast: 4 });
+  ok('keepLast keeps the recent messages, starting on a user turn', tail.messages.length <= 4 && tail.messages[0].role === 'user');
+} catch (e) { ok('cl-transpile works', false, e.message); }
+
+// ---- cl-handoff (locate transcript + dry-run, no codex needed) ------------------
+section('cl-handoff (transcript locate + dry-run)');
+try {
+  const H = require(path.join(SRC, 'cl-handoff.js'));
+  // a fixture transcript under the sandbox HOME's projects dir
+  const conv = 'ffff0000-1111-2222-3333-444455556666';
+  const projDir = path.join(CLAUDE, 'projects', 'C--proj-x');
+  fs.mkdirSync(projDir, { recursive: true });
+  const repo = path.join(TMP, 'ho-repo');
+  const line = (t, c) => JSON.stringify({ type: t, cwd: repo, message: { role: t, content: c } });
+  fs.writeFileSync(path.join(projDir, `${conv}.jsonl`),
+    [line('user', 'the codename is Osprey.'), line('assistant', [{ type: 'text', text: 'Noted: Osprey.' }])].join('\n') + '\n');
+
+  ok('findTranscript locates the conversation by id', H.findTranscript(conv) === path.join(projDir, `${conv}.jsonl`));
+  ok('findTranscript returns null for an unknown id', H.findTranscript('no-such-id') === null);
+
+  const dry = H.handoff('nosession', { convId: conv, dryRun: true });
+  ok('dry-run transpiles without invoking codex', dry.ok === true && dry.dryRun === true && /2 message\(s\)/.test(dry.message));
+  ok('dry-run recovers the repo cwd from the transcript', /ho-repo/.test(dry.message));
+  const miss = H.handoff('nosession', { convId: 'no-such-id', dryRun: true });
+  ok('a missing transcript is reported, not crashed', miss.ok === false && /couldn't find the transcript/.test(miss.message));
+} catch (e) { ok('cl-handoff works', false, e.message); }
+
 // ---- cl-profile: adoptIntoShared (migrate a real dir into the shared one) -------
 // Regression: `tasks` joined SHARED_DIRS. The old code did rmSync(recursive) on the
 // profile's REAL dir before junctioning — which would have DELETED every profile's

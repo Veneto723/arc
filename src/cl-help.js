@@ -89,6 +89,14 @@ Why the cl: forms?
           exhausted account). That's why everything here is a cl: sentinel — there
           are no cl slash commands anymore.
 
+Take this conversation into Codex (transpile, then codex resume):
+  cl handoff codex               convert THIS Claude conversation into a Codex session
+                                 that Codex RESUMES natively — text at full fidelity,
+                                 tool calls become short "[ran …]" markers, the repo
+                                 files are already shared. Prints the codex resume <id>.
+  cl handoff codex --dry-run     show what would transpile, without touching Codex
+  cl handoff codex --keep-last N cap a huge session to its last N messages
+
 In your terminal (not inside a session):
   cl                     launch
   cl --account <id>      launch on a specific account

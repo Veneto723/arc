@@ -452,6 +452,31 @@ transcript entry's timestamp), backs up any local copy it overwrites (to
 `~/.claude/backups/cl-import-<ts>/`), and **never touches a conversation that's
 open in a live cl session**. Also available as terminal `cl export` / `cl import`.
 
+## Take a conversation into Codex
+
+Different products, one disk. Both Claude Code and Codex store sessions as local
+JSONL conversation logs, so cl-kit can **transpile** the current Claude conversation
+into a Codex session that **Codex resumes natively** — you keep scrolling the real
+chat history, not a summary:
+
+```
+cl handoff codex               # this conversation → a Codex session; prints `codex resume <id>`
+cl handoff codex --dry-run     # show what would convert, without touching Codex
+cl handoff codex --keep-last N # cap a huge session to its last N messages
+```
+
+**Text-first, by design.** Humans re-read the *words*, so text messages convert at
+full fidelity; tool calls degrade to a short marker (`[ran Bash: …]`). The repo files
+are already shared, so the *code* state transfers losslessly — only the conversation
+is re-homed. It works by letting Codex mint a valid, current-version session skeleton
+(a throwaway seed turn), then splicing the transpiled history in — so it's robust to
+Codex's undocumented, versioned rollout format rather than hardcoding it.
+
+**Honest limits.** It's a one-way relay, not a lossless round-trip. Claude's tool
+*history* becomes inert text (which is fine — the files carry the real state), and no
+model can re-ingest a giant transcript, so a long session is capped (`--keep-last`)
+or compacted on load regardless. Requires the `codex` CLI on your PATH.
+
 **Resume caveat:** `claude --resume <id>` is scoped to the cwd's project dir, so
 both machines must use the **same project paths** (e.g. work in `E:\proj` on
 both) for the imported chat to resume cleanly.

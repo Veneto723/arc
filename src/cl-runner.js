@@ -1073,6 +1073,20 @@ async function main() {
     require('./cl-watch').run(userArgs[1], process.cwd());
     return; // the interval keeps the process alive
   }
+  // `cl handoff codex [convId] [--keep-last N] [--dry-run]` — transpile THIS Claude
+  // conversation into a Codex session Codex resumes natively (text-first; tool calls
+  // become short text markers). Seeds a real codex session for valid scaffolding.
+  if (userArgs[0] === 'handoff') {
+    const rest = userArgs.slice(1);
+    const target = (rest[0] && !rest[0].startsWith('--')) ? rest.shift() : 'codex';
+    if (target !== 'codex') { process.stderr.write(`[cl] handoff target "${target}" not supported (only: codex)\n`); process.exit(1); }
+    const opts = { session: process.env.CL_SESSION || '', dryRun: rest.includes('--dry-run') };
+    const kl = rest.indexOf('--keep-last'); if (kl >= 0 && rest[kl + 1]) opts.keepLast = parseInt(rest[kl + 1], 10) || 0;
+    const conv = rest.find((a) => !a.startsWith('--') && a !== String(opts.keepLast)); if (conv) opts.convId = conv;
+    const r = require('./cl-handoff').handoff(opts.session, opts);
+    process.stdout.write((r.ok ? '[cl] ' : '[cl] ') + r.message + '\n');
+    process.exit(r.ok ? 0 : 1);
+  }
 
   let respawning = process.env.CL_RESPAWNED === '1';
   if (!respawning) { sweepStaleStates(); migrateProfilesOnce(); } // only the original launch; not re-execs
