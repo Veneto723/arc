@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cl setup: interactive wizard that writes ~/.claude/cl-config.json.
+// cl setup: interactive wizard that writes ~/.claude/arc-config.json.
 // Lets anyone pick their style — single subscription, two subscriptions,
 // subscription + API gateway (pool), gateway only, or any custom mix.
 'use strict';
@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 
-const C = require('./cl-config');
+const C = require('./arc-config');
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const ask = (q) => new Promise((res) => rl.question(q, (a) => res(a.trim())));
@@ -32,7 +32,7 @@ async function askId(q, taken, def) {
 }
 
 async function buildOauth(taken, suggestedId, suggestedLabel) {
-  const id = await askId('  account id (short, used in cl:switch)', taken, suggestedId);
+  const id = await askId('  account id (short, used in arc:switch)', taken, suggestedId);
   const label = (await ask(`  display label (${suggestedLabel || id.toUpperCase()}): `)) || suggestedLabel || id.toUpperCase();
   const color = (await ask('  statusline color hex (#D97757): ')) || '#D97757';
   console.log('  (if this is a SECOND subscription, run `cl capture ' + id + '` later while logged in as it)');
@@ -40,7 +40,7 @@ async function buildOauth(taken, suggestedId, suggestedLabel) {
 }
 
 async function buildApi(taken, suggestedId) {
-  const id = await askId('  account id (short, used in cl:switch)', taken, suggestedId);
+  const id = await askId('  account id (short, used in arc:switch)', taken, suggestedId);
   const label = (await ask(`  display label (${id.toUpperCase()}): `)) || id.toUpperCase();
   const color = (await ask('  statusline color hex (#2DD4BF): ')) || '#2DD4BF';
   let baseUrl = '';
@@ -49,7 +49,7 @@ async function buildApi(taken, suggestedId) {
   const src = await askChoice('  key source', ['1', '2', '3'], '1');
   const acc = { id, label, color, type: 'api', baseUrl };
   if (src === '1') acc.apiKeyEnv = await ask('  env var name (e.g. MY_GATEWAY_KEY): ');
-  else if (src === '2') acc.apiKey = await ask('  API key (stored in cl-config.json — keep that file private): ');
+  else if (src === '2') acc.apiKey = await ask('  API key (stored in arc-config.json — keep that file private): ');
   else {
     acc.apiKeyFrom = {
       file: await ask('  file path: '),
@@ -69,7 +69,7 @@ async function buildApi(taken, suggestedId) {
 }
 
 async function main() {
-  console.log('cl setup — configure your accounts (writes ~/.claude/cl-config.json)\n');
+  console.log('cl setup — configure your accounts (writes ~/.claude/arc-config.json)\n');
   console.log('Styles:');
   console.log('  1. single subscription        (one claude.ai login; cl adds session tools only)');
   console.log('  2. two subscriptions          (switch between two claude.ai logins)');

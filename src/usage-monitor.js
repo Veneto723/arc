@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // cl statusline: live subscription rate-limit monitor (session/weekly %, not $),
-// account-aware via ~/.claude/cl-config.json. Shows the ACTIVE cl account's
+// account-aware via ~/.claude/arc-config.json. Shows the ACTIVE cl account's
 // label+color, oauth usage bars (from Claude Code's statusline stdin or the
 // /api/oauth/usage endpoint), optional pool-DB account metrics, model+effort
 // (with sticky ultracode detection), and switch warnings near the limits.
@@ -10,7 +10,7 @@ const os = require('os');
 const path = require('path');
 const { exec, spawn } = require('child_process');
 
-const C = require('./cl-config');
+const C = require('./arc-config');
 const GW = require('./gw-usage'); // gateway (api) accounts' own usage endpoint
 
 const CACHE_PATH = path.join(C.CACHE_DIR, 'usage-monitor-cache.json');
@@ -36,15 +36,15 @@ const WARN_SESSION = TH.warnSessionPct ?? 85;
 const WARN_WEEK = TH.warnWeekPct ?? 90;
 
 // ---- active account resolution ----------------------------------------------
-// 1. Under cl: the per-session state file (written by cl-runner) is authoritative.
+// 1. Under arc: the per-session state file (written by cl-runner) is authoritative.
 // 2. Else: match ANTHROPIC_BASE_URL against configured api accounts.
 // 3. Else: the config's default account (plain `claude` on an oauth login).
 function activeAccount() {
   if (!cfg) return null;
-  const cl = process.env.CL_SESSION;
+  const cl = (process.env.ARC_SESSION || process.env.CL_SESSION);
   if (cl) {
     try {
-      const st = JSON.parse(fs.readFileSync(path.join(C.CACHE_DIR, `cl-state-${cl}.json`), 'utf8'));
+      const st = JSON.parse(fs.readFileSync(path.join(C.CACHE_DIR, `arc-state-${cl}.json`), 'utf8'));
       const acc = C.findAccount(cfg, st.account);
       if (acc) return acc;
     } catch {}
@@ -65,7 +65,7 @@ function primaryOauth() {
   return cfg ? cfg.accounts.find((a) => a.type === 'oauth') || null : null;
 }
 
-// What cl:switch would move to — used to word the warning nudges.
+// What arc:switch would move to — used to word the warning nudges.
 function switchTargetLabel(fromId) {
   if (!cfg) return null;
   const next = C.nextAccount(cfg, fromId, null);
@@ -85,7 +85,7 @@ function subscriptionAccount() {
 // the right token, so each account's numbers can be cached under its own id.
 // Falls back to the shared file (pre-migration, or under plain `claude`).
 function tokenFor(acc) {
-  let file = acc ? require('./cl-profile').credsPath(acc.id) : C.CRED_PATH;
+  let file = acc ? require('./arc-profile').credsPath(acc.id) : C.CRED_PATH;
   if (!fs.existsSync(file)) file = C.CRED_PATH;
   const creds = JSON.parse(fs.readFileSync(file, 'utf8'));
   return creds.claudeAiOauth.accessToken;
@@ -137,7 +137,7 @@ function appendHistory(history, data) {
 // whose numbers it held. Fetched with whatever account was active, it was then read
 // back for ANY oauth account: right after a switch the still-TTL-fresh numbers of the
 // PREVIOUS account were painted under the new account's label (and, looking fresh,
-// suppressed the background refresh that would have corrected them), while cl:peek
+// suppressed the background refresh that would have corrected them), while arc:peek
 // and auto-select scored every oauth account off that one blob.
 async function getUsageCachedFor(acc, force) {
   if (!acc) return null;
@@ -268,7 +268,7 @@ async function runRefresh(wantPool, force) {
   const apiAccts = accts.filter((a) => a.type === 'api' && GW.usageUrlFor(a));
   // allSettled, not all: one account's expired/absent token must not abort the
   // refresh of the others (each fetch already falls back to its own cached slice).
-  // Fetching EVERY oauth account — not just the active one — is what keeps cl:peek
+  // Fetching EVERY oauth account — not just the active one — is what keeps arc:peek
   // and auto-select honest, exactly as each gateway is already refreshed.
   await Promise.allSettled([
     ...oauthAccts.map((a) => getUsageCachedFor(a, force)),
@@ -277,7 +277,7 @@ async function runRefresh(wantPool, force) {
   ]);
   // Forget accounts that no longer exist. Per-account slices otherwise accumulate
   // forever after a remove/rename, and a ghost's ancient timestamp would make
-  // cl:peek's "is the cache fresh?" check age off an account nobody has.
+  // arc:peek's "is the cache fresh?" check age off an account nobody has.
   // Guarded on accts.length so an unreadable config can never empty the cache.
   try {
     if (accts.length) {
@@ -328,9 +328,9 @@ function usageFromStdin(sl) {
 // session id, even for a picker-resumed one) so the cl wrapper can find, re-resume
 // and preserve THIS session across an account switch.
 function writeActiveConv() {
-  const cl = process.env.CL_SESSION, conv = process.env.CLAUDE_CODE_SESSION_ID;
+  const cl = (process.env.ARC_SESSION || process.env.CL_SESSION), conv = process.env.CLAUDE_CODE_SESSION_ID;
   if (!cl || !conv) return;
-  const p = path.join(C.CACHE_DIR, `cl-active-${cl}.json`);
+  const p = path.join(C.CACHE_DIR, `arc-active-${cl}.json`);
   try {
     let cur = null; try { cur = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
     if (cur && cur.convId === conv) return; // unchanged
@@ -411,7 +411,7 @@ function poolExhausted(rows) {
 
 // The dead-end: on the pool, every pool account is in cooldown. If the oauth
 // subscription is also exhausted there's nothing to do but wait for its reset;
-// otherwise the escape is a manual cl:switch back. `data` = cached oauth usage.
+// otherwise the escape is a manual arc:switch back. `data` = cached oauth usage.
 function bothExhaustedAlert(data) {
   const sub = primaryOauth();
   const subLabel = sub ? sub.label : 'subscription';
@@ -424,7 +424,7 @@ function bothExhaustedAlert(data) {
     return criticalAlert(`⛔ POOL + ${subLabel} both exhausted${reset}`);
   }
   const mx = Math.round(data.five_hour.utilization);
-  return criticalAlert(`⛔ POOL exhausted — cl:switch back to ${subLabel} (${mx}%)`);
+  return criticalAlert(`⛔ POOL exhausted — arc:switch back to ${subLabel} (${mx}%)`);
 }
 
 // Projects minutes-to-limit from the observed rate of change of `key` over
@@ -514,13 +514,13 @@ const EFFORT_INITIAL_TAIL = 2_000_000; // bound the first scan of a long/resumed
 // { effort, offset }. Each render scans ONLY the new transcript bytes since last
 // time for the genuine /effort echo and remembers the value. This never loses the
 // setting to a fixed-window truncation. cl-runner SEEDS this file at each launch,
-// so a launch with no echo line (e.g. right after a cl:switch) is still known.
+// so a launch with no echo line (e.g. right after a arc:switch) is still known.
 function trackEffort() {
   const sid = process.env.CLAUDE_CODE_SESSION_ID;
   if (!sid) return null;
   const fp = findTranscriptById(sid);
   if (!fp) return null;
-  const stateFile = path.join(C.CACHE_DIR, `cl-effort-${sid}.json`);
+  const stateFile = path.join(C.CACHE_DIR, `arc-effort-${sid}.json`);
   let st = {};
   try { st = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch {}
   let size = 0;
@@ -570,7 +570,7 @@ function renderFull(data, sessionEta, weekEta, poolRows, acc, model, effort) {
     if (model) lines.push('', `Model: ${model}${effort ? ` (${effort})` : ''}`);
   };
 
-  if (!acc) return `cl: no config — run \`cl setup\``;
+  if (!acc) return `arc: no config — run \`cl setup\``;
 
   // API account with pool metrics
   if (isApi && poolConfigured()) {
@@ -622,7 +622,7 @@ function renderFull(data, sessionEta, weekEta, poolRows, acc, model, effort) {
   const target = switchTargetLabel(acc.id);
   const lines = [`Account: ${label(acc)}`];
   if ((over || nearSession) && target) {
-    lines.push('', blinkAlert(over ? `⚠ ${acc.label} limit reached — cl:switch to ${target} now` : `⚠ Nearing ${acc.label} limit — cl:switch to ${target}`));
+    lines.push('', blinkAlert(over ? `⚠ ${acc.label} limit reached — arc:switch to ${target} now` : `⚠ Nearing ${acc.label} limit — arc:switch to ${target}`));
   }
   const sReset = formatResetTime(session.resets_at);
   const wReset = formatResetTime(week.resets_at);
@@ -654,7 +654,7 @@ function renderCompact(data, sessionEta, poolRows, acc, model, effort, fridge) {
   const line2 = [formatModel(model, effort), fridgeSeg(fridge)].filter(Boolean).join(' | ');
   const withL2 = (line1) => (line2 ? `${line1}\n${line2}` : line1);
 
-  if (!acc) return 'cl: run `cl setup`';
+  if (!acc) return 'arc: run `cl setup`';
   const isApi = acc.type === 'api';
 
   if (isApi) {
@@ -701,7 +701,7 @@ function renderCompact(data, sessionEta, poolRows, acc, model, effort, fridge) {
     // (5h window) or be stuck for days (weekly cap). See bindingResetLabel.
     const bindReset = bindingResetLabel(s, w, SWITCH_WEEK);
     const resetPart = bindReset ? ` (resets ${bindReset})` : '';
-    return withL2(blinkAlert(`⚠ ${acc.label} ${sv}%/${wv}% ${lbl}${resetPart} — cl:switch to ${target}`));
+    return withL2(blinkAlert(`⚠ ${acc.label} ${sv}%/${wv}% ${lbl}${resetPart} — arc:switch to ${target}`));
   }
 
   const sEta = formatEta(sessionEta);
@@ -721,7 +721,7 @@ async function main() {
   const refresh = args.includes('--refresh');
 
   // Detached refresh worker: repopulate caches, then exit. `--force` bypasses the
-  // per-slice TTLs (used by cl:peek, which must show truly current data).
+  // per-slice TTLs (used by arc:peek, which must show truly current data).
   if (refresh) {
     await runRefresh(args.includes('--with-pool') || args.includes('--apihub'), args.includes('--force')); // --apihub = legacy spelling
     return;
@@ -775,7 +775,7 @@ async function main() {
   // Keep the background refresh running (it maintains the ETA history and the
   // api-mode subscription numbers) whenever the cache is stale.
   // Refresh when the subscription usage is stale OR any gateway account's usage is
-  // stale (kept fresh even while on the subscription, so cl:peek isn't stale).
+  // stale (kept fresh even while on the subscription, so arc:peek isn't stale).
   const anyGwStale = ((cfg && cfg.accounts) || []).some((a) => a.type === 'api' && GW.usageUrlFor(a) && !readCachedGwUsage(a.id).fresh);
   const needRefresh = !usage.fresh || (isApi && poolConfigured() && !pool.fresh) || anyGwStale;
   if (needRefresh) triggerBackgroundRefresh(isApi);
@@ -790,8 +790,8 @@ async function main() {
   // no role) and best-effort — the statusline must never fail because of the fridge.
   let fridge = null;
   try {
-    fridge = require('./cl-fridge').badge(
-      process.env.CL_SESSION, sl && sl.workspace ? sl.workspace.current_dir : null);
+    fridge = require('./arc-fridge').badge(
+      (process.env.ARC_SESSION || process.env.CL_SESSION), sl && sl.workspace ? sl.workspace.current_dir : null);
   } catch {}
 
   process.stdout.write(

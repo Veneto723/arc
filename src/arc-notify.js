@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// cl-notify: Claude Code hook that pops a Windows toast when a session finishes a
+// arc-notify: Claude Code hook that pops a Windows toast when a session finishes a
 // (non-trivial) turn, labeled with the session's /rename NAME so you can jump to
 // the right terminal. Wired in settings.json:
-//   UserPromptSubmit -> `cl-notify.js start`  (records turn start time)
-//   Stop             -> `cl-notify.js done`   (on finish, toast if turn was long)
-//   StopFailure      -> `cl-notify.js fail`   (turn ended in an ERROR — always toast)
-//   Notification     -> `cl-notify.js wait`   (permission prompt / idle — the session
+//   UserPromptSubmit -> `arc-notify.js start`  (records turn start time)
+//   Stop             -> `arc-notify.js done`   (on finish, toast if turn was long)
+//   StopFailure      -> `arc-notify.js fail`   (turn ended in an ERROR — always toast)
+//   Notification     -> `arc-notify.js wait`   (permission prompt / idle — the session
 //                        is WAITING for you mid-turn; Stop never fired, so without
 //                        this it looks "done but silent")
 // All receive the hook JSON on stdin ({ session_id, cwd, ... }). Always exit 0.
@@ -23,13 +23,13 @@ const CACHE_DIR = path.join(os.homedir(), '.claude', 'cache');
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 // Only toast when a turn took at least this long (ms) — avoids a toast after every
 // quick reply. Override with the CL_NOTIFY_MIN_MS env var (0 = notify every turn).
-const MIN_MS = process.env.CL_NOTIFY_MIN_MS != null ? parseInt(process.env.CL_NOTIFY_MIN_MS, 10) || 0 : 30_000;
+const MIN_MS = (process.env.ARC_NOTIFY_MIN_MS || process.env.CL_NOTIFY_MIN_MS) != null ? parseInt((process.env.ARC_NOTIFY_MIN_MS || process.env.CL_NOTIFY_MIN_MS), 10) || 0 : 30_000;
 
-function turnFile(sid) { return path.join(CACHE_DIR, `cl-turn-${sid}.json`); }
+function turnFile(sid) { return path.join(CACHE_DIR, `arc-turn-${sid}.json`); }
 
 // One-line decision trace per 'done' — answers "why didn't a toast fire?" after
 // the fact. Kept tiny: truncated whenever it grows past ~64KB.
-const LOG_PATH = path.join(CACHE_DIR, 'cl-notify.log');
+const LOG_PATH = path.join(CACHE_DIR, 'arc-notify.log');
 function trace(line) {
   try {
     try { if (fs.statSync(LOG_PATH).size > 64_000) fs.truncateSync(LOG_PATH, 0); } catch {}
@@ -93,9 +93,9 @@ function toast(title, text, kind, focusPid, launchUri, opts) {
       : '');
   const hero = o.heroUri ? `<image placement="hero" src="${xe(o.heroUri)}"/>` : '';
   // Clicking the toast launches the cl-focus: protocol (HKCU-registered →
-  // cl-focus.vbs → cl-focus.ps1), which foregrounds the terminal window that
+  // arc-focus.vbs → arc-focus.ps1), which foregrounds the terminal window that
   // hosts this session's claude pid.
-  const clickUri = launchUri || (focusPid ? `cl-focus:${focusPid}` : null);
+  const clickUri = launchUri || (focusPid ? `arc-focus:${focusPid}` : null);
   const activate = clickUri ? ` activationType="protocol" launch="${xe(clickUri)}"` : '';
   const xml =
     `<toast duration="long"${activate}><visual><binding template="ToastGeneric">` + // long ≈ 25s banner

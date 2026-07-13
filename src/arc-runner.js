@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// cl-runner: launches Claude Code with NATIVE stdio (perfect rendering — no
+// arc-runner: launches Claude Code with NATIVE stdio (perfect rendering — no
 // PTY/ConPTY, so claude's own slash menus work) and switches between the
-// accounts defined in ~/.claude/cl-config.json (oauth subscriptions and/or
+// accounts defined in ~/.claude/arc-config.json (oauth subscriptions and/or
 // API gateways — any number, any mix).
 //
 // Switching is MANUAL mid-session, driven by trigger files (not keystroke
 // interception):
-//   - `cl:switch [account]` / `cl:restart` are plain-text sentinels caught by the
-//     UserPromptSubmit hook (cl-switch-hook.js -> cl-switch-core.js), which drops a
+//   - `arc:switch [account]` / `arc:restart` are plain-text sentinels caught by the
+//     UserPromptSubmit hook (arc-switch-hook.js -> arc-switch-core.js), which drops a
 //     per-session trigger file BEFORE any model turn (zero tokens, classifier-immune).
 //     This runner polls for its own session's trigger. (The old /switch and
 //     /restart slash commands were removed — they cost a model turn and
@@ -22,7 +22,7 @@
 //               cl add-account <id> — drive native login + auto-capture a NEW account
 //               cl capture <id>     — save the current claude.ai login for an account
 //               cl doctor           — print resolved config + health checks
-// Usage: node cl-runner.js [claude args...]   (normally via cl.cmd)
+// Usage: node arc-runner.js [claude args...]   (normally via cl.cmd)
 'use strict';
 
 const fs     = require('fs');
@@ -31,10 +31,10 @@ const path   = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 
-const C = require('./cl-config');
-const core = require('./cl-switch-core'); // shared launch-account decision + peek
-const { pickConvId } = require('./cl-conv'); // pure convId reconciliation (testable)
-const O = require('./cl-orchestrator');
+const C = require('./arc-config');
+const core = require('./arc-switch-core'); // shared launch-account decision + peek
+const { pickConvId } = require('./arc-conv'); // pure convId reconciliation (testable)
+const O = require('./arc-orchestrator');
 
 const CACHE_DIR = C.CACHE_DIR;
 const TRIGGER_POLL_MS = 1_000;    // how often to check for a slash-command trigger
@@ -42,13 +42,13 @@ const TRIGGER_POLL_MS = 1_000;    // how often to check for a slash-command trig
 let cfg = (() => {
   try { return C.loadConfig(); }
   catch (e) {
-    process.stderr.write(`[cl] ${e.message}\n[cl] run \`cl setup\` to create ~/.claude/cl-config.json\n`);
+    process.stderr.write(`[arc] ${e.message}\n[arc] run \`cl setup\` to create ~/.claude/arc-config.json\n`);
     process.exit(1);
   }
 })();
 const CLAUDE_BIN = C.claudeBin(cfg);
 
-// Re-read cl-config.json (accounts can be added/edited mid-session via the cl
+// Re-read arc-config.json (accounts can be added/edited mid-session via the cl
 // MCP server or by hand). Keeps the last good config if the file is broken.
 function reloadCfg() {
   try { cfg = C.loadConfig(); } catch {}
@@ -59,21 +59,25 @@ function reloadCfg() {
 // re-exec (which sets CL_RESPAWNED=1); otherwise mint a fresh one. This stops a
 // nested `cl` (launched from a shell inside a running cl-managed claude, which
 // inherits CL_SESSION) from colliding on the same state/active/trigger files.
-const SESSION_ID = (process.env.CL_RESPAWNED === '1' && process.env.CL_SESSION)
-  ? process.env.CL_SESSION
+const SESSION_ID = ((process.env.ARC_RESPAWNED || process.env.CL_RESPAWNED) === '1' && (process.env.ARC_SESSION || process.env.CL_SESSION))
+  ? (process.env.ARC_SESSION || process.env.CL_SESSION)
   : `${process.pid}-${Math.floor(Math.random() * 1e6)}`;
 
 // Per-session state file. With multiple cl terminals open, a single global state
 // file would let them stomp each other's account — so key it by SESSION_ID.
-const STATE_PATH = path.join(CACHE_DIR, `cl-state-${SESSION_ID}.json`);
-let logicalSessionId = process.env.CL_LOGICAL_SESSION || null;
+const STATE_PATH = path.join(CACHE_DIR, `arc-state-${SESSION_ID}.json`);
+// Legacy state file from before the rename — read as a fallback so a session that
+// restarts into new code keeps its convId/account.
+const LEGACY_STATE_PATH = path.join(CACHE_DIR, `cl-state-${SESSION_ID}.json`);
+let logicalSessionId = (process.env.ARC_LOGICAL_SESSION || process.env.CL_LOGICAL_SESSION) || null;
 let runtimeName = 'claude';
 
 // ---- state ----------------------------------------------------------------
 
 function readState() {
   try {
-    const s = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    const p = fs.existsSync(STATE_PATH) ? STATE_PATH : LEGACY_STATE_PATH;
+    const s = JSON.parse(fs.readFileSync(p, 'utf8'));
     const acc = C.findAccount(cfg, s.account); // tolerates legacy ids
     return {
       account: acc ? acc.id : cfg.defaultAccount,
@@ -112,7 +116,7 @@ function deleteState() {
 // ---- crash / exit logging --------------------------------------------------
 // cl used to throw away claude's exit code, so a silent crash left NO trace and
 // was undebuggable. Every launch + exit now appends one line here.
-const LOG_PATH = path.join(CACHE_DIR, 'cl-runner.log');
+const LOG_PATH = path.join(CACHE_DIR, 'arc-runner.log');
 function logLine(msg) {
   try {
     try { if (fs.statSync(LOG_PATH).size > 256_000) fs.truncateSync(LOG_PATH, 0); } catch {}
@@ -133,7 +137,7 @@ function pidAlive(pid) {
 // authoritative even under a ConPTY host (Windows Terminal), where the terminal
 // process is NOT in the claude process tree and an ancestry climb can't find it.
 // Captured once, while our terminal is still foreground (before claude takes the
-// TTY), then written per-child so cl-focus.vbs can read cl-win-<claude pid>.json.
+// TTY), then written per-child so arc-focus.vbs can read cl-win-<claude pid>.json.
 let launchWinPid = null;
 function captureLaunchWinPid() {
   if (launchWinPid !== null) return launchWinPid;
@@ -149,7 +153,7 @@ function captureLaunchWinPid() {
   } catch {}
   return launchWinPid;
 }
-function winPidPath(childPid) { return path.join(CACHE_DIR, `cl-win-${childPid}.json`); }
+function winPidPath(childPid) { return path.join(CACHE_DIR, `arc-win-${childPid}.json`); }
 function writeWinPid(childPid) {
   if (!launchWinPid || !childPid) return;
   try { fs.writeFileSync(winPidPath(childPid), String(launchWinPid)); } catch {}
@@ -158,7 +162,7 @@ function writeWinPid(childPid) {
 // Per-conversation lock file. Keyed by the ACTUAL conversation id (not the state
 // file, whose convId is null until the statusline bridges a picker-resume), so
 // the guard is unambiguous. Holds the owning pid + cwd + session id.
-function convLockPath(convId) { return path.join(CACHE_DIR, `cl-convlock-${convId}.json`); }
+function convLockPath(convId) { return path.join(CACHE_DIR, `arc-convlock-${convId}.json`); }
 
 // If conversation `convId` is already held by a LIVE cl process, return its
 // { pid, cwd }; otherwise reclaim any stale lock and return null. Two cl
@@ -198,23 +202,24 @@ function sweepStaleStates() {
   const DAY = 24 * 60 * 60 * 1000;
   try {
     for (const f of fs.readdirSync(CACHE_DIR)) {
-      if (!/^cl-(state|prefs|active|effort|turn|convlock|rmpending|delpending|win)-.*\.json$/.test(f)) continue;
+      // Match both arc- (current) and cl- (legacy) so old files get pruned too.
+      if (!/^(?:arc|cl)-(state|prefs|active|effort|turn|convlock|rmpending|delpending|win)-.*\.json$/.test(f)) continue;
       const p = path.join(CACHE_DIR, f);
       // convlock files are cleaned by LIVENESS, not age: a still-running session
       // days old must keep its lock. Remove only if its owner pid is dead.
-      if (f.startsWith('cl-convlock-')) {
+      if (/^(?:arc|cl)-convlock-/.test(f)) {
         try { const l = JSON.parse(fs.readFileSync(p, 'utf8')); if (!pidAlive(l.pid)) fs.unlinkSync(p); } catch { try { fs.unlinkSync(p); } catch {} }
         continue;
       }
-      // cl-win-<pid> maps a claude pid -> its terminal window (for toast focus).
+      // arc-win-<pid> maps a claude pid -> its terminal window (for toast focus).
       // Also liveness-cleaned: keep it while that claude pid is alive, drop it once
       // the pid is gone (a crash-exit that skipped finish()'s own unlink).
-      if (f.startsWith('cl-win-')) {
-        const m = f.match(/^cl-win-(\d+)\.json$/);
+      if (/^(?:arc|cl)-win-/.test(f)) {
+        const m = f.match(/^(?:arc|cl)-win-(\d+)\.json$/);
         if (m && !pidAlive(parseInt(m[1], 10))) { try { fs.unlinkSync(p); } catch {} }
         continue;
       }
-      const limit = f.startsWith('cl-effort-') ? 7 * DAY : DAY;
+      const limit = /^(?:arc|cl)-effort-/.test(f) ? 7 * DAY : DAY;
       try { if (Date.now() - fs.statSync(p).mtimeMs > limit) fs.unlinkSync(p); } catch {}
     }
   } catch {}
@@ -227,13 +232,13 @@ function accountLabel(id) {
   return a ? a.label : id;
 }
 
-// --- credentials: per-account CLAUDE_CONFIG_DIR profile (see cl-profile.js) ----
+// --- credentials: per-account CLAUDE_CONFIG_DIR profile (see arc-profile.js) ----
 // The old model swapped one global ~/.claude/.credentials.json between accounts,
 // which let concurrent sessions on different accounts hijack/corrupt each other's
 // login. That system is gone: each account now has its OWN config dir (its own
 // private .credentials.json + .claude.json), pointed at via CLAUDE_CONFIG_DIR.
 // Nothing is shared or swapped, so there is nothing to race on.
-const P = require('./cl-profile');
+const P = require('./arc-profile');
 
 // One-time migration: give existing accounts a login in their new profile so
 // nobody has to re-authenticate. Runs once (guarded by a marker), safe & idempotent
@@ -263,10 +268,12 @@ function migrateProfilesOnce() {
 function buildEnv(accountId) {
   const acc = C.findAccount(cfg, accountId);
   const env = C.accountEnv(acc, process.env);
-  env.CL_SESSION = SESSION_ID;
-  env.CL_LOGICAL_SESSION = logicalSessionId || '';
-  env.CL_RUNTIME = 'claude';
-  env.CL_RUNTIME_ACCOUNT = accountId;
+  // Set both ARC_* (current) and CL_* (deprecated alias) so a child running either
+  // old or new code resolves the session identity. Readers use ARC_* || CL_*.
+  env.ARC_SESSION = env.CL_SESSION = SESSION_ID;
+  env.ARC_LOGICAL_SESSION = env.CL_LOGICAL_SESSION = logicalSessionId || '';
+  env.ARC_RUNTIME = env.CL_RUNTIME = 'claude';
+  env.ARC_RUNTIME_ACCOUNT = env.CL_RUNTIME_ACCOUNT = accountId;
   // Point Claude Code at THIS account's isolated config dir (its own credentials +
   // .claude.json), while the "brain" (projects/commands/skills/…) is junctioned
   // back to the real ~/.claude so conversations stay shared across accounts. This
@@ -274,12 +281,12 @@ function buildEnv(accountId) {
   env.CLAUDE_CONFIG_DIR = P.ensureProfile(accountId);
   // Never leak the respawn marker into claude (and its subshells); otherwise a
   // nested `cl` would think it's a /restart and reuse this SESSION_ID.
-  delete env.CL_RESPAWNED;
+  delete env.CL_RESPAWNED; delete env.ARC_RESPAWNED;
   return env;
 }
 
 // ---- preserve mode/model/effort across a switch ---------------------------
-// On respawn we re-apply the session's current choices so a cl:switch or cl:restart
+// On respawn we re-apply the session's current choices so a arc:switch or arc:restart
 // doesn't reset them. model + permissionMode come from the transcript tail;
 // effort from the sticky per-conversation file the statusline maintains.
 
@@ -301,7 +308,7 @@ function defaultEffort() {
   } catch { return 'high'; }
 }
 
-const effortStateFile = (convId) => path.join(CACHE_DIR, `cl-effort-${convId}.json`);
+const effortStateFile = (convId) => path.join(CACHE_DIR, `arc-effort-${convId}.json`);
 
 // The session's current effort — read from the sticky cl-effort-<convId>.json the
 // statusline maintains (it scans the transcript incrementally for the genuine
@@ -330,7 +337,7 @@ function seedEffort(convId, effort) {
 // picker-resumed session whose id cl didn't assign). Keyed by our SESSION_ID.
 function readActiveConv() {
   try {
-    return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, `cl-active-${SESSION_ID}.json`), 'utf8')).convId || null;
+    return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, `arc-active-${SESSION_ID}.json`), 'utf8')).convId || null;
   } catch { return null; }
 }
 
@@ -421,25 +428,25 @@ function preservedFlags(convId) {
 
 // ---- trigger files --------------------------------------------------------
 
-const switchTrigger    = path.join(CACHE_DIR, `cl-switch-${SESSION_ID}.trigger`);
-const restartTrigger   = path.join(CACHE_DIR, `cl-restart-${SESSION_ID}.trigger`);
-// Dropped by the cl:switch hook to open the interactive arrow-key
+const switchTrigger    = path.join(CACHE_DIR, `arc-switch-${SESSION_ID}.trigger`);
+const restartTrigger   = path.join(CACHE_DIR, `arc-restart-${SESSION_ID}.trigger`);
+// Dropped by the arc:switch hook to open the interactive arrow-key
 // account picker. cl-runner kills claude, renders the picker on the freed TTY,
 // and relaunches on the chosen account — zero model tokens.
-const pickTrigger      = path.join(CACHE_DIR, `cl-pick-${SESSION_ID}.trigger`);
-// Dropped by the cl:add-account hook: carries { args } (the id + flags). cl-runner
+const pickTrigger      = path.join(CACHE_DIR, `arc-pick-${SESSION_ID}.trigger`);
+// Dropped by the arc:add-account hook: carries { args } (the id + flags). cl-runner
 // kills claude, runs the guided browser login on the freed TTY, and relaunches.
-const addAcctTrigger   = path.join(CACHE_DIR, `cl-addacct-${SESSION_ID}.trigger`);
-// Dropped by the cl:delete hook (after confirm): carries { convId }. cl-runner
+const addAcctTrigger   = path.join(CACHE_DIR, `arc-addacct-${SESSION_ID}.trigger`);
+// Dropped by the arc:delete hook (after confirm): carries { convId }. cl-runner
 // kills claude, moves the transcript to recoverable trash, and starts fresh.
-const deleteTrigger    = path.join(CACHE_DIR, `cl-delete-${SESSION_ID}.trigger`);
-// Dropped by the cl:rename hook when renaming THIS session's account: carries
+const deleteTrigger    = path.join(CACHE_DIR, `arc-delete-${SESSION_ID}.trigger`);
+// Dropped by the arc:rename hook when renaming THIS session's account: carries
 // { oldId, newId }. cl-runner kills claude (releases the open profile dir), moves
 // the profile dir + updates config, then relaunches this conversation on the new name.
-const renameTrigger    = path.join(CACHE_DIR, `cl-rename-${SESSION_ID}.trigger`);
-// Dropped by cl:handoff after the hook has captured the authoritative transcript.
+const renameTrigger    = path.join(CACHE_DIR, `arc-rename-${SESSION_ID}.trigger`);
+// Dropped by arc:handoff after the hook has captured the authoritative transcript.
 // The runner owns the TTY and performs the runtime replacement transaction.
-const handoffTrigger   = path.join(CACHE_DIR, `cl-handoff-${SESSION_ID}.trigger`);
+const handoffTrigger   = path.join(CACHE_DIR, `arc-handoff-${SESSION_ID}.trigger`);
 
 function clearTriggers() {
   for (const t of [switchTrigger, restartTrigger, pickTrigger, addAcctTrigger, deleteTrigger, renameTrigger, handoffTrigger]) {
@@ -455,7 +462,7 @@ function resetTerminal() {
 }
 
 // A short usage summary for an account, read from the statusline's cache
-// (usage-monitor-cache.json) — so the picker shows the same info as cl:peek
+// (usage-monitor-cache.json) — so the picker shows the same info as arc:peek
 // without any network call. oauth → subscription 5h/7d %; api → the gateway's
 // own usage line (e.g. "$103.60 today · 62.9M tok"); legacy poolDb → active/5h.
 // '' when there's no data to show. Never throws.
@@ -498,19 +505,19 @@ function accountUsage(acc) {
 // forces one or `features.autoBest` is false.
 //
 // The DECISION functions live in cl-switch-core (accountHeadroom /
-// chooseLaunchAccount) so the launch path here and the `cl:peek` recommendation
+// chooseLaunchAccount) so the launch path here and the `arc:peek` recommendation
 // always agree — one source of truth. cl-runner just reads the cache and calls it.
 function readUsageCache() {
   try { return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'usage-monitor-cache.json'), 'utf8')); } catch { return null; }
 }
 
 // True if this conversation has a saved transcript (so `--resume` works). A fresh
-// session where only a blocked cl: command ran (e.g. cl:add-account in a new
+// session where only a blocked arc: command ran (e.g. arc:add-account in a new
 // terminal) never persisted one — then `--resume` fails with "No conversation
 // found", and the caller must `--session-id` to (re)create it instead.
 function hasTranscript(convId) {
   if (!convId) return false;
-  try { return !!require('./cl-sync').findTranscriptFile(convId); } catch { return false; }
+  try { return !!require('./arc-sync').findTranscriptFile(convId); } catch { return false; }
 }
 
 // ---- interactive account picker (native arrow-key TUI, zero tokens) --------
@@ -539,7 +546,7 @@ function pickAccount(currentId) {
           : `   ${body}${useDim}${cur}\r\n`);
       });
       // Footer reinforces the memorable entry points every time they switch.
-      out.write('\r\n  \x1b[2mtip: `cl:switch <name>` jumps directly · `/cl` lists all commands\x1b[0m\r\n');
+      out.write('\r\n  \x1b[2mtip: `arc:switch <name>` jumps directly · `/cl` lists all commands\x1b[0m\r\n');
     }
 
     function done(id) {
@@ -628,7 +635,7 @@ function promptLine(label, opts = {}) {
 async function runAddWizard() {
   resetTerminal();
   const out = process.stdout;
-  const cancel = () => out.write('\x1b[2m[cl] add cancelled.\x1b[0m\n');
+  const cancel = () => out.write('\x1b[2m[arc] add cancelled.\x1b[0m\n');
 
   const type = await selectMenu('Add a cl account — what type?', [
     { label: 'Subscription', desc: 'claude.ai login (MAX / Pro / Team) — opens a browser' },
@@ -647,7 +654,7 @@ async function runAddWizard() {
   }
 
   if (type === 0) { // subscription → browser login flow
-    out.write(`\r\n\x1b[2m[cl] adding subscription "${id}" — a browser sign-in will open; log in as the NEW account…\x1b[0m\n`);
+    out.write(`\r\n\x1b[2m[arc] adding subscription "${id}" — a browser sign-in will open; log in as the NEW account…\x1b[0m\n`);
     doAddAccount([id]);
     return;
   }
@@ -705,7 +712,7 @@ function runClaude(claudeArgs, account, extraSettings, watchAdopt) {
     let env;
     try { env = buildEnv(account); }
     catch (e) {
-      process.stderr.write(`\x1b[31m[cl] cannot use account "${account}": ${e.message}\x1b[0m\n`);
+      process.stderr.write(`\x1b[31m[arc] cannot use account "${account}": ${e.message}\x1b[0m\n`);
       return resolve({ reason: 'exit', exitCode: 1 });
     }
 
@@ -725,8 +732,8 @@ function runClaude(claudeArgs, account, extraSettings, watchAdopt) {
       resolve({ reason, exitCode, payload });
     };
 
-    // Poll for this session's trigger files: cl:switch / cl:restart (and the other
-    // cl: sentinels) each drop a per-session trigger file via the UserPromptSubmit
+    // Poll for this session's trigger files: arc:switch / arc:restart (and the other
+    // arc: sentinels) each drop a per-session trigger file via the UserPromptSubmit
     // hook (cl-switch-core), which we act on here.
     // Switching is MANUAL-only — there is no automatic usage-based switching.
     const t0 = Date.now();
@@ -763,7 +770,7 @@ function runClaude(claudeArgs, account, extraSettings, watchAdopt) {
         clearTriggers(); killChild(child); finish('handoff', undefined, payload || {});
       }
       else if (fs.existsSync(switchTrigger)) {
-        // The trigger may carry a target account id (from `cl:switch <id>`).
+        // The trigger may carry a target account id (from `arc:switch <id>`).
         let target = null;
         try {
           const raw = fs.readFileSync(switchTrigger, 'utf8');
@@ -814,22 +821,22 @@ function killChild(child) {
 // Adopt the CURRENT active login (~/.claude/.credentials.json) into an account's
 // own profile dir — a manual migration/repair tool for the profile model. (Fresh
 // accounts are normally established by logging in directly into the profile via
-// `cl add-account` / cl:switch → /login.)
+// `cl add-account` / arc:switch → /login.)
 function cmdCapture(id) {
   const acc = C.findAccount(cfg, id);
   if (!acc || acc.type !== 'oauth') {
-    process.stderr.write(`[cl] capture: "${id}" is not a configured oauth account.\n`);
+    process.stderr.write(`[arc] capture: "${id}" is not a configured oauth account.\n`);
     process.exit(1);
   }
   let cur;
   try { cur = fs.readFileSync(C.CRED_PATH, 'utf8'); }
-  catch { process.stderr.write('[cl] capture: no active claude.ai login found (.credentials.json missing).\n'); process.exit(1); }
+  catch { process.stderr.write('[arc] capture: no active claude.ai login found (.credentials.json missing).\n'); process.exit(1); }
   try { if (!JSON.parse(cur).claudeAiOauth.accessToken) throw 0; }
-  catch { process.stderr.write('[cl] capture: the active login is not a claude.ai OAuth login.\n'); process.exit(1); }
+  catch { process.stderr.write('[arc] capture: the active login is not a claude.ai OAuth login.\n'); process.exit(1); }
   const dir = P.ensureProfile(acc.id);
   fs.writeFileSync(P.credsPath(acc.id), cur);
-  process.stdout.write(`[cl] adopted the CURRENT claude.ai login into account "${acc.id}"'s profile → ${dir}\n`);
-  process.stdout.write(`[cl] tip: to add ANOTHER subscription end-to-end, use \`cl add-account <id>\` (it drives the login into its own profile).\n`);
+  process.stdout.write(`[arc] adopted the CURRENT claude.ai login into account "${acc.id}"'s profile → ${dir}\n`);
+  process.stdout.write(`[arc] tip: to add ANOTHER subscription end-to-end, use \`cl add-account <id>\` (it drives the login into its own profile).\n`);
   process.exit(0);
 }
 
@@ -844,7 +851,7 @@ function authStatus(configDir) {
   } catch { return null; }
 }
 
-// Append an account to cl-config.json with backup + validate (rollback on error).
+// Append an account to arc-config.json with backup + validate (rollback on error).
 function addAccountToConfig(accObj, makeDefault) {
   const bak = C.CONFIG_PATH + '.bak-' + Date.now();
   let raw;
@@ -867,24 +874,24 @@ function addAccountToConfig(accObj, makeDefault) {
 // The guided add-account flow. Drives the NATIVE Claude login, auto-captures the
 // resulting credential, and registers a new oauth account. Returns { code:0|1 }
 // and prints its own progress — it NEVER exits, so it works both as the `cl
-// add-account` CLI subcommand AND in-session (cl:add-account, run by the wrapper
+// add-account` CLI subcommand AND in-session (arc:add-account, run by the wrapper
 // after it kills claude and owns the TTY).
 function doAddAccount(argv) {
   const id = argv.find((a) => !a.startsWith('-'));
   const opt = (name) => { const i = argv.indexOf(name); return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('-') ? argv[i + 1] : null; };
   const has = (name) => argv.includes(name);
   if (!id || !/^[a-z][a-z0-9_-]*$/i.test(id)) {
-    process.stderr.write('[cl] usage: add-account <id> [--label L] [--email E] [--color #hex] [--console] [--default]\n       id must be alphanumeric (dash/underscore ok)\n');
+    process.stderr.write('[arc] usage: add-account <id> [--label L] [--email E] [--color #hex] [--console] [--default]\n       id must be alphanumeric (dash/underscore ok)\n');
     return { code: 1 };
   }
-  if (C.findAccount(reloadCfg(), id)) { process.stderr.write(`[cl] account "${id}" already exists (see \`cl doctor\`).\n`); return { code: 1 }; }
+  if (C.findAccount(reloadCfg(), id)) { process.stderr.write(`[arc] account "${id}" already exists (see \`cl doctor\`).\n`); return { code: 1 }; }
 
   // Log in DIRECTLY into this account's OWN profile dir (CLAUDE_CONFIG_DIR). The
   // login is written to the profile's private .credentials.json — no other
   // account's login is read, written, or restored. Nothing shared to disturb.
   const profile = P.ensureProfile(id);
   process.stdout.write(
-    `\x1b[36m[cl] Adding account "${id}".\x1b[0m\n` +
+    `\x1b[36m[arc] Adding account "${id}".\x1b[0m\n` +
     `\x1b[2m    A Claude sign-in will open in your browser. Log in as the account you want to ADD.\n` +
     `    The login is saved privately to this account's profile — every other account stays untouched.\x1b[0m\n\n`);
 
@@ -894,7 +901,7 @@ function doAddAccount(argv) {
 
   // Verify the login actually landed in this profile.
   if (r.status !== 0 || !P.hasCreds(id)) {
-    process.stderr.write(`\x1b[31m[cl] login did not complete — no account added. (no other account was touched)\x1b[0m\n`);
+    process.stderr.write(`\x1b[31m[arc] login did not complete — no account added. (no other account was touched)\x1b[0m\n`);
     return { code: 1 };
   }
   const who = authStatus(profile); // identity now inside this profile
@@ -911,13 +918,13 @@ function doAddAccount(argv) {
   };
   let cfgBak;
   try { cfgBak = addAccountToConfig(acc, has('--default')); }
-  catch (e) { process.stderr.write(`\x1b[31m[cl] ${e.message}\x1b[0m\n`); return { code: 1 }; }
+  catch (e) { process.stderr.write(`\x1b[31m[arc] ${e.message}\x1b[0m\n`); return { code: 1 }; }
   reloadCfg(); // the new account is now switchable
 
   process.stdout.write(
-    `\n\x1b[32m[cl] ✓ added account "${id}"${acc.email ? ` (${acc.email}, ${acc.subscriptionType || 'subscription'})` : ''}.\x1b[0m` +
-    `\n[cl] use it:  cl:switch ${id}\n` +
-    `[cl] config backed up at ${cfgBak}\n`);
+    `\n\x1b[32m[arc] ✓ added account "${id}"${acc.email ? ` (${acc.email}, ${acc.subscriptionType || 'subscription'})` : ''}.\x1b[0m` +
+    `\n[arc] use it:  arc:switch ${id}\n` +
+    `[arc] config backed up at ${cfgBak}\n`);
   return { code: 0 };
 }
 
@@ -947,7 +954,7 @@ function cmdDoctor() {
     } else {
       // oauth: the login lives in the account's own CLAUDE_CONFIG_DIR profile.
       if (P.hasCreds(a.id)) detail = 'signed in · own profile';
-      else { status = '⚠'; detail = `NO login yet — cl:switch ${a.id} then /login (or cl capture ${a.id})`; }
+      else { status = '⚠'; detail = `NO login yet — arc:switch ${a.id} then /login (or cl capture ${a.id})`; }
     }
     lines.push(`  [${a.type}] ${a.id} "${a.label}" ${status} ${detail}`);
   }
@@ -962,7 +969,7 @@ function cmdDoctor() {
   try {
     const st = JSON.parse(fs.readFileSync(path.join(C.CLAUDE_DIR, 'settings.json'), 'utf8'));
     const has = (ev, frag) => JSON.stringify((st.hooks || {})[ev] || []).includes(frag);
-    lines.push(`hooks: notify=${has('Stop', 'cl-notify') ? '✓' : '✗'} wait=${has('Notification', 'cl-notify') ? '✓' : '✗'} fail=${has('StopFailure', 'cl-notify') ? '✓' : '✗'}`);
+    lines.push(`hooks: notify=${has('Stop', 'notify') ? '✓' : '✗'} wait=${has('Notification', 'notify') ? '✓' : '✗'} fail=${has('StopFailure', 'notify') ? '✓' : '✗'}`);
     lines.push(`statusline: ${st.statusLine && JSON.stringify(st.statusLine).includes('usage-monitor') ? '✓' : '✗ not wired'}`);
   } catch { lines.push('settings.json: unreadable'); }
   process.stdout.write(lines.join('\n') + '\n');
@@ -972,14 +979,14 @@ function cmdDoctor() {
 // ---- cl set-key <id> : store an api account's key DPAPI-encrypted in config ---
 // Reads the key from the clipboard (default), a file (--file), or stdin (--stdin),
 // DPAPI-encrypts it (bound to this Windows user+machine), writes it as `apiKeyEnc`
-// in cl-config.json and DROPS any other key source — so no plaintext key lives on
+// in arc-config.json and DROPS any other key source — so no plaintext key lives on
 // disk. Backs up + validates (round-trips the decrypt); restores on failure.
 function cmdSetKey(argv) {
   const id = argv.find((a) => !a.startsWith('-'));
   if (!id) { process.stderr.write('usage: cl set-key <id> [--file <path> | --stdin]   (default: read key from clipboard)\n'); process.exit(1); }
   const acc = C.findAccount(cfg, id);
-  if (!acc) { process.stderr.write(`[cl] unknown account "${id}" (configured: ${cfg.accounts.map((a) => a.id).join(', ')})\n`); process.exit(1); }
-  if (acc.type !== 'api') { process.stderr.write(`[cl] set-key applies to api (gateway) accounts; "${id}" is ${acc.type}.\n`); process.exit(1); }
+  if (!acc) { process.stderr.write(`[arc] unknown account "${id}" (configured: ${cfg.accounts.map((a) => a.id).join(', ')})\n`); process.exit(1); }
+  if (acc.type !== 'api') { process.stderr.write(`[arc] set-key applies to api (gateway) accounts; "${id}" is ${acc.type}.\n`); process.exit(1); }
 
   // 1. obtain the plaintext key
   let key = '', src = 'clipboard';
@@ -993,24 +1000,24 @@ function cmdSetKey(argv) {
     } else if (argv.includes('--stdin')) {
       src = 'stdin'; key = fs.readFileSync(0, 'utf8').trim();
     } else {
-      const clip = require('./cl-platform').readClipboard();
-      if (clip == null) { process.stderr.write(`[cl] couldn't read the clipboard — ${require('./cl-platform').clipboardHint()}\n`); process.exit(1); }
+      const clip = require('./arc-platform').readClipboard();
+      if (clip == null) { process.stderr.write(`[arc] couldn't read the clipboard — ${require('./arc-platform').clipboardHint()}\n`); process.exit(1); }
       key = clip;
     }
-  } catch (e) { process.stderr.write(`[cl] could not read key from ${src}: ${e.message}\n`); process.exit(1); }
+  } catch (e) { process.stderr.write(`[arc] could not read key from ${src}: ${e.message}\n`); process.exit(1); }
   key = (key || '').trim();
-  if (!key) { process.stderr.write(`[cl] no key found in ${src} (clipboard empty? try --file <path> or --stdin)\n`); process.exit(1); }
-  if (!/^sk-/.test(key)) process.stderr.write(`[cl] note: key from ${src} doesn't start with "sk-" (len ${key.length}) — proceeding.\n`);
+  if (!key) { process.stderr.write(`[arc] no key found in ${src} (clipboard empty? try --file <path> or --stdin)\n`); process.exit(1); }
+  if (!/^sk-/.test(key)) process.stderr.write(`[arc] note: key from ${src} doesn't start with "sk-" (len ${key.length}) — proceeding.\n`);
 
   // 2. store the key at rest (DPAPI on Windows; 0600 file on POSIX) before touching config
   let stored;
   try { stored = C.storeApiKey(id, key); }
-  catch (e) { process.stderr.write(`[cl] could not store key: ${e.message}\n`); process.exit(1); }
+  catch (e) { process.stderr.write(`[arc] could not store key: ${e.message}\n`); process.exit(1); }
 
   // 3. backup -> write the stored key fields + drop other key sources -> validate -> rollback on fail
   const bak = C.CONFIG_PATH + '.bak-' + Date.now();
   let raw; try { raw = JSON.parse(fs.readFileSync(C.CONFIG_PATH, 'utf8')); }
-  catch (e) { process.stderr.write(`[cl] cl-config.json unreadable: ${e.message}\n`); process.exit(1); }
+  catch (e) { process.stderr.write(`[arc] arc-config.json unreadable: ${e.message}\n`); process.exit(1); }
   fs.copyFileSync(C.CONFIG_PATH, bak);
   const a = (raw.accounts || []).find((x) => x.id === id);
   delete a.apiKey; delete a.apiKeyEnv; delete a.apiKeyFrom; delete a.apiKeyEnc; delete a.apiKeyKeychain;
@@ -1021,9 +1028,9 @@ function cmdSetKey(argv) {
     if (k !== key) throw new Error('resolved key mismatch after write');
   } catch (e) {
     fs.copyFileSync(bak, C.CONFIG_PATH);
-    process.stderr.write(`[cl] validation failed — restored backup. ${e.message}\n`); process.exit(1);
+    process.stderr.write(`[arc] validation failed — restored backup. ${e.message}\n`); process.exit(1);
   }
-  process.stdout.write(`[cl] ✓ "${id}" key stored — ${stored.note}; other key sources removed.\n`);
+  process.stdout.write(`[arc] ✓ "${id}" key stored — ${stored.note}; other key sources removed.\n`);
   process.stdout.write(`     ${key.slice(0, 7)}…${key.slice(-4)} (len ${key.length}) · backup ${path.basename(bak)}\n`);
   process.stdout.write(`     DPAPI is per user+machine — on another PC run \`cl set-key ${id}\` there too. If you kept a plaintext copy, delete it now.\n`);
   process.exit(0);
@@ -1067,8 +1074,8 @@ function detectModeFromTranscript(fp) {
 }
 
 async function runCodexCommand(args, opts = {}) {
-  const A = require('./cl-codex-account');
-  const R = require('./cl-runtime-codex');
+  const A = require('./arc-codex-account');
+  const R = require('./arc-runtime-codex');
   runtimeName = 'codex';
   const yolo = YOLO_MODES.has(opts.mode || '');
 
@@ -1084,10 +1091,10 @@ async function runCodexCommand(args, opts = {}) {
     if (!id) throw new Error('usage: cl codex add-account <id> [--home <dir>]');
     const hi = args.indexOf('--home');
     const account = A.addAccount(id, { home: hi >= 0 ? args[hi + 1] : null });
-    process.stdout.write(`[cl] Codex account "${id}" uses ${account.home}; starting native login...\n`);
+    process.stdout.write(`[arc] Codex account "${id}" uses ${account.home}; starting native login...\n`);
     const result = R.login(account);
     if (result.status !== 0) throw new Error(`Codex login for "${id}" did not complete`);
-    process.stdout.write(`[cl] Codex account "${id}" is ready.\n`);
+    process.stdout.write(`[arc] Codex account "${id}" is ready.\n`);
     return;
   }
   if (args[0] === 'login') {
@@ -1102,8 +1109,8 @@ async function runCodexCommand(args, opts = {}) {
     if (!id) throw new Error('usage: cl codex remove-account <id>');
     const removed = A.removeAccount(id);
     process.stdout.write(removed
-      ? `[cl] removed Codex account alias "${id}"; its CODEX_HOME was left intact.\n`
-      : `[cl] no Codex account alias "${id}".\n`);
+      ? `[arc] removed Codex account alias "${id}"; its CODEX_HOME was left intact.\n`
+      : `[arc] no Codex account alias "${id}".\n`);
     return;
   }
 
@@ -1129,10 +1136,10 @@ async function runCodexCommand(args, opts = {}) {
   });
   logicalSessionId = logical.id;
   writeState({ runtime: 'codex', account: account.id, nativeSessionId, logicalSessionId });
-  try { require('./cl-fridge').refreshRole(SESSION_ID, process.pid, process.cwd()); } catch {}
+  try { require('./arc-fridge').refreshRole(SESSION_ID, process.pid, process.cwd()); } catch {}
 
-  process.stdout.write(`\x1b[2m[cl] starting Codex on ${account.label} · cl session ${logical.id.slice(0, 8)}...\x1b[0m\n`);
-  if (yolo) process.stdout.write(`\x1b[2m[cl] Claude mode "${opts.mode}" → launching Codex with --yolo (no approval prompts)\x1b[0m\n`);
+  process.stdout.write(`\x1b[2m[arc] starting Codex on ${account.label} · cl session ${logical.id.slice(0, 8)}...\x1b[0m\n`);
+  if (yolo) process.stdout.write(`\x1b[2m[arc] Claude mode "${opts.mode}" → launching Codex with --yolo (no approval prompts)\x1b[0m\n`);
   const { child } = R.launch({
     args: passArgs,
     account: account.id,
@@ -1161,7 +1168,7 @@ async function main() {
   if (userArgs[0] === 'codex') return runCodexCommand(userArgs.slice(1));
   if (userArgs[0] === 'sessions') {
     const sessions = O.listSessions();
-    if (!sessions.length) { process.stdout.write('[cl] no orchestrated sessions yet.\n'); return; }
+    if (!sessions.length) { process.stdout.write('[arc] no orchestrated sessions yet.\n'); return; }
     for (const s of sessions) {
       const b = s.bindings && s.bindings[s.activeRuntime];
       process.stdout.write(`${s.id}\t${s.activeRuntime}\t${(b && b.account) || 'default'}\t${(b && b.nativeSessionId) || '-'}\t${s.cwd}\n`);
@@ -1171,56 +1178,56 @@ async function main() {
 
   // Subcommands (never claude flags): setup / capture / doctor.
   if (userArgs[0] === 'setup') {
-    const r = spawnSync(process.execPath, [path.join(__dirname, 'cl-setup.js')], { stdio: 'inherit' });
+    const r = spawnSync(process.execPath, [path.join(__dirname, 'arc-setup.js')], { stdio: 'inherit' });
     process.exit(r.status ?? 0);
   }
   if (userArgs[0] === 'capture') return cmdCapture(userArgs[1]);
   if (userArgs[0] === 'rename') {
     // Terminal rename of a NOT-currently-open account (offline). Renaming the
-    // account a live session is on must be done from that session (cl:rename).
-    if (userArgs.length < 3) { process.stderr.write('[cl] usage: cl rename <old> <new>\n'); process.exit(1); }
-    try { const { backup } = require('./cl-switch-core').doRename(C, userArgs[1], userArgs[2]);
-      process.stdout.write(`[cl] ✓ renamed "${userArgs[1]}" → "${userArgs[2]}" (login + conversations preserved; config backup ${backup})\n`); process.exit(0); }
-    catch (e) { process.stderr.write(`[cl] rename failed — ${e.message}\n`); process.exit(1); }
+    // account a live session is on must be done from that session (arc:rename).
+    if (userArgs.length < 3) { process.stderr.write('[arc] usage: cl rename <old> <new>\n'); process.exit(1); }
+    try { const { backup } = require('./arc-switch-core').doRename(C, userArgs[1], userArgs[2]);
+      process.stdout.write(`[arc] ✓ renamed "${userArgs[1]}" → "${userArgs[2]}" (login + conversations preserved; config backup ${backup})\n`); process.exit(0); }
+    catch (e) { process.stderr.write(`[arc] rename failed — ${e.message}\n`); process.exit(1); }
   }
   if (userArgs[0] === 'add-account' || userArgs[0] === 'add') return cmdAddAccount(userArgs.slice(1));
   if (userArgs[0] === 'export' || userArgs[0] === 'import') {
-    const sync = require('./cl-sync');
+    const sync = require('./arc-sync');
     const fn = userArgs[0] === 'export' ? sync.doExport : sync.doImport;
-    const r = fn(process.env.CL_SESSION || '', userArgs.slice(1).join(' '));
+    const r = fn((process.env.ARC_SESSION || process.env.CL_SESSION) || '', userArgs.slice(1).join(' '));
     process.stdout.write(r.message + '\n');
     process.exit(r.ok ? 0 : 1);
   }
   if (userArgs[0] === 'peek' || userArgs[0] === 'usage') {
-    const r = core.buildPeek(process.env.CL_SESSION || '');
+    const r = core.buildPeek((process.env.ARC_SESSION || process.env.CL_SESSION) || '');
     process.stdout.write(r.message + '\n');
     process.exit(r.ok ? 0 : 1);
   }
   if (userArgs[0] === 'trash') {
     // cl trash [restore <id> | empty [confirm]] — same two-step confirm as the
-    // in-session cl:trash (run `cl trash empty`, then `cl trash empty confirm`).
-    const r = core.requestTrash(process.env.CL_SESSION || '', userArgs.slice(1).join(' '));
-    process.stdout.write(r.message.replace(/cl:trash/g, 'cl trash') + '\n');
+    // in-session arc:trash (run `cl trash empty`, then `cl trash empty confirm`).
+    const r = core.requestTrash((process.env.ARC_SESSION || process.env.CL_SESSION) || '', userArgs.slice(1).join(' '));
+    process.stdout.write(r.message.replace(/arc:trash/g, 'cl trash') + '\n');
     process.exit(r.ok ? 0 : 1);
   }
   if (userArgs[0] === 'set-key') return cmdSetKey(userArgs.slice(1));
   if (userArgs[0] === 'doctor') return cmdDoctor();
 
-  // Fridge CLI — the AGENT-facing way to leave a roommate a note. The `cl:note`
+  // Fridge CLI — the AGENT-facing way to leave a roommate a note. The `arc:note`
   // sentinel is eaten by the UserPromptSubmit hook before the model, so an agent can
   // never TYPE it; but it can RUN `cl note ...` via its Bash tool, which lands here in a
   // fresh process (no session restart needed). Reuses the same cl-fridge functions the
-  // sentinels do. Output mirrors the CLI form (`cl note`, not `cl:note`).
+  // sentinels do. Output mirrors the CLI form (`cl note`, not `arc:note`).
   if (userArgs[0] === 'role' || userArgs[0] === 'note' || userArgs[0] === 'notes') {
-    const fridge = require('./cl-fridge');
-    const session = process.env.CL_SESSION || '';
+    const fridge = require('./arc-fridge');
+    const session = (process.env.ARC_SESSION || process.env.CL_SESSION) || '';
     const arg = userArgs.slice(1).join(' ');
     const cwd = process.cwd();
     const r = userArgs[0] === 'role' ? fridge.requestRole(session, arg, cwd)
       : userArgs[0] === 'note' ? fridge.requestNote(session, arg, cwd)
         : fridge.requestNotes(session, arg, cwd);
     const msg = String(r.message)
-      .replace(/cl:role/g, 'cl role').replace(/cl:notes/g, 'cl notes').replace(/cl:note/g, 'cl note');
+      .replace(/arc:role/g, 'cl role').replace(/arc:notes/g, 'cl notes').replace(/arc:note/g, 'cl note');
     process.stdout.write(msg + '\n');
     process.exit(r.ok ? 0 : 1);
   }
@@ -1228,13 +1235,13 @@ async function main() {
   // background task / Monitor can wake an idle DELEGATE session. Never returns on its
   // own (loops until killed), so it must come after the quick subcommands.
   if (userArgs[0] === 'watch') {
-    require('./cl-watch').run(userArgs[1], process.cwd());
+    require('./arc-watch').run(userArgs[1], process.cwd());
     return; // the interval keeps the process alive
   }
-  // (handoff is a HUMAN action → the zero-token `cl:handoff` sentinel, handled in
+  // (handoff is a HUMAN action → the zero-token `arc:handoff` sentinel, handled in
   // cl-switch-hook, not a `cl handoff` CLI subcommand.)
 
-  let respawning = process.env.CL_RESPAWNED === '1';
+  let respawning = (process.env.ARC_RESPAWNED || process.env.CL_RESPAWNED) === '1';
   if (!respawning) { sweepStaleStates(); migrateProfilesOnce(); } // only the original launch; not re-execs
   // Snapshot the terminal window now, while it is still foreground (before claude
   // takes over the TTY), so a clicked toast can focus it later. Once per process.
@@ -1272,7 +1279,7 @@ async function main() {
   if (!respawning && forceAccount) {
     const acc = C.findAccount(cfg, forceAccount);
     if (!acc) {
-      process.stderr.write(`[cl] unknown account "${forceAccount}" (configured: ${cfg.accounts.map(a => a.id).join(', ')})\n`);
+      process.stderr.write(`[arc] unknown account "${forceAccount}" (configured: ${cfg.accounts.map(a => a.id).join(', ')})\n`);
       process.exit(1);
     }
     account = acc.id;
@@ -1283,10 +1290,10 @@ async function main() {
     // missing) — then the saved/default account stands.
     const pick = core.chooseLaunchAccount(cfg, readUsageCache());
     if (pick && pick.id !== account) {
-      process.stdout.write(`\x1b[2m[cl] auto-selected ${accountLabel(pick.id)} — ${pick.reason}\x1b[0m\n`);
+      process.stdout.write(`\x1b[2m[arc] auto-selected ${accountLabel(pick.id)} — ${pick.reason}\x1b[0m\n`);
       account = pick.id;
     } else if (pick && pick.id === account) {
-      process.stdout.write(`\x1b[2m[cl] ${pick.reason}\x1b[0m\n`);
+      process.stdout.write(`\x1b[2m[arc] ${pick.reason}\x1b[0m\n`);
     }
   }
 
@@ -1322,7 +1329,7 @@ async function main() {
   // open a conversation another LIVE cl already owns — unless --force. Skipped
   // on a /restart re-exec (CL_RESPAWNED): that's the same logical session handing
   // off to itself, and the old process is already exiting.
-  const forceDup = forceDupFlag || process.env.CL_FORCE_DUP === '1';
+  const forceDup = forceDupFlag || (process.env.ARC_FORCE_DUP || process.env.CL_FORCE_DUP) === '1';
   // Guard the ids we know pre-launch: a managed convId (incl. /restart re-exec),
   // OR an explicit `cl --resume <uuid>`. A bare picker resume has no id yet — it
   // gets claimed once the statusline bridges its real id (see below).
@@ -1331,9 +1338,9 @@ async function main() {
     const owner = liveOwnerOf(guardConv);
     if (owner) {
       process.stderr.write(
-        `\x1b[31m[cl] REFUSING TO LAUNCH — conversation ${guardConv.slice(0, 8)} is already open in a live cl session ` +
+        `\x1b[31m[arc] REFUSING TO LAUNCH — conversation ${guardConv.slice(0, 8)} is already open in a live cl session ` +
         `(pid ${owner.pid}, cwd ${owner.cwd}).\x1b[0m\n` +
-        `\x1b[33m[cl] Two sessions on one conversation corrupt each other and can crash together (this is that bug).\n` +
+        `\x1b[33m[arc] Two sessions on one conversation corrupt each other and can crash together (this is that bug).\n` +
         `      • Use the EXISTING window, or\n` +
         `      • start a fresh chat: \`cl\` (no --resume), or\n` +
         `      • fork it read-only: \`claude --resume ${guardConv} --fork-session\`, or\n` +
@@ -1406,7 +1413,7 @@ async function main() {
       const a = stripConvArgs(passArgs); // no lingering --resume/--session-id to duplicate
       // On respawn (switch/restart), also re-apply the session's model + mode.
       // Only --resume if the conversation was actually persisted; a fresh session
-      // that just ran a blocked cl: command has no transcript, so --resume would
+      // that just ran a blocked arc: command has no transcript, so --resume would
       // fail ("No conversation found") — (re)create it with --session-id instead.
       const canResume = convStarted && hasTranscript(convId);
       claudeArgs = canResume
@@ -1418,13 +1425,13 @@ async function main() {
     // The fridge role survives /restart and /switch the same way model + effort do.
     // A restart re-execs this wrapper with a NEW pid, so the role's lease would point
     // at a dead process and another session could steal it — re-assert it here.
-    try { require('./cl-fridge').refreshRole(SESSION_ID, process.pid, process.cwd()); } catch {}
+    try { require('./arc-fridge').refreshRole(SESSION_ID, process.pid, process.cwd()); } catch {}
     // Seed the sticky baseline with what we ACTUALLY applied, so the statusline
     // never claims an effort the session isn't really at.
     if (effConv) seedEffort(effConv, applied);
     // Credentials are isolated per account via CLAUDE_CONFIG_DIR (set in buildEnv →
     // P.ensureProfile); there is no shared login to swap.
-    process.stdout.write(`\x1b[2m[cl] starting on ${accountLabel(account)}...\x1b[0m\n`);
+    process.stdout.write(`\x1b[2m[arc] starting on ${accountLabel(account)}...\x1b[0m\n`);
 
     // Watch for conversation adoption only on a picker resume (no id known
     // pre-launch), and only until the first effort-restoring relaunch.
@@ -1441,10 +1448,10 @@ async function main() {
     //       transcript (e.g. the user used claude's own resume, or the real id
     //       diverged from the minted one). Without this, a switch/restart re-opens
     //       the phantom via --session-id and mints a brand-new EMPTY session — the
-    //       "cl:switch opens a new session instead of resuming" bug.
+    //       "arc:switch opens a new session instead of resuming" bug.
     // Guard (managed case) via hasTranscript: only adopt a bridged id that is a
     // REAL persisted conversation, never a transient/bogus one. (pickConvId in
-    // cl-conv.js is the pure, unit-tested decision.)
+    // arc-conv.js is the pure, unit-tested decision.)
     const actual = readActiveConv();
     const resolved = pickConvId(convId, actual, userManagesConv, hasTranscript);
     if (resolved !== convId) {
@@ -1457,7 +1464,7 @@ async function main() {
       // terminals see it as taken.
       const owner = !forceDup ? liveOwnerOf(convId) : null;
       if (owner) {
-        process.stderr.write(`\x1b[31m[cl] WARNING — the resumed conversation ${convId.slice(0, 8)} is ALSO open in cl pid ${owner.pid} (${owner.cwd}). Two sessions on one conversation can corrupt/crash. Close one.\x1b[0m\n`);
+        process.stderr.write(`\x1b[31m[arc] WARNING — the resumed conversation ${convId.slice(0, 8)} is ALSO open in cl pid ${owner.pid} (${owner.cwd}). Two sessions on one conversation can corrupt/crash. Close one.\x1b[0m\n`);
         logLine(`duplicate detected post-adopt conv=${convId} other pid=${owner.pid}`);
       } else {
         claimConv(convId);
@@ -1477,21 +1484,21 @@ async function main() {
     });
 
     if (reason === 'handoff') {
-      const A = require('./cl-codex-account');
+      const A = require('./arc-codex-account');
       const target = A.findAccount(payload && payload.account);
       if (!target) {
-        process.stderr.write(`\x1b[31m[cl] handoff failed — unknown Codex account "${payload && payload.account}". Returning to Claude.\x1b[0m\n`);
+        process.stderr.write(`\x1b[31m[arc] handoff failed — unknown Codex account "${payload && payload.account}". Returning to Claude.\x1b[0m\n`);
         await new Promise(r => setTimeout(r, 400));
         continue;
       }
-      const handoff = require('./cl-handoff').handoff(SESSION_ID, {
+      const handoff = require('./arc-handoff').handoff(SESSION_ID, {
         transcript: payload && payload.transcriptPath,
         cwd: (payload && payload.cwd) || process.cwd(),
         keepLast: (payload && payload.keepLast) || 0,
         codexHome: target.home,
       });
       if (!handoff.ok) {
-        process.stderr.write(`\x1b[31m[cl] ${handoff.message} Returning to Claude.\x1b[0m\n`);
+        process.stderr.write(`\x1b[31m[arc] ${handoff.message} Returning to Claude.\x1b[0m\n`);
         await new Promise(r => setTimeout(r, 400));
         continue;
       }
@@ -1503,7 +1510,7 @@ async function main() {
         state: 'active',
       }, { reason: 'handoff' });
       writeState({ runtime: 'codex', account: target.id, nativeSessionId: handoff.sessionId, logicalSessionId });
-      process.stdout.write(`\x1b[36m[cl] handoff ready — continuing as Codex on ${target.label}.\x1b[0m\n`);
+      process.stdout.write(`\x1b[36m[arc] handoff ready — continuing as Codex on ${target.label}.\x1b[0m\n`);
       return runCodexCommand(['resume', handoff.sessionId, '--account', target.id],
         { mode: detectModeFromTranscript((payload && payload.transcriptPath) || (convId ? findTranscript(convId) : null)) });
     }
@@ -1513,10 +1520,10 @@ async function main() {
       // (incl. convId) persists and CL_SESSION is inherited, so the child re-opens
       // THIS same conversation with --resume; pass only the user's original args.
       writeState({ account, switchCount, convId, pinnedEffort });
-      process.stdout.write('\x1b[36m[cl] reloading wrapper + restarting claude...\x1b[0m\n');
+      process.stdout.write('\x1b[36m[arc] reloading wrapper + restarting claude...\x1b[0m\n');
       const r = spawnSync(process.execPath, [__filename, ...passArgs], {
         stdio: 'inherit',
-        env: { ...process.env, CL_SESSION: SESSION_ID, CL_RESPAWNED: '1' },
+        env: { ...process.env, ARC_SESSION: SESSION_ID, CL_SESSION: SESSION_ID, ARC_RESPAWNED: '1', CL_RESPAWNED: '1' },
       });
       process.exit(r.status == null ? 0 : r.status);
     }
@@ -1525,7 +1532,7 @@ async function main() {
       // claude is dead → its transcript handle is released → safe to move it.
       const delConv = (payload && payload.convId) || convId;
       let res = { trashDir: null, moved: [] };
-      try { res = require('./cl-sync').trashSession(delConv); } catch (e) { logLine(`delete failed: ${e.message}`); }
+      try { res = require('./arc-sync').trashSession(delConv); } catch (e) { logLine(`delete failed: ${e.message}`); }
       releaseConv(delConv);
       try { fs.unlinkSync(effortStateFile(delConv)); } catch {}
       logLine(`deleted conv=${delConv} → ${res.trashDir || '(not found)'} (${res.moved.join('+') || 'nothing'})`);
@@ -1535,14 +1542,14 @@ async function main() {
       claimConv(convId);
       writeState({ account, switchCount, convId, pinnedEffort });
       process.stdout.write(res.moved.length
-        ? `\x1b[33m[cl] deleted this conversation → recoverable trash: ${res.trashDir}\x1b[0m\n\x1b[2m[cl] list/restore/purge later with cl:trash — starting a fresh session…\x1b[0m\n`
-        : `\x1b[33m[cl] (no transcript found to delete) — starting a fresh session…\x1b[0m\n`);
+        ? `\x1b[33m[arc] deleted this conversation → recoverable trash: ${res.trashDir}\x1b[0m\n\x1b[2m[arc] list/restore/purge later with arc:trash — starting a fresh session…\x1b[0m\n`
+        : `\x1b[33m[arc] (no transcript found to delete) — starting a fresh session…\x1b[0m\n`);
       await new Promise(r => setTimeout(r, 300));
       continue; // loop launches --session-id <new convId>
     }
 
     if (reason === 'addaccount') {
-      // claude is dead, cl-runner owns the TTY. Wizard (bare cl:add-account) →
+      // claude is dead, cl-runner owns the TTY. Wizard (bare arc:add-account) →
       // type-select + prompts; otherwise the flag-driven guided login/api add.
       if (payload && payload.wizard) {
         await runAddWizard();
@@ -1551,7 +1558,7 @@ async function main() {
         const argv = (payload && typeof payload.args === 'string' ? payload.args : '').trim().split(/\s+/).filter(Boolean);
         doAddAccount(argv); // prints its own progress; never exits
       }
-      process.stdout.write('\x1b[2m[cl] returning to your conversation…\x1b[0m\n');
+      process.stdout.write('\x1b[2m[arc] returning to your conversation…\x1b[0m\n');
       writeState({ account, switchCount, convId, pinnedEffort });
       await new Promise(r => setTimeout(r, 300));
       continue; // relaunch --resume convId on the SAME account
@@ -1565,12 +1572,12 @@ async function main() {
       if (moved) {
         switchCount++;
         account = chosen;
-        process.stdout.write(`\x1b[36m[cl] switching to ${accountLabel(account)} — continuing conversation...\x1b[0m\n`);
+        process.stdout.write(`\x1b[36m[arc] switching to ${accountLabel(account)} — continuing conversation...\x1b[0m\n`);
       } else {
-        process.stdout.write(`\x1b[2m[cl] staying on ${accountLabel(account)}.\x1b[0m\n`);
+        process.stdout.write(`\x1b[2m[arc] staying on ${accountLabel(account)}.\x1b[0m\n`);
       }
       writeState({ account, switchCount, convId, pinnedEffort });
-      if (moved) core.refreshUsageNow(6_000); // same as cl:switch — don't paint the old account's usage
+      if (moved) core.refreshUsageNow(6_000); // same as arc:switch — don't paint the old account's usage
       await new Promise(r => setTimeout(r, 200));
       continue; // loop top relaunches --resume convId on `account`
     }
@@ -1580,13 +1587,13 @@ async function main() {
       const oldId = (payload && payload.oldId) || account;
       const newId = payload && payload.newId;
       try {
-        require('./cl-switch-core').doRename(C, oldId, newId); // move profile dir + update config
+        require('./arc-switch-core').doRename(C, oldId, newId); // move profile dir + update config
         if (account === oldId) account = newId;
         reloadCfg();
-        process.stdout.write(`\x1b[32m[cl] renamed "${oldId}" → "${newId}" — relaunching on the new name…\x1b[0m\n`);
+        process.stdout.write(`\x1b[32m[arc] renamed "${oldId}" → "${newId}" — relaunching on the new name…\x1b[0m\n`);
       } catch (e) {
         logLine(`rename failed ${oldId}->${newId}: ${e.message}`);
-        process.stdout.write(`\x1b[31m[cl] rename failed — ${e.message}. Staying on "${account}".\x1b[0m\n`);
+        process.stdout.write(`\x1b[31m[arc] rename failed — ${e.message}. Staying on "${account}".\x1b[0m\n`);
       }
       writeState({ account, switchCount, convId, pinnedEffort });
       await new Promise(r => setTimeout(r, 400));
@@ -1597,7 +1604,7 @@ async function main() {
       // Pick up accounts added/edited since launch (cl MCP / manual edits).
       const next = C.nextAccount(reloadCfg(), account, payload && payload.target);
       if (!next) {
-        process.stdout.write('\x1b[33m[cl] only one account configured — nothing to switch to. Relaunching...\x1b[0m\n');
+        process.stdout.write('\x1b[33m[arc] only one account configured — nothing to switch to. Relaunching...\x1b[0m\n');
       } else {
         switchCount++;
         account = next.id;
@@ -1605,7 +1612,7 @@ async function main() {
       writeState({ account, switchCount, convId, pinnedEffort });
       // The loop top re-opens THIS conversation via --resume convId (convStarted
       // is now true), so the same chat continues on the other account.
-      process.stdout.write(`\x1b[36m[cl] switching to ${accountLabel(account)} — continuing conversation...\x1b[0m\n`);
+      process.stdout.write(`\x1b[36m[arc] switching to ${accountLabel(account)} — continuing conversation...\x1b[0m\n`);
       // The caches still hold the PREVIOUS account's usage, and it still looks fresh
       // to the TTL — so without this the new account's statusline would show the old
       // account's numbers. Refresh before claude repaints. Bounded; never throws.
@@ -1621,7 +1628,7 @@ async function main() {
       const actual = readActiveConv();
       if (actual) { convId = actual; userManagesConv = false; }
       writeState({ account, switchCount, convId, pinnedEffort });
-      process.stdout.write(`\x1b[36m[cl] restoring this conversation's effort — relaunching...\x1b[0m\n`);
+      process.stdout.write(`\x1b[36m[arc] restoring this conversation's effort — relaunching...\x1b[0m\n`);
       await new Promise(r => setTimeout(r, 400));
       continue;
     }
@@ -1630,12 +1637,12 @@ async function main() {
     // (state + session-id bridge; the conversation itself is preserved by claude).
     O.markInactive(logicalSessionId, 'claude', exitCode === 0 ? 'exited' : 'failed');
     deleteState();
-    try { fs.unlinkSync(path.join(CACHE_DIR, `cl-active-${SESSION_ID}.json`)); } catch {}
+    try { fs.unlinkSync(path.join(CACHE_DIR, `arc-active-${SESSION_ID}.json`)); } catch {}
     process.exit(exitCode ?? 0);
   }
 }
 
 main().catch(e => {
-  process.stderr.write('[cl] fatal: ' + e.message + '\n');
+  process.stderr.write('[arc] fatal: ' + e.message + '\n');
   process.exit(1);
 });

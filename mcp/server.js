@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// cl-mcp: the cl-kit MCP (stdio) server. Lets any Claude Code session manage
+// arc-mcp: the arc MCP (stdio) server. Lets any Claude Code session manage
 // the cl account-switcher configuration conversationally — list/add/remove/
 // update accounts, tune defaults/order/features — plus the pool metrics tools
 // (pool_status / pool_next_reset) when a pool DB is configured.
 //
-// Safety: every mutation backs up cl-config.json first (timestamped, kept),
+// Safety: every mutation backs up arc-config.json first (timestamped, kept),
 // writes atomically, and validates the result by re-loading it — a write that
 // produces an unloadable config is rolled back. Secrets (api keys, DB URLs)
 // are never echoed back in responses or errors.
 //
-// Register: claude mcp add --scope user cl node ~/.claude/scripts/cl-mcp/server.js
+// Register: claude mcp add --scope user arc node ~/.claude/scripts/arc-mcp/server.js
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,17 +24,17 @@ import {
 const require = createRequire(import.meta.url);
 const { Client } = require('pg'); // pg is CommonJS
 
-// cl-config.js lives at ../src/ in the kit repo and ../ when deployed to
-// ~/.claude/scripts/cl-mcp/ — try both.
+// arc-config.js lives at ../src/ in the kit repo and ../ when deployed to
+// ~/.claude/scripts/arc-mcp/ — try both.
 const C = (() => {
-  for (const p of ['../src/cl-config.js', '../cl-config.js']) {
+  for (const p of ['../src/arc-config.js', '../arc-config.js']) {
     try { return require(p); } catch {}
   }
-  throw new Error('cl-config.js not found next to cl-mcp');
+  throw new Error('arc-config.js not found next to arc-mcp');
 })();
 // cl-profile lives alongside cl-config (../src in the repo, ../ when deployed).
 const P = (() => {
-  for (const p of ['../src/cl-profile.js', '../cl-profile.js']) {
+  for (const p of ['../src/arc-profile.js', '../arc-profile.js']) {
     try { return require(p); } catch {}
   }
   return null; // optional: account_remove degrades to config-only if unavailable
@@ -108,8 +108,8 @@ function shapeAccount(a, cfg) {
 }
 
 // Running cl sessions keep their launch-time config for env building, but
-// cl:switch RE-READS the config, so new/edited accounts are switchable at once.
-const LIVE_NOTE = 'Effective immediately for cl:switch and the statusline; sessions already running on an EDITED account pick up env changes on their next cl:switch or cl:restart.';
+// arc:switch RE-READS the config, so new/edited accounts are switchable at once.
+const LIVE_NOTE = 'Effective immediately for arc:switch and the statusline; sessions already running on an EDITED account pick up env changes on their next arc:switch or arc:restart.';
 
 // ---- account tools --------------------------------------------------------------
 
@@ -189,7 +189,7 @@ function toolAccountRemove(args) {
   const backup = writeRaw(raw);
 
   // Quarantine the per-account profile dir to recoverable trash — same as the
-  // cl:remove-account hook — so a removal never leaves an orphan in cl-profiles.
+  // arc:remove-account hook — so a removal never leaves an orphan in cl-profiles.
   let profileTrash = null, profileInUse = false;
   if (P) { try { profileTrash = P.removeProfile(args.id); } catch (e) { profileInUse = true; } }
 
@@ -199,7 +199,7 @@ function toolAccountRemove(args) {
     remaining: (raw.accounts || []).map((a) => a.id),
     migratedLegacyConfig: migrated,
     backup,
-    note: LIVE_NOTE + ' Sessions currently RUNNING on the removed account keep working until they exit or cl:switch.',
+    note: LIVE_NOTE + ' Sessions currently RUNNING on the removed account keep working until they exit or arc:switch.',
   };
   if (profileTrash) { out.profileTrash = profileTrash; out.note += ` Its profile (login + local data) was MOVED to recoverable trash (${profileTrash}) — move it back to restore.`; }
   if (profileInUse) out.note += ' Its profile dir was left in place (a live session is using it) — remove it after that session exits.';
@@ -388,17 +388,17 @@ const TOOLS = [
   },
   {
     name: 'account_add',
-    description: 'Add an account to the cl switcher. type "oauth" = a claude.ai subscription login (capture it later with `cl capture <id>` if it is a second subscription). type "api" = an Anthropic-compatible gateway (needs baseUrl + one key source: apiKey inline, apiKeyEnv env-var name, or apiKeyFrom {file, regex with one capture group}). The new account is appended to switchOrder and immediately switchable with cl:switch.',
+    description: 'Add an account to the cl switcher. type "oauth" = a claude.ai subscription login (capture it later with `cl capture <id>` if it is a second subscription). type "api" = an Anthropic-compatible gateway (needs baseUrl + one key source: apiKey inline, apiKeyEnv env-var name, or apiKeyFrom {file, regex with one capture group}). The new account is appended to switchOrder and immediately switchable with arc:switch.',
     inputSchema: {
       type: 'object',
       required: ['id', 'type'],
       properties: {
-        id: { type: 'string', description: 'short id used in cl:switch <id> (alphanumeric, - _)' },
+        id: { type: 'string', description: 'short id used in arc:switch <id> (alphanumeric, - _)' },
         type: { type: 'string', enum: ['oauth', 'api'] },
         label: { type: 'string', description: 'statusline label (default: ID uppercased)' },
         color: { type: 'string', description: 'statusline hex color, e.g. #2DD4BF' },
         baseUrl: { type: 'string', description: 'api only: gateway base URL (https://...)' },
-        apiKey: { type: 'string', description: 'api only: inline key (stored in cl-config.json)' },
+        apiKey: { type: 'string', description: 'api only: inline key (stored in arc-config.json)' },
         apiKeyEnv: { type: 'string', description: 'api only: env var holding the key' },
         apiKeyFrom: {
           type: 'object', description: 'api only: extract the key from a file',
@@ -439,7 +439,7 @@ const TOOLS = [
   },
   {
     name: 'config_update',
-    description: 'Update cl switcher globals: defaultAccount (launch account), switchOrder (the cl:switch cycle), thresholds (warnSessionPct/warnWeekPct/switchSessionPct/switchWeekPct), features (autoBest on/off), poolDb ({neonUrl} to set, null to remove pool metrics).',
+    description: 'Update cl switcher globals: defaultAccount (launch account), switchOrder (the arc:switch cycle), thresholds (warnSessionPct/warnWeekPct/switchSessionPct/switchWeekPct), features (autoBest on/off), poolDb ({neonUrl} to set, null to remove pool metrics).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -487,7 +487,7 @@ const HANDLERS = {
 // ---- server wiring ---------------------------------------------------------------
 
 const server = new Server(
-  { name: 'cl-mcp', version: '2.0.0' },
+  { name: 'arc-mcp', version: '2.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -501,7 +501,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const result = await h(args || {});
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (e) {
-    return { content: [{ type: 'text', text: `cl-mcp error: ${scrub(e && e.message ? e.message : e)}` }], isError: true };
+    return { content: [{ type: 'text', text: `arc-mcp error: ${scrub(e && e.message ? e.message : e)}` }], isError: true };
   }
 });
 

@@ -90,7 +90,7 @@ let C;
 try {
   // A config with an oauth account + an api account keyed by ENV VAR (no DPAPI,
   // which is Windows-only) — everything here must resolve on any OS.
-  writeJSON(path.join(CLAUDE, 'cl-config.json'), {
+  writeJSON(path.join(CLAUDE, 'arc-config.json'), {
     version: 1, defaultAccount: 'sub', switchOrder: ['sub', 'gw'],
     accounts: [
       { id: 'sub', type: 'oauth', label: 'SUB' },
@@ -98,7 +98,7 @@ try {
     ],
   });
   process.env.CLKIT_TEST_KEY = 'sk-test-123';
-  C = require(path.join(SRC, 'cl-config.js'));
+  C = require(path.join(SRC, 'arc-config.js'));
   const cfg = C.loadConfig();
   ok('loadConfig returns both accounts', cfg.accounts.length === 2);
   ok('findAccount resolves by id', !!C.findAccount(cfg, 'sub') && !!C.findAccount(cfg, 'gw'));
@@ -117,7 +117,7 @@ try {
 // available gateway. A gateway with no tracked limit must count as available.
 section('cl-switch-core (launch account selection)');
 try {
-  const core = require(path.join(SRC, 'cl-switch-core.js'));
+  const core = require(path.join(SRC, 'arc-switch-core.js'));
   const SUB = { id: 'max', type: 'oauth', label: 'MAX' };
   const GW = { id: 'whale', type: 'api', label: 'GW', baseUrl: 'https://x' };
   const cfg = (accts) => ({ accounts: accts, defaultAccount: accts[0].id, thresholds: {} });
@@ -148,7 +148,7 @@ try {
 // cl:peek and auto-select scored every oauth account off that same blob.
 section('cl-switch-core (per-account usage attribution)');
 try {
-  const core = require(path.join(SRC, 'cl-switch-core.js'));
+  const core = require(path.join(SRC, 'arc-switch-core.js'));
   const A = { id: 'veneto', type: 'oauth', label: 'veneto' };
   const B = { id: 'whale', type: 'oauth', label: 'whale' };
   const cfg2 = { accounts: [A, B], defaultAccount: 'veneto', thresholds: {} }; // two subs
@@ -237,7 +237,7 @@ try {
   fs.mkdirSync(projDir, { recursive: true });
   fs.writeFileSync(path.join(projDir, 'c1.jsonl'), '{"t":1}\n');
 
-  const P = require(path.join(SRC, 'cl-profile.js'));
+  const P = require(path.join(SRC, 'arc-profile.js'));
   const dirA = P.ensureProfile('acctA');
   ok('ensureProfile creates the profile dir', fs.existsSync(dirA));
   // The junction (Windows) / symlink (POSIX) must make the shared transcript visible.
@@ -282,7 +282,7 @@ try {
 // ---- 4. cl-sync — trash (list / restore / empty / transcriptMeta) ------------
 section('cl-sync (trash)');
 try {
-  const sync = require(path.join(SRC, 'cl-sync.js'));
+  const sync = require(path.join(SRC, 'arc-sync.js'));
   const proj = path.join(CLAUDE, 'projects', 'E--demo');
   fs.mkdirSync(proj, { recursive: true });
   const cid = '11111111-2222-3333-4444-555555555555';
@@ -311,7 +311,7 @@ try {
 // ---- cl-sync export selectors: `all` = THIS project, `global` = everything -------
 section('cl-sync (export selectors)');
 try {
-  const sync = require(path.join(SRC, 'cl-sync.js'));
+  const sync = require(path.join(SRC, 'arc-sync.js'));
 
   // Claude Code names a project dir after the cwd, non-alphanumerics -> '-'
   ok('encodeProject: drive root', sync.encodeProject('E:\\') === 'E--');
@@ -342,7 +342,7 @@ try {
   // and doExport refuses `all` (rather than guessing) when the project is unknown
   const r = sync.doExport(S, 'all');
   ok('`cl:export all` refuses when the project is undeterminable', r.ok === false && /which project folder/.test(r.message));
-  ok('  and it points at `cl:export global`', /cl:export global/.test(r.message));
+  ok('  and it points at `arc:export global`', /arc:export global/.test(r.message));
 
   try { fs.unlinkSync(path.join(cacheDir, `cl-state-${S}.json`)); } catch {}
 } catch (e) { ok('cl-sync export selectors work', false, e.message); }
@@ -353,7 +353,7 @@ try {
 // broken. The bare form is what people actually type; it must mean the same as the flag.
 section('cl-sync (import destination)');
 try {
-  const sync = require(path.join(SRC, 'cl-sync.js'));
+  const sync = require(path.join(SRC, 'arc-sync.js'));
   const tgz = path.join(TMP, 'fake.tgz');
   fs.writeFileSync(tgz, 'not-a-real-archive');       // must exist; we never get as far as untar
 
@@ -364,7 +364,7 @@ try {
   // a RELATIVE bare positional is caught and explained (not silently ignored, as before)
   const rel = sync.doImport('nosess', `"${tgz}" not-absolute --dry-run`);
   ok('a relative bare dest is REFUSED, not ignored', rel.ok === false && /must be an ABSOLUTE/.test(rel.message));
-  ok('  and the error shows BOTH forms', /--dest/.test(rel.message) && /cl:import <archive>/.test(rel.message));
+  ok('  and the error shows BOTH forms', /--dest/.test(rel.message) && /arc:import <archive>/.test(rel.message));
 
   // the explicit flag is still honoured, and wins over a positional
   const flag = sync.doImport('nosess', `"${tgz}" --dest bad-relative --dry-run`);
@@ -380,7 +380,7 @@ try {
 // ---- cl-sync — cl:import --dest re-rooting (office/home path parity) ----------
 section('cl-sync (import --dest re-rooting)');
 try {
-  const sync = require(path.join(SRC, 'cl-sync.js'));
+  const sync = require(path.join(SRC, 'arc-sync.js'));
 
   // pure helpers
   ok('tokenize: quoted path with spaces is one token, quotes stripped',
@@ -449,7 +449,7 @@ try {
 // ---- 5. cl-switch-core — peek + trash rendering ------------------------------
 section('cl-switch-core');
 try {
-  const core = require(path.join(SRC, 'cl-switch-core.js'));
+  const core = require(path.join(SRC, 'arc-switch-core.js'));
   const peek = core.buildPeek('no-session');
   ok('buildPeek returns a message (never throws)', peek && typeof peek.message === 'string' && peek.message.length > 0);
   const tr = core.requestTrash('no-session', '');
@@ -472,7 +472,7 @@ try {
 // still resolve on Windows — only the POSIX OS-keychain source was dropped.
 section('cl-platform + storeApiKey (DPAPI + portable key sources)');
 try {
-  const plat = require(path.join(SRC, 'cl-platform.js'));
+  const plat = require(path.join(SRC, 'arc-platform.js'));
   const clip = plat.readClipboard();
   ok('readClipboard returns a string or null (never throws)', clip === null || typeof clip === 'string');
   ok('clipboardHint is a string', typeof plat.clipboardHint() === 'string');
@@ -501,7 +501,7 @@ section('cl-wire-settings (installer hook wiring)');
 try {
   const scriptsDir = path.join(CLAUDE, 'scripts');
   fs.mkdirSync(scriptsDir, { recursive: true });
-  const wire = path.join(SRC, 'cl-wire-settings.js');
+  const wire = path.join(SRC, 'arc-wire-settings.js');
   // start from a user settings.json with a pre-existing key to confirm we merge, not clobber
   writeJSON(path.join(CLAUDE, 'settings.json'), { theme: 'dark', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node other.js' }] }] } });
   const r1 = spawnSync(process.execPath, [wire, scriptsDir], { encoding: 'utf8' });
@@ -509,12 +509,12 @@ try {
   const s = JSON.parse(fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8'));
   const cmds = (ev) => (s.hooks[ev] || []).flatMap((g) => (g.hooks || []).map((x) => x.command)).join(' | ');
   ok('preserves the user\'s existing settings + hook', s.theme === 'dark' && cmds('Stop').includes('other.js'));
-  ok('wires UserPromptSubmit (switch-hook + notify start)', cmds('UserPromptSubmit').includes('cl-switch-hook.js') && cmds('UserPromptSubmit').includes('cl-notify.js'));
-  ok('wires Stop/StopFailure/Notification cl-notify', cmds('Stop').includes('cl-notify.js') && cmds('StopFailure').includes('cl-notify.js') && cmds('Notification').includes('cl-notify.js'));
+  ok('wires UserPromptSubmit (switch-hook + notify start)', cmds('UserPromptSubmit').includes('arc-switch-hook.js') && cmds('UserPromptSubmit').includes('arc-notify.js'));
+  ok('wires Stop/StopFailure/Notification cl-notify', cmds('Stop').includes('arc-notify.js') && cmds('StopFailure').includes('arc-notify.js') && cmds('Notification').includes('arc-notify.js'));
   ok('sets statusline', /usage-monitor\.js/.test(JSON.stringify(s.statusLine)));
   ok('no cl-signal allow-rule (slash commands removed)', !JSON.stringify(s.permissions || {}).includes('cl-signal.js'));
-  ok('wires TaskCreated -> cl-done (baseline the HEAD sha)', cmds('TaskCreated').includes('cl-done.js'));
-  ok('wires TaskCompleted -> cl-done (the git-derived gate)', cmds('TaskCompleted').includes('cl-done.js'));
+  ok('wires TaskCreated -> cl-done (baseline the HEAD sha)', cmds('TaskCreated').includes('arc-done.js'));
+  ok('wires TaskCompleted -> cl-done (the git-derived gate)', cmds('TaskCompleted').includes('arc-done.js'));
 
   // install.ps1 wires the SAME hooks by hand. If the two lists drift, a fresh install
   // silently lacks whatever the newer one added — which is exactly how the gate would
@@ -533,7 +533,7 @@ try {
   // idempotent: a second run must not duplicate hooks
   spawnSync(process.execPath, [wire, scriptsDir], { encoding: 'utf8' });
   const s2 = JSON.parse(fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8'));
-  const stopCount = (s2.hooks.Stop || []).flatMap((g) => g.hooks || []).filter((x) => x.command.includes('cl-notify.js')).length;
+  const stopCount = (s2.hooks.Stop || []).flatMap((g) => g.hooks || []).filter((x) => x.command.includes('arc-notify.js')).length;
   ok('re-run is idempotent (no duplicate hooks)', stopCount === 1);
 
   // safety: a MALFORMED settings.json must NOT be silently overwritten (must abort, untouched)
@@ -547,8 +547,8 @@ try {
 // ---- cl-anchor (has a doc's claim about the code gone stale?) -------------------
 section('cl-anchor (doc/code staleness)');
 try {
-  const A = require(path.join(SRC, 'cl-anchor.js'));
-  const RM = require(path.join(SRC, 'cl-room.js'));
+  const A = require(path.join(SRC, 'arc-anchor.js'));
+  const RM = require(path.join(SRC, 'arc-room.js'));
   const { execFileSync } = require('child_process');
 
   // --- parsing ---
@@ -642,7 +642,7 @@ try {
 
   // notify: a [!] note, once
   const S = 'clanchortest';
-  const F = require(path.join(SRC, 'cl-fridge.js'));
+  const F = require(path.join(SRC, 'arc-fridge.js'));
   const rf = F.roleFile(S);
   fs.mkdirSync(path.dirname(rf), { recursive: true });
   fs.writeFileSync(rf, JSON.stringify({ room: room.root, role: 'coding' }));
@@ -694,9 +694,9 @@ try {
 // ---- cl-done (derive "done" from git, not from the agent's word) ---------------
 section('cl-done (git-derived completion)');
 try {
-  const D = require(path.join(SRC, 'cl-done.js'));
-  const RM = require(path.join(SRC, 'cl-room.js'));
-  const F = require(path.join(SRC, 'cl-fridge.js'));
+  const D = require(path.join(SRC, 'arc-done.js'));
+  const RM = require(path.join(SRC, 'arc-room.js'));
+  const F = require(path.join(SRC, 'arc-fridge.js'));
   const { execFileSync } = require('child_process');
 
   // --- the judgement, pure (no repo needed) ---
@@ -809,8 +809,8 @@ try {
 // ---- cl-postcommit (every commit -> a fridge note, no task list needed) --------
 section('cl-postcommit (commit -> fridge note)');
 try {
-  const PC = require(path.join(SRC, 'cl-postcommit.js'));
-  const RM = require(path.join(SRC, 'cl-room.js'));
+  const PC = require(path.join(SRC, 'arc-postcommit.js'));
+  const RM = require(path.join(SRC, 'arc-room.js'));
   const { execFileSync } = require('child_process');
 
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
@@ -856,8 +856,8 @@ try {
 // Bash. This exercises that dispatch end to end through the real cl-runner process.
 section('cl-runner fridge CLI (cl note / cl role)');
 try {
-  const runner = path.join(SRC, 'cl-runner.js');
-  const RM = require(path.join(SRC, 'cl-room.js'));
+  const runner = path.join(SRC, 'arc-runner.js');
+  const RM = require(path.join(SRC, 'arc-room.js'));
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clicli-'));
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
   const room = RM.resolveRoom(repo); RM.ensureRoom(room);
@@ -891,8 +891,8 @@ try {
 // logic: each unread note once, own notes excluded, the read cursor never touched.
 section('cl-watch (delegation waker)');
 try {
-  const W = require(path.join(SRC, 'cl-watch.js'));
-  const RM = require(path.join(SRC, 'cl-room.js'));
+  const W = require(path.join(SRC, 'arc-watch.js'));
+  const RM = require(path.join(SRC, 'arc-room.js'));
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clwatch-'));
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
   const room = RM.resolveRoom(repo); RM.ensureRoom(room);
@@ -930,7 +930,7 @@ try {
 // conversion: text at full fidelity, tools as short markers, noise dropped.
 section('cl-transpile (Claude -> Codex text-first)');
 try {
-  const T = require(path.join(SRC, 'cl-transpile.js'));
+  const T = require(path.join(SRC, 'arc-transpile.js'));
   const recs = [
     { type: 'system', subtype: 'x' },                                                    // meta -> skip
     { type: 'user', message: { role: 'user', content: 'Add retries to the task_log schema.' } },
@@ -961,7 +961,7 @@ try {
 // ---- cl-handoff (locate transcript + dry-run, no codex needed) ------------------
 section('cl-handoff (transcript locate + dry-run)');
 try {
-  const H = require(path.join(SRC, 'cl-handoff.js'));
+  const H = require(path.join(SRC, 'arc-handoff.js'));
   // a fixture transcript under the sandbox HOME's projects dir
   const conv = 'ffff0000-1111-2222-3333-444455556666';
   const projDir = path.join(CLAUDE, 'projects', 'C--proj-x');
@@ -994,9 +994,9 @@ try {
 // ---- orchestration registry + Codex runtime account isolation ----------------
 section('runtime orchestration (logical sessions + Codex accounts)');
 try {
-  const O = require(path.join(SRC, 'cl-orchestrator.js'));
-  const A = require(path.join(SRC, 'cl-codex-account.js'));
-  const CR = require(path.join(SRC, 'cl-runtime-codex.js'));
+  const O = require(path.join(SRC, 'arc-orchestrator.js'));
+  const A = require(path.join(SRC, 'arc-codex-account.js'));
+  const CR = require(path.join(SRC, 'arc-runtime-codex.js'));
 
   const first = O.ensureSession({ runtime: 'claude', nativeSessionId: 'claude-native-1', account: 'work', cwd: TMP });
   const same = O.ensureSession({ runtime: 'claude', nativeSessionId: 'claude-native-1', account: 'work', cwd: TMP });
@@ -1040,14 +1040,14 @@ try {
   // turn. ensureHooks appends a managed block, preserving the user's config, idempotently,
   // and clears any dead hooks.json a prior (wrong) version left behind.
   fs.writeFileSync(path.join(work.home, 'config.toml'), 'model = "gpt-x"\n[windows]\nsandbox = "elevated"\n');
-  writeJSON(path.join(work.home, 'hooks.json'), { hooks: { SessionStart: [{ hooks: [{ command: 'node "z/cl-codex-hook.js"' }] }] } }); // dead artifact
+  writeJSON(path.join(work.home, 'hooks.json'), { hooks: { SessionStart: [{ hooks: [{ command: 'node "z/arc-codex-hook.js"' }] }] } }); // dead artifact
   CR.ensureHooks(work); CR.ensureHooks(work);
   const cfg = fs.readFileSync(path.join(work.home, 'config.toml'), 'utf8');
   ok('Codex hook install preserves the user config.toml', /sandbox = "elevated"/.test(cfg) && /model = "gpt-x"/.test(cfg));
   ok('Codex hook install writes [hooks] for both lifecycle events',
     /\[\[hooks\.SessionStart\.hooks\]\]/.test(cfg) && /\[\[hooks\.UserPromptSubmit\.hooks\]\]/.test(cfg)
-    && /type = "command"/.test(cfg) && /cl-codex-hook\.js/.test(cfg));
-  ok('Codex hook install is idempotent', (cfg.match(/cl-kit managed hooks \(do not edit/g) || []).length === 1);
+    && /type = "command"/.test(cfg) && /arc-codex-hook\.js/.test(cfg));
+  ok('Codex hook install is idempotent', (cfg.match(/arc managed hooks \(do not edit/g) || []).length === 1);
   ok('Codex hook install clears the dead hooks.json a prior version wrote', !fs.existsSync(path.join(work.home, 'hooks.json')));
   ok('Codex command adapter uses the Windows cmd shim', process.platform !== 'win32' || /cmd\.exe$/i.test(CR.commandSpec([]).bin));
   ok('Codex launch bypasses hook trust (cl vets its own hook source)',
@@ -1058,7 +1058,7 @@ try {
     yoloSpec.includes('--yolo') && yoloSpec.indexOf('--yolo') < yoloSpec.indexOf('resume')
     && !CR.commandSpec(['resume', 'x'], { bypassHookTrust: true }).args.includes('--yolo'));
 
-  const codexHook = path.join(SRC, 'cl-codex-hook.js');
+  const codexHook = path.join(SRC, 'arc-codex-hook.js');
   const hookEnv = {
     ...process.env,
     CL_SESSION: 'codex-wrapper-1',
@@ -1080,8 +1080,8 @@ try {
   });
   let codexHelpOut = {}; try { codexHelpOut = JSON.parse(codexHelp.stdout || '{}'); } catch {}
   ok('Codex UserPromptSubmit hook blocks cl:help before the model',
-    codexHelpOut.decision === 'block' && /cl — Codex commands/.test(codexHelpOut.reason || '')
-    && !/cl:switch/.test(codexHelpOut.reason || ''));
+    codexHelpOut.decision === 'block' && /arc — Codex commands/.test(codexHelpOut.reason || '')
+    && !/(arc|cl):switch/.test(codexHelpOut.reason || ''));
 } catch (e) { ok('runtime orchestration works', false, e.message); }
 
 section('cl-runner Codex launch adapter');
@@ -1095,7 +1095,7 @@ try {
   fs.writeFileSync(fakeJs,
     `require('fs').writeFileSync(process.env.FAKE_CODEX_CAPTURE, JSON.stringify({args:process.argv.slice(2),env:{CODEX_HOME:process.env.CODEX_HOME,CL_SESSION:process.env.CL_SESSION,CL_LOGICAL_SESSION:process.env.CL_LOGICAL_SESSION,CL_RUNTIME:process.env.CL_RUNTIME,CL_RUNTIME_ACCOUNT:process.env.CL_RUNTIME_ACCOUNT}}));`);
   fs.writeFileSync(path.join(fakeBin, 'codex.cmd'), `@echo off\r\n"${process.execPath}" "${fakeJs}" %*\r\n`);
-  const launched = spawnSync(process.execPath, [path.join(SRC, 'cl-runner.js'), 'codex', '--account', 'default', '--help'], {
+  const launched = spawnSync(process.execPath, [path.join(SRC, 'arc-runner.js'), 'codex', '--account', 'default', '--help'], {
     cwd: TMP,
     env: {
       ...process.env,
@@ -1141,7 +1141,7 @@ try {
     "const cwd=root;",
     "fs.writeFileSync(transcript,[JSON.stringify({type:'permission-mode',permissionMode:'auto',cwd}),JSON.stringify({type:'user',cwd,message:{role:'user',content:'continue this work'}}),JSON.stringify({type:'assistant',cwd,message:{role:'assistant',content:[{type:'text',text:'ready to continue'}]}})].join('\\n')+'\\n');",
     "const cache=path.join(process.env.USERPROFILE,'.claude','cache');fs.mkdirSync(cache,{recursive:true});",
-    "const trigger=path.join(cache,'cl-handoff-'+process.env.CL_SESSION+'.trigger');",
+    "const trigger=path.join(cache,'arc-handoff-'+(process.env.ARC_SESSION||process.env.CL_SESSION)+'.trigger');",
     "fs.writeFileSync(trigger,JSON.stringify({source:'claude',target:'codex',account:null,keepLast:0,transcriptPath:transcript,cwd,nativeSessionId:'claude-loop-native',logicalSessionId:process.env.CL_LOGICAL_SESSION,at:Date.now()}));",
     "setInterval(()=>{},1000);",
   ].join('\n'));
@@ -1156,7 +1156,7 @@ try {
     "}",
   ].join('\n'));
   fs.writeFileSync(path.join(loopBin, 'codex.cmd'), `@echo off\r\n"${process.execPath}" "${fakeCodex}" %*\r\n`);
-  writeJSON(path.join(loopUser, '.claude', 'cl-config.json'), {
+  writeJSON(path.join(loopUser, '.claude', 'arc-config.json'), {
     version: 1,
     defaultAccount: 'sub',
     switchOrder: ['sub'],
@@ -1165,7 +1165,7 @@ try {
     features: { autoBest: false },
   });
 
-  const loop = spawnSync(process.execPath, [path.join(SRC, 'cl-runner.js'), fakeClaude], {
+  const loop = spawnSync(process.execPath, [path.join(SRC, 'arc-runner.js'), fakeClaude], {
     cwd: loopRoot,
     env: {
       ...process.env,
@@ -1212,7 +1212,7 @@ try {
 // task lists on the next launch. Nothing may ever be destroyed here.
 section('cl-profile (adoptIntoShared: migrate, never clobber)');
 try {
-  const P = require(path.join(SRC, 'cl-profile.js'));
+  const P = require(path.join(SRC, 'arc-profile.js'));
   ok('tasks is shared (so cl:switch keeps the task list)', P.SHARED_DIRS.includes('tasks'));
 
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'adopt-'));
@@ -1226,7 +1226,7 @@ try {
   fs.writeFileSync(path.join(link, 'sess-B', '1.json'), '{"id":"1"}');
 
   // C.CLAUDE_DIR drives the backup path; point it at our sandbox for the duration.
-  const C = require(path.join(SRC, 'cl-config.js'));
+  const C = require(path.join(SRC, 'arc-config.js'));
   const realClaudeDir = C.CLAUDE_DIR;
   Object.defineProperty(C, 'CLAUDE_DIR', { value: base, configurable: true });
   const cleared = P.adoptIntoShared(link, shared, 'acct1', 'tasks');
@@ -1255,7 +1255,7 @@ try {
 // ---- cl-conv (convId reconciliation — the "switch resumes a new session" fix) --
 section('cl-conv (convId reconciliation)');
 try {
-  const { pickConvId } = require(path.join(SRC, 'cl-conv.js'));
+  const { pickConvId } = require(path.join(SRC, 'arc-conv.js'));
   // hasTranscript predicate over a fixed set of "real" (persisted) ids.
   const real = new Set(['live-28118b62']);
   const has = (id) => real.has(id);
@@ -1288,25 +1288,26 @@ try {
 // ---- cl-help + the cl:help hook (zero-token cheat sheet) --------------------
 section('cl-help + cl:help hook');
 try {
-  const renderHelp = require(path.join(SRC, 'cl-help.js'));
+  const renderHelp = require(path.join(SRC, 'arc-help.js'));
   ok('cl-help exports a render function', typeof renderHelp === 'function');
   const sheet = renderHelp();
-  ok('cheat sheet lists cl:help and cl:switch', /cl:help/.test(sheet) && /cl:switch/.test(sheet));
+  ok('cheat sheet lists arc:help and arc:switch', /arc:help/.test(sheet) && /arc:switch/.test(sheet));
   const codexSheet = renderHelp('codex');
   ok('Codex help lists only implemented sentinels and names pending directions',
-    /cl:notes/.test(codexSheet) && !/cl:switch/.test(codexSheet) && /not implemented yet/.test(codexSheet));
+    /arc:notes/.test(codexSheet) && !/(arc|cl):switch/.test(codexSheet) && /not implemented yet/.test(codexSheet));
 
   // End-to-end: the hook must BLOCK cl:help / cl:cl (case-insensitive) and return
   // the sheet as the reason — zero model tokens, exactly like cl:peek.
-  const hook = path.join(SRC, 'cl-switch-hook.js');
-  for (const trig of ['cl:help', 'cl:cl', 'CL:HELP']) {
+  const hook = path.join(SRC, 'arc-switch-hook.js');
+  // arc: is the current prefix; cl: is the deprecated alias — BOTH must trigger.
+  for (const trig of ['arc:help', 'arc:arc', 'ARC:HELP', 'cl:help', 'cl:cl', 'CL:HELP']) {
     const r = spawnSync(process.execPath, [hook], { input: JSON.stringify({ prompt: trig }), encoding: 'utf8' });
     let out = {}; try { out = JSON.parse(r.stdout || '{}'); } catch {}
-    ok(`hook blocks "${trig}" with the cheat sheet`, out.decision === 'block' && /cl — commands/.test(out.reason || ''));
+    ok(`hook blocks "${trig}" with the cheat sheet`, out.decision === 'block' && /(arc|cl) — commands/.test(out.reason || ''));
   }
-  // A non-cl prompt must pass straight through (no block, empty stdout).
+  // A non-sentinel prompt must pass straight through (no block, empty stdout).
   const pass = spawnSync(process.execPath, [hook], { input: JSON.stringify({ prompt: 'hello world' }), encoding: 'utf8' });
-  ok('non-cl prompt passes through (no block)', (pass.stdout || '').trim() === '');
+  ok('non-sentinel prompt passes through (no block)', (pass.stdout || '').trim() === '');
 
   const handoffTranscript = path.join(TMP, 'hook-handoff.jsonl');
   fs.writeFileSync(handoffTranscript, '{}\n');
@@ -1322,7 +1323,7 @@ try {
     encoding: 'utf8',
   });
   let handoffOut = {}; try { handoffOut = JSON.parse(handoff.stdout || '{}'); } catch {}
-  const handoffTrigger = path.join(CLAUDE, 'cache', `cl-handoff-${handoffSession}.trigger`);
+  const handoffTrigger = path.join(CLAUDE, 'cache', `arc-handoff-${handoffSession}.trigger`);
   const handoffPayload = JSON.parse(fs.readFileSync(handoffTrigger, 'utf8'));
   ok('cl:handoff is blocked and queued for the supervisor',
     handoffOut.decision === 'block' && handoffPayload.target === 'codex');
@@ -1335,7 +1336,7 @@ try {
 // ---- cl-room (the "fridge": per-room append-only sticky-note ledger) ---------
 section('cl-room (sticky-note ledger)');
 try {
-  const R = require(path.join(SRC, 'cl-room.js'));
+  const R = require(path.join(SRC, 'arc-room.js'));
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'clroom-'));
   const repo = path.join(base, 'proj');
   fs.mkdirSync(path.join(repo, 'sub', 'deep'), { recursive: true });
@@ -1409,8 +1410,8 @@ try {
 // ---- cl-fridge (the cl: sentinels over the ledger) ---------------------------
 section('cl-fridge (role / note / notes)');
 try {
-  const F = require(path.join(SRC, 'cl-fridge.js'));
-  const R2 = require(path.join(SRC, 'cl-room.js'));
+  const F = require(path.join(SRC, 'arc-fridge.js'));
+  const R2 = require(path.join(SRC, 'arc-room.js'));
   const base2 = fs.mkdtempSync(path.join(os.tmpdir(), 'clfridge-'));
   const repo2 = path.join(base2, 'proj');
   fs.mkdirSync(path.join(repo2, 'sub'), { recursive: true });

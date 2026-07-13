@@ -1,7 +1,7 @@
-// cl-platform: the OS touchpoints that aren't inline elsewhere. cl-kit is Windows 11
+// arc-platform: the OS touchpoints that aren't inline elsewhere. arc is Windows 11
 // only, so this is just the clipboard reader now — the POSIX keychain and notifier
 // helpers were removed when cross-platform support was dropped (keys use DPAPI in
-// cl-config.js; toasts use WinRT in cl-notify.js).
+// arc-config.js; toasts use WinRT in arc-notify.js).
 'use strict';
 
 const { execFileSync } = require('child_process');

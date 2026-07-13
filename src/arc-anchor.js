@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// cl-anchor: notice when a DOC's claim about the CODE has gone stale.
+// arc-anchor: notice when a DOC's claim about the CODE has gone stale.
 //
 // The research session writes `docs/plan.md` saying "auth.ts#handleLogin validates the
 // nonce". The coding session then rewrites handleLogin. Nothing breaks; no test fails;
 // the doc is now a lie, and nobody finds out until someone acts on it. This is the
-// half of the drift problem that cl-done.js does not touch: cl-done proves that work
+// half of the drift problem that arc-done.js does not touch: cl-done proves that work
 // HAPPENED, and this proves that what we WROTE about the code still describes it.
 //
 // An anchor is a comment you put next to the claim, in the doc:
 //
-//     <!-- cl:anchor src/auth.ts#handleLogin -->
+//     <!-- arc:anchor src/auth.ts#handleLogin -->
 //     handleLogin validates the nonce before issuing a session.
 //
 // The FIRST time cl sees an anchor it seals it: it resolves the symbol, hashes the
@@ -19,7 +19,7 @@
 // session then receives at the top of its next turn, without asking.
 //
 // WHY NOT AN AST. fiberplane/drift resolves anchors with tree-sitter, which is the
-// right answer and the one we cannot have: cl-kit has ZERO dependencies and must run
+// right answer and the one we cannot have: arc has ZERO dependencies and must run
 // on Windows, macOS and Linux, and tree-sitter means native prebuilds per platform per
 // grammar. So the anchor is a fingerprint, not a parse:
 //   * find the first line that both names the symbol as a word AND looks like a
@@ -41,16 +41,16 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
-const R = require('./cl-room');
+const R = require('./arc-room');
 
 const STATE = 'anchor-state.json';
 const MAX_ANCHORS = 200;      // an alarm, not an index
 const MAX_BLOCK_LINES = 400;
 const GIT_TIMEOUT = 4000;
 
-// `<!-- cl:anchor path/to/file.ts#symbol -->`, or any comment syntax — we only look
+// `<!-- arc:anchor path/to/file.ts#symbol -->`, or any comment syntax — we only look
 // for the token. The path may not contain whitespace or '#'.
-const ANCHOR_RX = /cl:anchor\s+([^\s#]+)#([A-Za-z_$][\w$-]*)/g;
+const ANCHOR_RX = /(?:arc|cl):anchor\s+([^\s#]+)#([A-Za-z_$][\w$-]*)/g;
 
 const statePath = (room) => path.join(room.planDir, STATE);
 const anchorKey = (a) => `${a.doc}|${a.file}#${a.symbol}`;
@@ -133,7 +133,7 @@ function hashSlice(slice) {
 // (.gitignore is still honoured, so .plan/ and node_modules never get scanned.)
 function anchorDocs(root) {
   try {
-    const out = execFileSync('git', ['grep', '-l', '-I', '-F', '--untracked', 'cl:anchor'],
+    const out = execFileSync('git', ['grep', '-l', '-I', '-F', '--untracked', '-e', 'arc:anchor', '-e', 'cl:anchor'],
       { cwd: root, timeout: GIT_TIMEOUT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return out.split('\n').map((s) => s.trim()).filter(Boolean);
   } catch { return []; }   // exit 1 = no matches, which is not an error
@@ -192,7 +192,7 @@ function inspect(room) {
     }
     // gone-file / gone-symbol. If we NEVER sealed this anchor, it has never once
     // resolved — so it is not a claim that went stale, it is a claim that was never
-    // true. Documentation EXAMPLES are exactly this shape (`cl:anchor src/auth.ts#…`
+    // true. Documentation EXAMPLES are exactly this shape (`arc:anchor src/auth.ts#…`
     // inside a README), and nagging about them would make the alarm worthless on its
     // first run. Report it, don't post it.
     // `prev.unresolved` means we recorded it but NEVER sealed a hash, so it still has
@@ -250,7 +250,7 @@ function checkAndNotify(room, role, opts = {}) {
   // the toast just tells the HUMAN that it's coming. Best-effort, never fatal.
   if (posted && !opts.quiet) {
     try {
-      require('./cl-notify').toast(
+      require('./arc-notify').toast(
         `⚠ ${posted} doc${posted > 1 ? 's' : ''} went stale`,
         newlyStale.map((r) => `${r.doc} → ${r.file}#${r.symbol}`).join('\n').slice(0, 200),
         'fail');
@@ -259,7 +259,7 @@ function checkAndNotify(room, role, opts = {}) {
   return { checked: results.length, posted, newlyStale, results };
 }
 
-// ---- cl:anchors (zero-token readout) ------------------------------------------
+// ---- arc:anchors (zero-token readout) ------------------------------------------
 const MARK = {
   ok: '  ok  ', sealed: 'sealed', unresolved: '   ?  ',
   changed: '  [!] ', 'gone-symbol': '  [!] ', 'gone-file': '  [!] ',
@@ -282,7 +282,7 @@ function requestAnchors(session, arg, cwd) {
   if (!results.length) {
     return { ok: true, plain: true, message:
       `cl anchors — room "${room.name}"\n  no anchors found.\n`
-      + '  Put one next to a claim in a doc:  <!-- cl:anchor src/auth.ts#handleLogin -->' };
+      + '  Put one next to a claim in a doc:  <!-- arc:anchor src/auth.ts#handleLogin -->' };
   }
   const rows = results.map((r) =>
     `  ${MARK[r.status] || '  ?   '}  ${r.doc}  →  ${r.file}#${r.symbol}`
@@ -290,7 +290,7 @@ function requestAnchors(session, arg, cwd) {
   const stale = results.filter((r) => STALE_STATUSES.has(r.status)).length;
   return { ok: true, plain: true, message:
     `cl anchors — room "${room.name}"   ${results.length} anchor(s), ${stale} stale\n${rows.join('\n')}\n`
-    + (stale ? '  fix the docs, then:  cl:anchors reseal\n' : '') };
+    + (stale ? '  fix the docs, then:  arc:anchors reseal\n' : '') };
 }
 
 module.exports = {

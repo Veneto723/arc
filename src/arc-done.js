@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cl-done: derive "done" from GIT, not from the agent's word.
+// arc-done: derive "done" from GIT, not from the agent's word.
 //
 // The fridge (cl-room) let roommates leave each other notes. But a note is still
 // something an agent has to REMEMBER to write, and bookkeeping is the first thing
@@ -29,7 +29,7 @@
 // research agent finds a note on the fridge carrying the sha, the files, and the
 // commit subjects — whether or not anybody remembered to say anything.
 //
-// Two modes (features.doneGate in cl-config.json, or CL_DONE_GATE):
+// Two modes (features.doneGate in arc-config.json, or CL_DONE_GATE):
 //   'note'   (default) never blocks. Derives evidence and posts it. An unevidenced
 //            completion still posts, flagged as such. Zero friction, all the signal.
 //   'strict' exit 2 when a completion carries no commit, which REFUSES the tick and
@@ -42,7 +42,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const R = require('./cl-room');
+const R = require('./arc-room');
 
 const MAX_FILES = 12;        // a note is a sticky note, not a diff
 const MAX_COMMITS = 5;
@@ -131,10 +131,10 @@ function taskFilePath(session, taskId) {
 
 // ---- policy ------------------------------------------------------------------
 function mode() {
-  const env = (process.env.CL_DONE_GATE || '').trim().toLowerCase();
+  const env = ((process.env.ARC_DONE_GATE || process.env.CL_DONE_GATE) || '').trim().toLowerCase();
   if (env) return env;
   try {
-    const C = require('./cl-config');
+    const C = require('./arc-config');
     const m = C.loadConfig().features && C.loadConfig().features.doneGate;
     if (m) return String(m).toLowerCase();
   } catch {}
@@ -158,7 +158,7 @@ function verdict(evidence, gateMode) {
   return { post: true, block: false, proven: false };   // 'note': post it, flag it
 }
 
-// Compose the sticky note. Evidence goes in `refs`, which cl:notes and the turn-start
+// Compose the sticky note. Evidence goes in `refs`, which arc:notes and the turn-start
 // injection already render.
 function buildNote(payload, evidence, proven, role) {
   const subject = payload.task_subject || `task ${payload.task_id}`;
@@ -204,11 +204,11 @@ function onTaskCompleted(payload, session) {
   if (evidence === null && base.born) evidence = evidenceSince(room.root, base.born);
   const v = verdict(evidence, g);
 
-  if (v.block) return { block: true, stderr: `[cl] ${v.reason}` };
+  if (v.block) return { block: true, stderr: `[arc] ${v.reason}` };
 
   // Post only if this session has a role — the fridge is opt-in, and a note needs a
   // sender. No role means nobody is listening; stay silent rather than invent one.
-  const F = require('./cl-fridge');
+  const F = require('./arc-fridge');
   const role = F.getRole(session, room);
   if (!v.post || !role) return { block: false };
   try { R.appendNote(room, buildNote(payload, evidence, v.proven, role)); } catch {}
@@ -217,7 +217,7 @@ function onTaskCompleted(payload, session) {
   // to ask whether the DOCS still describe it. Any anchor that just went stale becomes
   // a [!] note, which the research session receives at the top of its next turn.
   let stale = 0;
-  try { stale = require('./cl-anchor').checkAndNotify(room, role).posted || 0; } catch {}
+  try { stale = require('./arc-anchor').checkAndNotify(room, role).posted || 0; } catch {}
   return { block: false, posted: true, proven: v.proven, stale };
 }
 
@@ -231,7 +231,7 @@ if (require.main === module) {
     if (done) return; done = true;
     let p = {};
     try { p = JSON.parse(raw || '{}'); } catch { process.exit(0); }
-    const session = (process.env.CL_SESSION || '').trim();
+    const session = ((process.env.ARC_SESSION || process.env.CL_SESSION) || '').trim();
     try {
       if (p.hook_event_name === 'TaskCreated') { onTaskCreated(p, session); process.exit(0); }
       if (p.hook_event_name === 'TaskCompleted') {

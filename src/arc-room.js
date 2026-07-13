@@ -1,4 +1,4 @@
-// cl-room: the "fridge" — a per-room, append-only sticky-note ledger shared by the
+// arc-room: the "fridge" — a per-room, append-only sticky-note ledger shared by the
 // cl sessions working in the same place.
 //
 // ROOM = the git repo root of the session's cwd (canonicalised), else the literal
@@ -9,7 +9,7 @@
 // The room follows the session's CURRENT cwd, which Claude Code reports per prompt
 // and which can DRIFT. Moving around inside a repo is harmless (we walk up to the
 // git root), but `cd`-ing into a DIFFERENT repo genuinely changes rooms — the role
-// claimed in the old room stops applying, and `cl:role` will say you have none.
+// claimed in the old room stops applying, and `arc:role` will say you have none.
 // That is intended ("you moved flats"), but it is surprising, so: documented.
 //
 // Design notes (each one earned; see docs/research/agent-handoff/SUMMARY.md):
@@ -165,7 +165,7 @@ function roleHolder(room, role) {
 }
 
 // Returns {ok:true} if claimed, or {ok:false, holder} if a LIVE *other* session holds it.
-// IDENTITY IS THE SESSION, NOT THE PID: `cl:restart` re-execs cl-runner with a NEW pid
+// IDENTITY IS THE SESSION, NOT THE PID: `arc:restart` re-execs cl-runner with a NEW pid
 // but the SAME CL_SESSION, and must be able to reclaim its own role. The pid is only
 // a liveness probe. (Fall back to pid comparison for leases written without a session.)
 function claimRole(room, role, pid, sessionId) {

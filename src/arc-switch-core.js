@@ -1,10 +1,10 @@
-// cl-switch-core: the shared validate + drop-trigger logic for switching/
+// arc-switch-core: the shared validate + drop-trigger logic for switching/
 // restarting a cl session. Entry point:
-//   - cl-switch-hook.js  (a UserPromptSubmit hook catching the zero-token cl:
+//   - arc-switch-hook.js  (a UserPromptSubmit hook catching the zero-token arc:
 //                          sentinels — classifier-immune, works even when the
 //                          account is rate-limited)
 // (The old cl-signal.js / /switch / /restart slash-command path was removed; the
-// cl: hook is now the single way in.)
+// arc: hook is now the single way in.)
 //
 // Keeping the logic in one module means there's one definition of what a valid
 // switch is and where the trigger file goes.
@@ -29,7 +29,9 @@ function shortStamp(iso) {
 // Resolve this session's CURRENT account from its state file (fallback: default).
 function currentAccount(C, cfg, session) {
   try {
-    const st = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, `cl-state-${session}.json`), 'utf8'));
+    const arc = path.join(CACHE_DIR, `arc-state-${session}.json`);
+    const sp = fs.existsSync(arc) ? arc : path.join(CACHE_DIR, `cl-state-${session}.json`); // legacy fallback
+    const st = JSON.parse(fs.readFileSync(sp, 'utf8'));
     const acc = C.findAccount(cfg, st.account);
     if (acc) return acc.id;
   } catch {}
@@ -40,7 +42,7 @@ function currentAccount(C, cfg, session) {
 // must not replace a TTY child itself; it records a validated request, blocks the
 // sentinel prompt, and lets the supervisor perform the transactional work.
 function requestHandoff(session, argStr, context = {}) {
-  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `cl`).' };
+  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `arc`).' };
   const tokens = String(argStr || '').trim().split(/\s+/).filter(Boolean);
   const target = tokens[0] && !tokens[0].startsWith('-') ? tokens.shift().toLowerCase() : 'codex';
   if (target !== 'codex') return { ok: false, message: `handoff target "${target}" is not supported yet (available: codex).` };
@@ -55,12 +57,12 @@ function requestHandoff(session, argStr, context = {}) {
       keepLast = parseInt(value, 10);
       continue;
     }
-    return { ok: false, message: `unknown handoff option "${tokens[i]}" — use: cl:handoff codex [--account <id>] [--keep-last N]` };
+    return { ok: false, message: `unknown handoff option "${tokens[i]}" — use: arc:handoff codex [--account <id>] [--keep-last N]` };
   }
   let tmp = null;
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    const file = path.join(CACHE_DIR, `cl-handoff-${session}.trigger`);
+    const file = path.join(CACHE_DIR, `arc-handoff-${session}.trigger`);
     tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({
       source: 'claude', target, account, keepLast,
@@ -96,7 +98,7 @@ function liveSessionsOn(accountId) {
 }
 
 // ---- usage peek + shared launch-account decision ---------------------------
-// These back BOTH the launch-time auto-select (cl-runner) and the `cl:peek`
+// These back BOTH the launch-time auto-select (cl-runner) and the `arc:peek`
 // readout, so the "would launch on X" line always matches what actually happens.
 
 function readUsageCache() {
@@ -104,13 +106,13 @@ function readUsageCache() {
   catch { return null; }
 }
 
-// cl:peek is an explicit "show me current usage" — it must NOT show stale data.
+// arc:peek is an explicit "show me current usage" — it must NOT show stale data.
 // Unlike the statusline (which paints instantly and refreshes DETACHED for next
 // time), peek SYNCHRONOUSLY refreshes the cache first (subscription + gateways),
 // bounded so it never hangs, and skips the fetch when the cache is already fresh.
 // On timeout/failure it falls back to whatever's cached (still shown with its age).
 function refreshUsageForPeek(cfg) {
-  if (process.env.CL_PEEK_NO_REFRESH === '1') return; // opt out → instant, cache-only peek
+  if ((process.env.ARC_PEEK_NO_REFRESH || process.env.CL_PEEK_NO_REFRESH) === '1') return; // opt out → instant, cache-only peek
   const PEEK_FRESH_MS = 15_000; // a re-peek within 15s reuses the cache, no refetch
   try {
     const cache = readUsageCache();
@@ -134,7 +136,7 @@ function refreshUsageForPeek(cfg) {
 }
 
 // A bounded, FORCED refresh of every account's usage. Called the moment the account
-// changes (cl:switch / the picker), when the caches still hold the old account's
+// changes (arc:switch / the picker), when the caches still hold the old account's
 // numbers. A switch already kills and relaunches claude — a visible pause — so
 // spending ~a second here buys a first statusline render that is both correctly
 // attributed and fresh, instead of the new account's label over the old one's data.
@@ -218,7 +220,7 @@ function accountHeadroom(acc, cache, th, cfg) {
 // is soft; a maxed sub is a hard wall). Only a config with NO gateway settles for the
 // least-bad exhausted sub. Returns { id, reason } or null when nothing can be judged.
 function chooseLaunchAccount(cfg, cache) {
-  const C = require('./cl-config');
+  const C = require('./arc-config');
   const th = cfg.thresholds || {};
   const score = (a) => accountHeadroom(a, cache, th, cfg);
   const oauth = cfg.accounts.filter((a) => a.type === 'oauth').map((a) => ({ a, s: score(a) }));
@@ -279,8 +281,8 @@ function ageStr(ms) {
 // the hook renders this directly (no trigger, no relaunch). Returns { ok, message }.
 function buildPeek(session) {
   let C, cfg;
-  try { C = require('./cl-config'); cfg = C.loadConfig(); }
-  catch (e) { return { ok: false, message: `cl usage — config unreadable (${e.message}). Fix ~/.claude/cl-config.json or run \`cl setup\`.` }; }
+  try { C = require('./arc-config'); cfg = C.loadConfig(); }
+  catch (e) { return { ok: false, message: `cl usage — config unreadable (${e.message}). Fix ~/.claude/arc-config.json or run \`cl setup\`.` }; }
   refreshUsageForPeek(cfg); // fire a fresh fetch first — peek must not show stale data
   const cache = readUsageCache();
   const current = session ? currentAccount(C, cfg, session) : null;
@@ -363,7 +365,7 @@ function renderMenu(cfg, current, lead) {
     return `  ${i + 1}. ${a.id}${a.label && a.label !== a.id.toUpperCase() ? ` (${a.label})` : ''} [${a.type}]${mark}`;
   });
   return `${lead}\n${rows.join('\n')}\n` +
-    `Pick by number or name: \`cl:switch <n|name>\` — zero tokens, works even when rate-limited.`;
+    `Pick by number or name: \`arc:switch <n|name>\` — zero tokens, works even when rate-limited.`;
 }
 
 // Resolve a target token to an account: a 1-based menu number, or an id/name.
@@ -378,13 +380,13 @@ function resolveTarget(C, cfg, target) {
 function requestSwitch(session, target) {
   if (!session) {
     return { ok: false, switching: false,
-      message: 'NOT SWITCHING — this session is not running under the cl wrapper (launch with `cl` to use switching).' };
+      message: 'NOT SWITCHING — this session is not running under the cl wrapper (launch with `arc` to use switching).' };
   }
   let C, cfg;
-  try { C = require('./cl-config'); cfg = C.loadConfig(); }
+  try { C = require('./arc-config'); cfg = C.loadConfig(); }
   catch (e) {
     return { ok: false, switching: false,
-      message: `NOT SWITCHING — cl config unreadable (${e.message}). Fix ~/.claude/cl-config.json or run \`cl setup\`.` };
+      message: `NOT SWITCHING — cl config unreadable (${e.message}). Fix ~/.claude/arc-config.json or run \`cl setup\`.` };
   }
 
   const current = currentAccount(C, cfg, session);
@@ -428,7 +430,7 @@ function requestSwitch(session, target) {
 function writeSwitch(session, current, next) {
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CACHE_DIR, `cl-switch-${session}.trigger`), JSON.stringify({ at: Date.now(), target: next.id }));
+    fs.writeFileSync(path.join(CACHE_DIR, `arc-switch-${session}.trigger`), JSON.stringify({ at: Date.now(), target: next.id }));
     return { ok: true, switching: true,
       message: `SWITCHING "${current}" → "${next.id}" (${next.label}) — the wrapper will relaunch this conversation on it momentarily.` };
   } catch (e) {
@@ -440,10 +442,10 @@ function writeSwitch(session, current, next) {
 // picker (zero tokens). Refuses if <2 accounts. Returns { ok, picker, message }.
 function requestPicker(session) {
   if (!session) {
-    return { ok: false, picker: false, message: 'NOT SWITCHING — not running under the cl wrapper (launch with `cl`).' };
+    return { ok: false, picker: false, message: 'NOT SWITCHING — not running under the cl wrapper (launch with `arc`).' };
   }
   let C, cfg;
-  try { C = require('./cl-config'); cfg = C.loadConfig(); }
+  try { C = require('./arc-config'); cfg = C.loadConfig(); }
   catch (e) { return { ok: false, picker: false, message: `NOT SWITCHING — cl config unreadable (${e.message}).` }; }
   if (cfg.accounts.length < 2) {
     return { ok: false, picker: false,
@@ -451,7 +453,7 @@ function requestPicker(session) {
   }
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CACHE_DIR, `cl-pick-${session}.trigger`), JSON.stringify({ at: Date.now() }));
+    fs.writeFileSync(path.join(CACHE_DIR, `arc-pick-${session}.trigger`), JSON.stringify({ at: Date.now() }));
     return { ok: true, picker: true, message: 'opening account picker — use ↑/↓ and Enter in the terminal…' };
   } catch (e) {
     return { ok: false, picker: false, message: `picker signal FAILED — ${e.message}` };
@@ -484,13 +486,13 @@ function readAddKey(tokens) {
   const file = flagVal(tokens, 'file');
   if (file) {
     try {
-      const raw = fs.readFileSync(require('./cl-config').expandHome(file), 'utf8');
+      const raw = fs.readFileSync(require('./arc-config').expandHome(file), 'utf8');
       const m = raw.match(/sk-[A-Za-z0-9-]+/);
       return { key: (m ? m[0] : raw.trim()), src: file };
     } catch (e) { return { key: '', src: file, error: e.message }; }
   }
-  const out = require('./cl-platform').readClipboard();
-  if (out == null) return { key: '', src: 'clipboard', error: `couldn't read the clipboard — ${require('./cl-platform').clipboardHint()}` };
+  const out = require('./arc-platform').readClipboard();
+  if (out == null) return { key: '', src: 'clipboard', error: `couldn't read the clipboard — ${require('./arc-platform').clipboardHint()}` };
   return { key: out.trim(), src: 'clipboard' };
 }
 
@@ -532,7 +534,7 @@ function pickFamilyModel(models, family) {
   })[0];
 }
 
-// Flag-driven api add (cl:add-account <id> --api --url … / terminal). Thin wrapper
+// Flag-driven api add (arc:add-account <id> --api --url … / terminal). Thin wrapper
 // that resolves the key from tokens, then delegates to addApiAccountResolved.
 function addApiAccount(tokens, id) {
   const { key, src, error } = readAddKey(tokens);
@@ -564,7 +566,7 @@ function addApiAccount(tokens, id) {
 // gateways that don't expose it / use non-standard model names). DPAPI-encrypts the
 // key, writes the account (backup + validate, restore on failure). Never throws.
 function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color, makeDefault, headers, modelOverrides, noVerify }) {
-  const C = require('./cl-config');
+  const C = require('./arc-config');
   keySrc = keySrc || 'clipboard';
   headers = headers || {}; modelOverrides = modelOverrides || {};
   if (!/^[a-z][a-z0-9_-]*$/i.test(id || '')) return { ok: false, message: `invalid id "${id || ''}" — letters/digits/dash/underscore, start with a letter.` };
@@ -611,7 +613,7 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
 
   const bak = C.CONFIG_PATH + '.bak-' + Date.now();
   let raw; try { raw = JSON.parse(fs.readFileSync(C.CONFIG_PATH, 'utf8')); }
-  catch (e) { return { ok: false, message: `cl-config.json unreadable: ${e.message}` }; }
+  catch (e) { return { ok: false, message: `arc-config.json unreadable: ${e.message}` }; }
   fs.copyFileSync(C.CONFIG_PATH, bak);
   raw.accounts = (raw.accounts || []).filter((a) => a.id !== id);
   raw.accounts.push(acct);
@@ -627,36 +629,36 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
     ok: true,
     message: `✓ added gateway account "${id}" (${acct.label}) → ${acct.baseUrl}\n` +
       `  key ${key.slice(0, 7)}…${key.slice(-4)} ${stored.note} (from ${keySrc}) · ${detail}${extraHdr}` +
-      `${makeDefault ? '\n  set as the default account' : ''}\n  use it: cl:switch ${id}`,
+      `${makeDefault ? '\n  set as the default account' : ''}\n  use it: arc:switch ${id}`,
   };
 }
 
 // Add an account. `--api`/`--url` → a gateway/pool account, done inline here.
 // Otherwise an oauth subscription → drop a trigger so cl-runner runs the guided
-// browser login on the freed TTY. `argStr` is everything after `cl:add-account`.
+// browser login on the freed TTY. `argStr` is everything after `arc:add-account`.
 function requestAddAccount(session, argStr) {
   const tokens = (argStr || '').trim().split(/\s+/).filter(Boolean);
-  // Bare `cl:add-account` (no id/flags) → open the interactive wizard (pick
-  // Subscription vs Gateway on a cl:switch-style screen, then guided prompts).
+  // Bare `arc:add-account` (no id/flags) → open the interactive wizard (pick
+  // Subscription vs Gateway on a arc:switch-style screen, then guided prompts).
   if (!tokens.length) {
-    if (!session) return { ok: false, message: 'launch `cl` first — then `cl:add-account` opens the add wizard.' };
+    if (!session) return { ok: false, message: 'launch `cl` first — then `arc:add-account` opens the add wizard.' };
     try {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
-      fs.writeFileSync(path.join(CACHE_DIR, `cl-addacct-${session}.trigger`), JSON.stringify({ at: Date.now(), wizard: true }));
+      fs.writeFileSync(path.join(CACHE_DIR, `arc-addacct-${session}.trigger`), JSON.stringify({ at: Date.now(), wizard: true }));
       return { ok: true, message: 'opening the add-account wizard — pick the type in the terminal…' };
     } catch (e) { return { ok: false, message: `add wizard signal FAILED — ${e.message}` }; }
   }
   const id = tokens.find((t) => !t.startsWith('-') && !/^sk-/.test(t)); // skip a bare key token
   if (!id) {
-    return { ok: false, message: 'usage: cl:add-account <id>  (subscription: browser login)  ·  or  cl:add-account <id> --api --url <gateway> [--label L] [--color #hex] [--default]  (gateway/pool; key from clipboard, or --file/--key)' };
+    return { ok: false, message: 'usage: arc:add-account <id>  (subscription: browser login)  ·  or  arc:add-account <id> --api --url <gateway> [--label L] [--color #hex] [--default]  (gateway/pool; key from clipboard, or --file/--key)' };
   }
   if (!/^[a-z][a-z0-9_-]*$/i.test(id)) {
     return { ok: false, message: `invalid id "${id}" — use letters/digits/dash/underscore, starting with a letter.` };
   }
   try {
-    const C = require('./cl-config');
+    const C = require('./arc-config');
     if (C.findAccount(C.loadConfig(), id)) {
-      return { ok: false, message: `account "${id}" already exists — pick a different id (see cl:help or cl doctor).` };
+      return { ok: false, message: `account "${id}" already exists — pick a different id (see arc:help or cl doctor).` };
     }
   } catch {}
 
@@ -665,11 +667,11 @@ function requestAddAccount(session, argStr) {
 
   // oauth subscription: needs the browser + terminal → hand off to cl-runner.
   if (!session) {
-    return { ok: false, message: 'adding a SUBSCRIPTION needs the cl wrapper (launch with `cl`). For a gateway/pool, use: cl:add-account ' + id + ' --api --url <gateway>.' };
+    return { ok: false, message: 'adding a SUBSCRIPTION needs the cl wrapper (launch with `arc`). For a gateway/pool, use: arc:add-account ' + id + ' --api --url <gateway>.' };
   }
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CACHE_DIR, `cl-addacct-${session}.trigger`), JSON.stringify({ at: Date.now(), args: argStr.trim() }));
+    fs.writeFileSync(path.join(CACHE_DIR, `arc-addacct-${session}.trigger`), JSON.stringify({ at: Date.now(), args: argStr.trim() }));
     return { ok: true, message: `adding account "${id}" — a Claude sign-in opens in your browser; log in as the NEW account. (this takes over the terminal briefly, then returns)` };
   } catch (e) {
     return { ok: false, message: `add-account signal FAILED — ${e.message}` };
@@ -678,9 +680,9 @@ function requestAddAccount(session, argStr) {
 
 // ---- remove account (double-confirmed, pure config edit — no wrapper needed) ---
 const CONFIRM_WORDS = new Set(['confirm', '--confirm', 'yes', '--yes', 'y']);
-function pendingRmPath(session) { return path.join(CACHE_DIR, `cl-rmpending-${session}.json`); }
+function pendingRmPath(session) { return path.join(CACHE_DIR, `arc-rmpending-${session}.json`); }
 
-// Remove `id` from cl-config.json: backup → remove → fix references → validate
+// Remove `id` from arc-config.json: backup → remove → fix references → validate
 // (rollback on failure) → quarantine the account's profile dir to recoverable trash.
 // Nothing is hard-deleted. Returns { backup, fixes[], credFile, profileTrash, profileInUse }.
 function removeAccountFromConfig(C, id) {
@@ -702,12 +704,12 @@ function removeAccountFromConfig(C, id) {
   // cl-profiles (the bug that stranded MAX/work). Recoverable (moved, not deleted).
   // If a live session still holds the dir the move fails — leave it and report.
   let profileTrash = null, profileInUse = false;
-  try { profileTrash = require('./cl-profile').removeProfile(id); }
+  try { profileTrash = require('./arc-profile').removeProfile(id); }
   catch (e) { profileInUse = true; }
   return { backup: bak, fixes, credFile, profileTrash, profileInUse };
 }
 
-// Rename an account in cl-config.json: id + (one-name) label + all references
+// Rename an account in arc-config.json: id + (one-name) label + all references
 // (switchOrder / default / rephrase). Backup + validate + rollback on error.
 // Returns the backup path. Does NOT move the profile dir — the caller does that
 // (cl-profile.renameProfile) so the two stay in step.
@@ -736,7 +738,7 @@ function renameAccountInConfig(C, oldId, newId) {
 // a config/profile split can't happen: if the config edit then fails, move it back.
 // Returns { backup }. Throws on failure (nothing left half-done).
 function doRename(C, oldId, newId) {
-  const P = require('./cl-profile');
+  const P = require('./arc-profile');
   const moved = P.renameProfile(oldId, newId); // login folder old → new (may be false if none yet)
   let backup;
   try { backup = renameAccountInConfig(C, oldId, newId); }
@@ -750,13 +752,13 @@ function doRename(C, oldId, newId) {
 // dir, then relaunches — so for the CURRENT session we drop a rename trigger; a
 // live OTHER account is refused (close it first). Otherwise we rename in-place now.
 function requestRename(session, argStr) {
-  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `cl`).' };
+  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `arc`).' };
   let C, cfg;
-  try { C = require('./cl-config'); cfg = C.loadConfig(); }
+  try { C = require('./arc-config'); cfg = C.loadConfig(); }
   catch (e) { return { ok: false, message: `cl config unreadable (${e.message}).` }; }
 
   const tokens = (argStr || '').trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return { ok: false, message: 'usage: cl:rename [<old>] <new>  — e.g. `cl:rename work` renames THIS session\'s account, or `cl:rename work personal`.' };
+  if (!tokens.length) return { ok: false, message: 'usage: arc:rename [<old>] <new>  — e.g. `arc:rename work` renames THIS session\'s account, or `arc:rename work personal`.' };
   const current = currentAccount(C, cfg, session);
   const oldId = tokens.length >= 2 ? tokens[0] : current;
   const newId = tokens.length >= 2 ? tokens[1] : tokens[0];
@@ -776,12 +778,12 @@ function requestRename(session, argStr) {
     // do it (kill claude → move dir → relaunch on the new name).
     try {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
-      fs.writeFileSync(path.join(CACHE_DIR, `cl-rename-${session}.trigger`), JSON.stringify({ oldId, newId, at: Date.now() }));
+      fs.writeFileSync(path.join(CACHE_DIR, `arc-rename-${session}.trigger`), JSON.stringify({ oldId, newId, at: Date.now() }));
       return { ok: true, viaRunner: true, message: `renaming "${oldId}" → "${newId}" — relaunching this session on the new name…` };
     } catch (e) { return { ok: false, message: `rename signal FAILED — ${e.message}` }; }
   }
   if (live > 0) {
-    return { ok: false, message: `"${oldId}" has ${live} other live session(s) — its login folder is in use. Close them (or run \`cl:rename ${newId}\` from that session) first.` };
+    return { ok: false, message: `"${oldId}" has ${live} other live session(s) — its login folder is in use. Close them (or run \`arc:rename ${newId}\` from that session) first.` };
   }
   // No live session on it → safe to rename right here.
   try {
@@ -794,15 +796,15 @@ function requestRename(session, argStr) {
 // "<id> confirm" (step 2: verify the fresh pending marker, then remove).
 // Returns { ok, pending?, removed?, message }.
 function requestRemoveAccount(session, argStr) {
-  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `cl`).' };
+  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `arc`).' };
   let C, cfg;
-  try { C = require('./cl-config'); cfg = C.loadConfig(); }
+  try { C = require('./arc-config'); cfg = C.loadConfig(); }
   catch (e) { return { ok: false, message: `cl config unreadable (${e.message}).` }; }
 
   const tokens = (argStr || '').trim().split(/\s+/).filter(Boolean);
   const isConfirm = tokens.some((t) => CONFIRM_WORDS.has(t.toLowerCase()));
   const id = tokens.find((t) => !t.startsWith('-') && !CONFIRM_WORDS.has(t.toLowerCase()));
-  if (!id) return { ok: false, message: 'usage: cl:remove-account <id>   (then confirm) — an account id is required.' };
+  if (!id) return { ok: false, message: 'usage: arc:remove-account <id>   (then confirm) — an account id is required.' };
 
   const acc = C.findAccount(cfg, id);
   if (!acc) return { ok: false, message: `no account "${id}". Configured: ${cfg.accounts.map((a) => a.id).join(', ')}.` };
@@ -822,7 +824,7 @@ function requestRemoveAccount(session, argStr) {
     ? `⚠ ${live} LIVE SESSION${live > 1 ? 'S' : ''} STILL ON "${acc.id.toUpperCase()}"\n`
       + `  ${Subj} ${keep} running (removal won't stop ${them}).\n`
       + `  ${Subj} ${drop} to "${newDefault}" on next switch/restart.\n`
-      + `  Move one off now: cl:switch ${newDefault} in it.\n`
+      + `  Move one off now: arc:switch ${newDefault} in it.\n`
     : '';
 
   if (!isConfirm) {
@@ -834,9 +836,9 @@ function requestRemoveAccount(session, argStr) {
         liveWarn +
         `REMOVE account "${acc.id}"${acc.label && acc.label !== acc.id.toUpperCase() ? ` (${acc.label})` : ''}` +
         ` · ${acc.type}${acc.email ? ` · ${acc.email}` : ''}?` + '\n' +
-        `  • cl-config.json is backed up first; references (switch order / default) are auto-fixed\n` +
+        `  • arc-config.json is backed up first; references (switch order / default) are auto-fixed\n` +
         `  • its profile (login + local data) is MOVED to recoverable trash (cl-profiles/.trash), never hard-deleted\n` +
-        `  CONFIRM within 2 min:  cl:remove-account ${acc.id} confirm     ·     or ignore this to cancel`,
+        `  CONFIRM within 2 min:  arc:remove-account ${acc.id} confirm     ·     or ignore this to cancel`,
     };
   }
 
@@ -844,7 +846,7 @@ function requestRemoveAccount(session, argStr) {
   let pend = null;
   try { pend = JSON.parse(fs.readFileSync(pendingRmPath(session), 'utf8')); } catch {}
   if (!pend || pend.id !== acc.id || Date.now() - pend.at > 120_000) {
-    return { ok: false, message: `no pending confirmation for "${acc.id}" (or it expired) — run \`cl:remove-account ${acc.id}\` first to review what will be removed.` };
+    return { ok: false, message: `no pending confirmation for "${acc.id}" (or it expired) — run \`arc:remove-account ${acc.id}\` first to review what will be removed.` };
   }
   let res;
   try { res = removeAccountFromConfig(C, acc.id); }
@@ -866,30 +868,30 @@ function requestRemoveAccount(session, argStr) {
 }
 
 // ---- delete current session (double-confirmed, moves to recoverable trash) ---
-function pendingDelPath(session) { return path.join(CACHE_DIR, `cl-delpending-${session}.json`); }
+function pendingDelPath(session) { return path.join(CACHE_DIR, `arc-delpending-${session}.json`); }
 
 // The conversation id THIS cl session is on.
 function sessionConvId(session) {
-  for (const p of [path.join(CACHE_DIR, `cl-state-${session}.json`), path.join(CACHE_DIR, `cl-active-${session}.json`)]) {
+  for (const p of [path.join(CACHE_DIR, `arc-state-${session}.json`), path.join(CACHE_DIR, `arc-active-${session}.json`)]) {
     try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); if (j.convId) return j.convId; } catch {}
   }
   return null;
 }
 
-// Two-step deletion of the CURRENT conversation. Step 1 (bare `cl:delete`) shows
-// the impact and arms a 2-min pending marker; step 2 (`cl:delete confirm`) drops
+// Two-step deletion of the CURRENT conversation. Step 1 (bare `arc:delete`) shows
+// the impact and arms a 2-min pending marker; step 2 (`arc:delete confirm`) drops
 // a delete trigger — cl-runner kills claude, moves the transcript to recoverable
 // trash, and starts a FRESH session. Returns { ok, pending?, deleting?, message }.
 function requestDelete(session, argStr) {
-  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `cl`).' };
+  if (!session) return { ok: false, message: 'NOT running under the cl wrapper (launch with `arc`).' };
   const convId = sessionConvId(session);
   if (!convId) return { ok: false, message: 'no current conversation id yet (the statusline hasn\'t bridged it) — try again in a moment.' };
 
   let fp = null;
-  try { fp = require('./cl-sync').findTranscriptFile(convId); } catch {}
+  try { fp = require('./arc-sync').findTranscriptFile(convId); } catch {}
   if (!fp) {
     // No transcript = an EMPTY session (no messages saved yet) → nothing to trash.
-    // This is the usual "cl:delete did nothing" case: you delete a chat, a fresh
+    // This is the usual "arc:delete did nothing" case: you delete a chat, a fresh
     // empty session starts, and deleting THAT finds nothing — so say so clearly
     // instead of arming a confirm that then reports "(not found)".
     return { ok: false, message: 'nothing to delete — this conversation has no saved messages yet. (An empty session leaves no transcript; just send a message first, or switch/exit.)' };
@@ -904,20 +906,20 @@ function requestDelete(session, argStr) {
       ok: true, pending: true,
       message:
         `DELETE the CURRENT conversation (${convId.slice(0, 8)}${sizeStr})?\n` +
-        `  • it is MOVED to recoverable trash, never hard-deleted (cl:trash to list/restore/purge)\n` +
+        `  • it is MOVED to recoverable trash, never hard-deleted (arc:trash to list/restore/purge)\n` +
         `  • this conversation ENDS and a fresh empty session starts in its place\n` +
-        `  CONFIRM within 2 min:  cl:delete confirm     ·     or ignore this to cancel`,
+        `  CONFIRM within 2 min:  arc:delete confirm     ·     or ignore this to cancel`,
     };
   }
 
   let pend = null;
   try { pend = JSON.parse(fs.readFileSync(pendingDelPath(session), 'utf8')); } catch {}
   if (!pend || pend.convId !== convId || Date.now() - pend.at > 120_000) {
-    return { ok: false, message: `no pending confirmation for this conversation (or it expired) — run \`cl:delete\` first to review.` };
+    return { ok: false, message: `no pending confirmation for this conversation (or it expired) — run \`arc:delete\` first to review.` };
   }
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CACHE_DIR, `cl-delete-${session}.trigger`), JSON.stringify({ at: Date.now(), convId }));
+    fs.writeFileSync(path.join(CACHE_DIR, `arc-delete-${session}.trigger`), JSON.stringify({ at: Date.now(), convId }));
     fs.unlinkSync(pendingDelPath(session));
   } catch (e) { return { ok: false, message: `delete signal FAILED — ${e.message}` }; }
   return { ok: true, deleting: true, message: `deleting this conversation and starting fresh — one moment…` };
@@ -926,25 +928,25 @@ function requestDelete(session, argStr) {
 // Drop a restart trigger. Returns { ok, message }. Never throws.
 function requestRestart(session) {
   if (!session) {
-    return { ok: false, message: 'NOT RESTARTING — this session is not running under the cl wrapper (launch with `cl`).' };
+    return { ok: false, message: 'NOT RESTARTING — this session is not running under the cl wrapper (launch with `arc`).' };
   }
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CACHE_DIR, `cl-restart-${session}.trigger`), JSON.stringify({ at: Date.now() }));
+    fs.writeFileSync(path.join(CACHE_DIR, `arc-restart-${session}.trigger`), JSON.stringify({ at: Date.now() }));
     return { ok: true, message: 'RESTARTING — the wrapper will reload and relaunch this conversation momentarily.' };
   } catch (e) {
     return { ok: false, message: `restart signal FAILED — ${e.message}` };
   }
 }
 
-// ---- cl:trash — list / restore / permanently empty the conversation trash --
-// (~/.claude/backups/cl-deleted-*, written by cl:delete). Pure file ops that run
+// ---- arc:trash — list / restore / permanently empty the conversation trash --
+// (~/.claude/backups/cl-deleted-*, written by arc:delete). Pure file ops that run
 // synchronously in the hook — zero tokens, no relaunch. `plain: true` results are
-// self-contained readouts (rendered uncolored, like cl:peek).
-function pendingPurgePath(session) { return path.join(CACHE_DIR, `cl-purgepending-${session || 'terminal'}.json`); }
+// self-contained readouts (rendered uncolored, like arc:peek).
+function pendingPurgePath(session) { return path.join(CACHE_DIR, `arc-purgepending-${session || 'terminal'}.json`); }
 
 function requestTrash(session, argStr) {
-  const sync = require('./cl-sync');
+  const sync = require('./arc-sync');
   const toks = (argStr || '').trim().split(/\s+/).filter(Boolean);
   const sub = (toks[0] || '').toLowerCase();
 
@@ -962,27 +964,27 @@ function requestTrash(session, argStr) {
         message:
           `EMPTY TRASH — PERMANENTLY delete ${entries.length} trashed conversation${entries.length > 1 ? 's' : ''} (${sync.human(bytes)})?\n` +
           `  ⚠ NOT recoverable: this deletes the recoverable copies themselves\n` +
-          `  CONFIRM within 2 min:  cl:trash empty confirm     ·     or ignore this to cancel`,
+          `  CONFIRM within 2 min:  arc:trash empty confirm     ·     or ignore this to cancel`,
       };
     }
     let pend = null;
     try { pend = JSON.parse(fs.readFileSync(pendingPurgePath(session), 'utf8')); } catch {}
     if (!pend || Date.now() - pend.at > 120_000) {
-      return { ok: false, message: 'no pending confirmation (or it expired) — run `cl:trash empty` first to review what gets purged.' };
+      return { ok: false, message: 'no pending confirmation (or it expired) — run `arc:trash empty` first to review what gets purged.' };
     }
     try { fs.unlinkSync(pendingPurgePath(session)); } catch {}
     const r = sync.emptyTrash();
     return r.ok
       ? { ok: true, message: `✓ trash emptied — permanently deleted ${r.count} conversation${r.count > 1 ? 's' : ''} (${sync.human(r.bytes)}).` }
-      : { ok: false, message: `purge INCOMPLETE — ${r.failed} trash folder(s) would not delete (file in use?). cl:trash shows what's left.` };
+      : { ok: false, message: `purge INCOMPLETE — ${r.failed} trash folder(s) would not delete (file in use?). arc:trash shows what's left.` };
   }
 
   if (sub && sub !== 'list') {
-    return { ok: false, message: `unknown trash action "${toks[0]}" — use: cl:trash · cl:trash restore <id> · cl:trash empty` };
+    return { ok: false, message: `unknown trash action "${toks[0]}" — use: arc:trash · arc:trash restore <id> · arc:trash empty` };
   }
 
   const entries = sync.listTrash();
-  if (!entries.length) return { ok: true, plain: true, message: 'trash — empty. (cl:delete moves conversations here; nothing is hard-deleted until cl:trash empty.)' };
+  if (!entries.length) return { ok: true, plain: true, message: 'trash — empty. (arc:delete moves conversations here; nothing is hard-deleted until arc:trash empty.)' };
   const bytes = entries.reduce((s, e) => s + e.bytes, 0);
   const lines = [`trash — ${entries.length} deleted conversation${entries.length > 1 ? 's' : ''}, ${sync.human(bytes)} total (newest deletion first)`, ''];
   for (const e of entries) {
@@ -999,7 +1001,7 @@ function requestTrash(session, argStr) {
     lines.push(`  ${e.convId.slice(0, 8)}  ${title}`);
     lines.push(`            ${turns} · ${used} · ${sync.human(e.bytes)} · ${where}${e.sidecar ? ' · +files' : ''}`);
   }
-  lines.push('', '  restore one:  cl:trash restore <id>   (then: cl --resume <id>)        purge all:  cl:trash empty');
+  lines.push('', '  restore one:  arc:trash restore <id>   (then: cl --resume <id>)        purge all:  arc:trash empty');
   return { ok: true, plain: true, message: lines.join('\n') };
 }
 

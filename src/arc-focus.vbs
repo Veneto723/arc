@@ -1,4 +1,4 @@
-' cl-focus.vbs: bring the terminal window hosting a claude session to the
+' arc-focus.vbs: bring the terminal window hosting a claude session to the
 ' foreground when a cl-notify toast is clicked. Registered as the cl-focus:
 ' protocol handler, so the Windows shell launches THIS script DIRECTLY on the
 ' click and grants IT the right to change the foreground. That grant does NOT
@@ -22,7 +22,7 @@ Set sh  = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set wmi = GetObject("winmgmts:\\.\root\cimv2")
 home = sh.ExpandEnvironmentStrings("%USERPROFILE%")
-logPath = home & "\.claude\cache\cl-focus.log"
+logPath = home & "\.claude\cache\arc-focus.log"
 
 Sub Log(m)
   On Error Resume Next
@@ -61,8 +61,9 @@ pid = CLng("0" & re.Replace(arg, ""))                  ' strip "cl-focus:" and n
 If pid = 0 Then Log "no pid from '" & arg & "'" : WScript.Quit
 startPid = pid
 
-' --- primary: the window PID cl-runner captured at launch ---
-Dim winFile : winFile = home & "\.claude\cache\cl-win-" & pid & ".json"
+' --- primary: the window PID arc-runner captured at launch ---
+Dim winFile : winFile = home & "\.claude\cache\arc-win-" & pid & ".json"
+If Not fso.FileExists(winFile) Then winFile = home & "\.claude\cache\cl-win-" & pid & ".json"  ' legacy fallback
 If fso.FileExists(winFile) Then
   On Error Resume Next
   Dim t, wpid : t = fso.OpenTextFile(winFile, 1).ReadAll
@@ -92,6 +93,6 @@ If Not ok Then
   ' Last resort: the win32 helper (SetForegroundWindow + minimize/restore).
   On Error Resume Next
   sh.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & _
-    home & "\.claude\scripts\cl-focus.ps1"" """ & arg & """", 0, False
+    home & "\.claude\scripts\arc-focus.ps1"" """ & arg & """", 0, False
   On Error GoTo 0
 End If

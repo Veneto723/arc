@@ -1,5 +1,5 @@
-// cl-config: shared loader for the cl account-switcher configuration.
-// One config file (~/.claude/cl-config.json) defines N accounts; every cl
+// arc-config: shared loader for the cl account-switcher configuration.
+// One config file (~/.claude/arc-config.json) defines N accounts; every cl
 // component (runner, statusline, hooks, pool tools) resolves accounts from it.
 //
 // Account types:
@@ -15,7 +15,7 @@
 //            disk, bound to this Windows user+machine; set via `cl set-key <id>`).
 //            Optional `usageUrl` (default `<baseUrl>/v1/usage`, set false to
 //            disable): the gateway's own usage endpoint — cl fetches it and shows
-//            the account's cost/tokens in the statusline + cl:peek (see gw-usage.js).
+//            the account's cost/tokens in the statusline + arc:peek (see gw-usage.js).
 //
 // Minimal example (single subscription):
 //   { "version": 1, "accounts": [ { "id": "main", "label": "MAX", "type": "oauth" } ] }
@@ -27,7 +27,15 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-const CONFIG_PATH = path.join(CLAUDE_DIR, 'cl-config.json');
+const CONFIG_PATH = path.join(CLAUDE_DIR, 'arc-config.json');
+const LEGACY_CONFIG_PATH = path.join(CLAUDE_DIR, 'cl-config.json'); // pre-rename name
+// One-time migration: copy the old cl-config.json to arc-config.json (keeping the
+// original as a backup). Best-effort; loadRaw also falls back to the legacy path.
+try {
+  if (!fs.existsSync(CONFIG_PATH) && fs.existsSync(LEGACY_CONFIG_PATH)) {
+    fs.copyFileSync(LEGACY_CONFIG_PATH, CONFIG_PATH);
+  }
+} catch { /* fall through to loadRaw's fallback */ }
 const CACHE_DIR = path.join(CLAUDE_DIR, 'cache');
 const CRED_PATH = path.join(CLAUDE_DIR, '.credentials.json');
 const SCRIPTS_DIR = path.join(CLAUDE_DIR, 'scripts');
@@ -40,12 +48,14 @@ function expandHome(p) {
 }
 
 function loadRaw() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
-  catch { return null; }
+  for (const p of [CONFIG_PATH, LEGACY_CONFIG_PATH]) {
+    try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* try next */ }
+  }
+  return null;
 }
 
 // Fall back to a minimal default (one MAX subscription account) so `cl` works
-// before cl-config.json exists — `cl doctor` flags it and points at `cl setup`.
+// before arc-config.json exists — `cl doctor` flags it and points at `cl setup`.
 function legacyConfig() {
   return {
     version: 1,
@@ -92,7 +102,7 @@ function findAccount(cfg, id) {
   return cfg.accounts.find((a) => a.id === id) || null;
 }
 
-// The account cl:switch moves to: an explicit valid target, else the next id in
+// The account arc:switch moves to: an explicit valid target, else the next id in
 // switchOrder after `currentId` (cyclic).
 function nextAccount(cfg, currentId, targetId) {
   const target = findAccount(cfg, targetId);
@@ -106,7 +116,7 @@ function nextAccount(cfg, currentId, targetId) {
 
 // DPAPI (Windows Data Protection API, CurrentUser scope) via PowerShell: encrypt
 // / decrypt a secret at rest, bound to this Windows user+machine. Lets the API
-// key live encrypted INSIDE cl-config.json (`apiKeyEnc`) — no plaintext key file,
+// key live encrypted INSIDE arc-config.json (`apiKeyEnc`) — no plaintext key file,
 // and a copied config is useless on any other machine/user. Secret is passed via
 // env (not argv) so it never appears in a command line.
 function runPowerShell(script, extraEnv) {

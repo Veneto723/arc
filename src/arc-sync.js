@@ -1,21 +1,21 @@
 #!/usr/bin/env node
-// cl-sync: discrete export / import of Claude Code chat sessions between machines.
+// arc-sync: discrete export / import of Claude Code chat sessions between machines.
 // Pure file operations (tar over ~/.claude/projects), so they run inside the
-// cl:export / cl:import hook — zero model tokens, no session disruption.
+// arc:export / arc:import hook — zero model tokens, no session disruption.
 //
-//   cl:export                → the CURRENT conversation only (fast)
-//   cl:export all            → every session in the CURRENT project folder
-//   cl:export global         → every session on this machine (bigger/slower; alias *)
-//   cl:export <project|id>   → one project's sessions, or one session (id prefix)
-//   cl:export --since <days> → sessions touched in the last N days
-//   cl:export ... --out <f>  → choose the archive path (default ~/cl-export-<ts>.tgz)
+//   arc:export                → the CURRENT conversation only (fast)
+//   arc:export all            → every session in the CURRENT project folder
+//   arc:export global         → every session on this machine (bigger/slower; alias *)
+//   arc:export <project|id>   → one project's sessions, or one session (id prefix)
+//   arc:export --since <days> → sessions touched in the last N days
+//   arc:export ... --out <f>  → choose the archive path (default ~/cl-export-<ts>.tgz)
 //
-//   cl:import <archive>      → extract + merge into ~/.claude/projects
+//   arc:import <archive>      → extract + merge into ~/.claude/projects
 //                              (newer-wins; overwritten local copies are backed
 //                               up; a conversation OPEN in a live cl is never
 //                               touched; --dry-run / --force / --skip-existing)
-//   cl:import <a> <d>        → re-root every project in the bundle under OUTER
-//   cl:import <a> --dest <d>   folder <d> (the bare form and the flag are the same
+//   arc:import <a> <d>        → re-root every project in the bundle under OUTER
+//   arc:import <a> --dest <d>   folder <d> (the bare form and the flag are the same
 //                              thing), keeping each project's own name:
 //                              E:\whalephone → <d>\whalephone. Lets two machines
 //                              store projects at different roots (office E:\x,
@@ -116,8 +116,9 @@ function discover() {
 
 // The conversation id THIS cl session is on (protected from import overwrite).
 function currentConv(session) {
-  for (const p of [path.join(CACHE, `cl-state-${session}.json`), path.join(CACHE, `cl-active-${session}.json`)]) {
-    try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); if (j.convId) return j.convId; } catch {}
+  // arc-* first, then the legacy cl-* names (a session from before the rename).
+  for (const p of [`arc-state-${session}.json`, `cl-state-${session}.json`, `arc-active-${session}.json`, `cl-active-${session}.json`]) {
+    try { const j = JSON.parse(fs.readFileSync(path.join(CACHE, p), 'utf8')); if (j.convId) return j.convId; } catch {}
   }
   return null;
 }
@@ -125,11 +126,14 @@ function currentConv(session) {
 // The session's LAUNCH cwd (which is what Claude Code names the project dir after —
 // not the shell's current cwd, which drifts).
 function stateCwd(session) {
-  try { return JSON.parse(fs.readFileSync(path.join(CACHE, `cl-state-${session}.json`), 'utf8')).cwd || null; } catch { return null; }
+  for (const p of [`arc-state-${session}.json`, `cl-state-${session}.json`]) { // arc-, then legacy cl-
+    try { const c = JSON.parse(fs.readFileSync(path.join(CACHE, p), 'utf8')).cwd; if (c) return c; } catch {}
+  }
+  return null;
 }
 
 // Claude Code names a project dir after the cwd with every non-alphanumeric replaced
-// by '-'  (E:\ -> "E--",  E:\cl-kit -> "E--cl-kit"). Only a FALLBACK: the encoding is
+// by '-'  (E:\ -> "E--",  E:\arc -> "E--arc"). Only a FALLBACK: the encoding is
 // Claude Code's to change, so we prefer to look up the dir that actually holds this
 // conversation.
 const encodeProject = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
@@ -266,13 +270,13 @@ function doExport(session, argStr) {
   } else if (!sel || sel.toLowerCase() === 'current' || sel === '.') {
     const cur = currentConv(session);
     selected = all.filter((s) => s.id === cur); what = 'current conversation';
-    if (!selected.length) return { ok: false, message: 'no current conversation found — try `cl:export all` (this project) or `cl:export global`.' };
+    if (!selected.length) return { ok: false, message: 'no current conversation found — try `arc:export all` (this project) or `arc:export global`.' };
   } else if (sel.toLowerCase() === 'all') {
     // `all` = every session in THIS project folder (the common case). Everything on the
     // machine is `global` — an explicit word, because that archive can be huge.
     const proj = currentProject(session, all);
     if (!proj) {
-      return { ok: false, message: 'could not tell which project folder you are in — run `cl:export global`, or name a project dir (see ~/.claude/projects).' };
+      return { ok: false, message: 'could not tell which project folder you are in — run `arc:export global`, or name a project dir (see ~/.claude/projects).' };
     }
     selected = all.filter((s) => s.project === proj);
     what = `all sessions in project "${proj}"`;
@@ -283,7 +287,7 @@ function doExport(session, argStr) {
     // project dir name, or session id / id-prefix
     selected = all.filter((s) => s.project === sel || s.id === sel || s.id.startsWith(sel));
     what = `"${sel}"`;
-    if (!selected.length) return { ok: false, message: `nothing matched "${sel}". Use \`cl:export all\` (this project), \`cl:export global\` (everything), a project dir name, or a session id.` };
+    if (!selected.length) return { ok: false, message: `nothing matched "${sel}". Use \`arc:export all\` (this project), \`arc:export global\` (everything), a project dir name, or a session id.` };
   }
 
   const totalBytes = selected.reduce((a, s) => a + s.size, 0);
@@ -296,8 +300,8 @@ function doExport(session, argStr) {
     sessions: selected.map((s) => ({ project: s.project, id: s.id, size: s.size, lastTs: s.lastTs, title: s.title })),
   };
   const manPath = path.join(PROJECTS, '.cl-manifest.json');
-  const listPath = path.join(CACHE, `cl-export-list-${process.pid}.txt`);
-  const out = flags.out ? path.resolve(flags.out) : path.join(HOME, `cl-export-${stamp()}.tgz`);
+  const listPath = path.join(CACHE, `arc-export-list-${process.pid}.txt`);
+  const out = flags.out ? path.resolve(flags.out) : path.join(HOME, `arc-export-${stamp()}.tgz`);
   try {
     fs.mkdirSync(CACHE, { recursive: true });
     fs.writeFileSync(manPath, JSON.stringify(manifest, null, 2));
@@ -318,7 +322,7 @@ function doExport(session, argStr) {
     message:
       `✓ exported ${selected.length} session(s) — ${what} (${human(totalBytes)} → ${human(archiveSize)} archive)\n` +
       `  ${out}\n` +
-      `  copy that file to the other PC, then run:  cl:import "${out.split(path.sep).pop()}"  (from wherever you put it)`,
+      `  copy that file to the other PC, then run:  arc:import "${out.split(path.sep).pop()}"  (from wherever you put it)`,
   };
 }
 
@@ -327,7 +331,7 @@ function doExport(session, argStr) {
 function doImport(session, argStr) {
   const { flags, pos } = parseFlags(argStr);
   const archive = pos[0] ? path.resolve(pos[0]) : null;
-  if (!archive) return { ok: false, message: 'usage: cl:import <archive.tgz> [<dest> | --dest "E:\\outer\\folder"] [--dry-run] [--force] [--skip-existing]' };
+  if (!archive) return { ok: false, message: 'usage: arc:import <archive.tgz> [<dest> | --dest "E:\\outer\\folder"] [--dry-run] [--force] [--skip-existing]' };
   if (!fs.existsSync(archive)) return { ok: false, message: `archive not found: ${archive}` };
 
   // --dest re-roots each imported project under an OUTER folder, KEEPING its own name:
@@ -336,7 +340,7 @@ function doImport(session, argStr) {
   // path. Requires an absolute path. Sessions whose source path can't be recovered are
   // skipped and reported rather than guessed.
   //
-  // A BARE second positional means the same thing: `cl:import <archive> E:` == `--dest E:`.
+  // A BARE second positional means the same thing: `arc:import <archive> E:` == `--dest E:`.
   // The flagless form is what people actually type, and it used to be SILENTLY IGNORED —
   // the import ran with no re-rooting and landed in the archive's original project dir,
   // looking like --dest was broken. Nothing else ever read pos[1], so adopting it costs
@@ -344,21 +348,24 @@ function doImport(session, argStr) {
   const destArg = flags.dest !== undefined ? flags.dest : pos[1];
   const destRoot = destArg ? String(destArg).replace(/[\\/]+$/, '') : null;
   if (destRoot !== null && !path.win32.isAbsolute(destRoot + '\\')) {
-    return { ok: false, message: `the destination must be an ABSOLUTE folder path (got "${destArg}") — e.g. \`cl:import <archive> "E:\\whaletech"\` or \`--dest "E:\\whaletech"\`.` };
+    return { ok: false, message: `the destination must be an ABSOLUTE folder path (got "${destArg}") — e.g. \`arc:import <archive> "E:\\whaletech"\` or \`--dest "E:\\whaletech"\`.` };
   }
   const remaps = []; // {name, from, to} for the report
   const destSeen = new Map(); // destProjName -> source proj (collision guard)
 
-  const tmp = path.join(CACHE, `cl-import-${process.pid}-${Date.now()}`);
+  const tmp = path.join(CACHE, `arc-import-${process.pid}-${Date.now()}`);
   try {
     fs.mkdirSync(tmp, { recursive: true });
-    const r = runTar(['-xzf', archive, '-C', tmp]);
+    // Extract via spawn cwd, NOT `-C tmp`: some tar builds reject `--force-local -C`
+    // with a drive-letter path ("Cannot open: No such file"), though they accept the
+    // same colon path via the process working directory.
+    const r = runTar(['-xzf', archive], { cwd: tmp });
     if (r.status !== 0) { rm(tmp); return { ok: false, message: `import FAILED — tar: ${(r.stderr || 'unknown').toString().slice(0, 200)}` }; }
   } catch (e) { rm(tmp); return { ok: false, message: `import FAILED — ${e.message}` }; }
 
   const protectedIds = liveConvIds();
   const cur = currentConv(session); if (cur) protectedIds.add(cur);
-  const backupDir = path.join(BACKUPS, `cl-import-${stamp()}`);
+  const backupDir = path.join(BACKUPS, `arc-import-${stamp()}`);
   const added = [], updated = [], skipped = [];
   let backedUp = false;
 
@@ -438,7 +445,7 @@ function doImport(session, argStr) {
   rm(tmp);
 
   const dry = flags['dry-run'] ? ' [DRY RUN — nothing changed]' : '';
-  const lines = [`cl:import${dry} — added ${added.length}, updated ${updated.length}, skipped ${skipped.length}`];
+  const lines = [`arc:import${dry} — added ${added.length}, updated ${updated.length}, skipped ${skipped.length}`];
   if (remaps.length) {
     lines.push(`  re-rooted under ${destRoot}:`);
     for (const r of remaps) lines.push(`    ${r.from}  →  ${r.to}${r.clash ? '   ⚠ same name as another project — MERGED into one folder' : ''}`);
@@ -494,7 +501,7 @@ function trashSession(convId) {
   const fp = findTranscriptFile(convId);
   if (!fp) return { trashDir: null, moved: [] };
   const proj = path.basename(path.dirname(fp));
-  const trashDir = path.join(BACKUPS, `cl-deleted-${stamp()}`);
+  const trashDir = path.join(BACKUPS, `arc-deleted-${stamp()}`);
   const destProj = path.join(trashDir, proj);
   fs.mkdirSync(destProj, { recursive: true });
   const moved = [];
@@ -504,14 +511,14 @@ function trashSession(convId) {
   return { trashDir, moved };
 }
 
-// ---- trash management (cl:trash) -------------------------------------------
+// ---- trash management (arc:trash) -------------------------------------------
 // The trash is the cl-deleted-* dirs trashSession writes. Pure file ops, so
-// list / restore / empty all run inside the cl:trash hook — zero tokens. Only
+// list / restore / empty all run inside the arc:trash hook — zero tokens. Only
 // cl-deleted-* is ever touched; other ~/.claude/backups content is not trash.
 
 // "cl-deleted-YYYYMMDD-HHMMSS" → "YYYY-MM-DD HH:MM" for display.
 function trashDirDate(name) {
-  const m = name.match(/^cl-deleted-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}$/);
+  const m = name.match(/^(?:arc|cl)-deleted-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}$/);
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : '?';
 }
 
@@ -575,7 +582,7 @@ function transcriptMeta(fp) {
 // { convId, proj, dir, file, sidecar, bytes, deletedAt }.
 function listTrash() {
   const out = [];
-  let dirs = []; try { dirs = fs.readdirSync(BACKUPS).filter((d) => /^cl-deleted-/.test(d)); } catch {}
+  let dirs = []; try { dirs = fs.readdirSync(BACKUPS).filter((d) => /^(?:arc|cl)-deleted-/.test(d)); } catch {}
   for (const d of dirs.sort().reverse()) {
     let projs = []; try { projs = fs.readdirSync(path.join(BACKUPS, d)); } catch { continue; }
     for (const proj of projs) {
@@ -598,9 +605,9 @@ function listTrash() {
 // Restore ONE trashed conversation (unique id prefix) back into its project dir.
 function restoreSession(idPrefix) {
   const pre = String(idPrefix || '').trim().toLowerCase();
-  if (pre.length < 4) return { ok: false, message: 'give at least 4 chars of the conversation id — cl:trash lists them.' };
+  if (pre.length < 4) return { ok: false, message: 'give at least 4 chars of the conversation id — arc:trash lists them.' };
   const hits = listTrash().filter((e) => e.convId.toLowerCase().startsWith(pre));
-  if (!hits.length) return { ok: false, message: `nothing in trash matches "${pre}" — cl:trash lists what's there.` };
+  if (!hits.length) return { ok: false, message: `nothing in trash matches "${pre}" — arc:trash lists what's there.` };
   if (hits.length > 1) return { ok: false, message: `"${pre}" is ambiguous (${hits.map((h) => h.convId.slice(0, 8)).join(', ')}) — use more characters.` };
   const e = hits[0];
   const destDir = path.join(PROJECTS, e.proj);
@@ -624,7 +631,7 @@ function restoreSession(idPrefix) {
 function emptyTrash() {
   const entries = listTrash();
   const bytes = entries.reduce((s, e) => s + e.bytes, 0);
-  let dirs = []; try { dirs = fs.readdirSync(BACKUPS).filter((d) => /^cl-deleted-/.test(d)); } catch {}
+  let dirs = []; try { dirs = fs.readdirSync(BACKUPS).filter((d) => /^(?:arc|cl)-deleted-/.test(d)); } catch {}
   let failed = 0;
   for (const d of dirs) {
     try { fs.rmSync(path.join(BACKUPS, d), { recursive: true, force: true }); } catch { failed++; }

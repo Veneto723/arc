@@ -1,4 +1,4 @@
-// cl-profile: per-account CLAUDE_CONFIG_DIR profiles — the fix for the
+// arc-profile: per-account CLAUDE_CONFIG_DIR profiles — the fix for the
 // cross-session credential hijack. Each account gets its own config dir under
 // ~/.claude/cl-profiles/<id>; cl points Claude Code at it via CLAUDE_CONFIG_DIR
 // when launching. Claude Code relocates BOTH .credentials.json AND .claude.json
@@ -13,7 +13,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const C = require('./cl-config');
+const C = require('./arc-config');
 
 const PROFILES_DIR = path.join(C.CLAUDE_DIR, 'cl-profiles');
 // The "brain" — junctioned back to ~/.claude so every account shares it. (Windows
@@ -22,7 +22,7 @@ const PROFILES_DIR = path.join(C.CLAUDE_DIR, 'cl-profiles');
 // `tasks` is Claude Code's TaskCreate/TaskUpdate list: <config>/tasks/<session-id>/<id>.json
 // plus a .lock. It belongs here for the same reason `sessions` and `todos` do — a
 // conversation resumed on another account is the SAME conversation and must keep its
-// task list. Without it, `cl:switch` silently showed an EMPTY task list, because the
+// task list. Without it, `arc:switch` silently showed an EMPTY task list, because the
 // new profile had no tasks/<session-id>/ of its own. (Observed: session 6665bfca had 4
 // tasks under ~/.claude/tasks and an empty dir under cl-profiles/max/tasks.)
 const SHARED_DIRS = ['projects', 'sessions', 'commands', 'todos', 'tasks', 'skills', 'agents', 'plugins'];
@@ -31,7 +31,7 @@ const SHARED_DIRS = ['projects', 'sessions', 'commands', 'todos', 'tasks', 'skil
 // from the home one so a fresh profile still has the user's servers.
 const HOME_CLAUDE_JSON = path.join(os.homedir(), '.claude.json');
 // settings.json keys cl OWNS and must propagate into every profile so the zero-
-// token cl: hooks, the usage statusline, and the user's permission allow-list all
+// token arc: hooks, the usage statusline, and the user's permission allow-list all
 // work inside a profiled session. Everything else (theme, model, per-account
 // /config) is left to Claude Code / the user per profile.
 const CL_SETTINGS_KEYS = ['hooks', 'statusLine', 'permissions'];

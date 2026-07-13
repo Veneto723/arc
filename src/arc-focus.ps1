@@ -10,10 +10,10 @@
 # SwitchToThisWindow. One-line log at ~/.claude/cache/cl-focus.log for debugging.
 param([string]$Target)
 
-$logPath = Join-Path $env:USERPROFILE '.claude\cache\cl-focus.log'
+$logPath = Join-Path $env:USERPROFILE '.claude\cache\arc-focus.log'
 function Log($m) { try { Add-Content -Path $logPath -Value ((Get-Date).ToString('s') + ' ' + $m) -ErrorAction SilentlyContinue } catch {} }
 
-$clPid = [int]($Target -replace '^cl-focus:', '' -replace '[^\d]', '')
+$clPid = [int]($Target -replace '[^\d]', '')   # digits only — tolerates any URI prefix
 if (-not $clPid) { Log "no pid from '$Target'"; exit 0 }
 
 # Climb the parent chain: the claude pid itself has no window — its terminal host

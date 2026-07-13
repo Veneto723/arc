@@ -1,13 +1,13 @@
-// cl-codex-account: aliases and isolated CODEX_HOME directories.
+// arc-codex-account: aliases and isolated CODEX_HOME directories.
 // Authentication stays entirely inside each native Codex home.
 'use strict';
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const O = require('./cl-orchestrator');
+const O = require('./arc-orchestrator');
 
-const REGISTRY_PATH = path.join(O.CL_HOME, 'accounts.json');
+const REGISTRY_PATH = path.join(O.ARC_HOME, 'accounts.json');
 const ID_RX = /^[a-z][a-z0-9_-]{0,31}$/i;
 
 function defaultHome() { return path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex')); }
@@ -55,7 +55,7 @@ function addAccount(id, opts = {}) {
   if (!ID_RX.test(String(id || ''))) throw new Error('account id must start with a letter and use only letters, digits, dash, or underscore');
   const registry = loadRegistry();
   if (registry.codex.accounts.some((a) => a.id.toLowerCase() === id.toLowerCase())) throw new Error(`Codex account "${id}" already exists`);
-  const home = path.resolve(opts.home || path.join(O.CL_HOME, 'accounts', 'codex', id));
+  const home = path.resolve(opts.home || path.join(O.ARC_HOME, 'accounts', 'codex', id));
   fs.mkdirSync(home, { recursive: true });
   registry.codex.accounts.push({ id, label: opts.label || id, home });
   if (opts.makeDefault) registry.codex.defaultAccount = id;
@@ -76,10 +76,11 @@ function buildEnv(account, sessionId, logicalSessionId) {
   return {
     ...process.env,
     CODEX_HOME: account.home,
-    CL_SESSION: sessionId,
-    CL_LOGICAL_SESSION: logicalSessionId,
-    CL_RUNTIME: 'codex',
-    CL_RUNTIME_ACCOUNT: account.id,
+    // Both ARC_* (current) and CL_* (deprecated alias) through the migration.
+    ARC_SESSION: sessionId, CL_SESSION: sessionId,
+    ARC_LOGICAL_SESSION: logicalSessionId, CL_LOGICAL_SESSION: logicalSessionId,
+    ARC_RUNTIME: 'codex', CL_RUNTIME: 'codex',
+    ARC_RUNTIME_ACCOUNT: account.id, CL_RUNTIME_ACCOUNT: account.id,
   };
 }
 

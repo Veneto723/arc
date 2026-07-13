@@ -38,7 +38,7 @@ It opens the image in the OS default viewer and prints a one-line confirmation. 
 
 Flags: `--dry` prints the command without opening (for testing).
 
-**The human controls how intrusive this may be.** The mode comes from `CL_SHOW_IMAGE`, else from `features.showImage` in `~/.claude/cl-config.json` (a standing preference), else `open`:
+**The human controls how intrusive this may be.** The mode comes from `CL_SHOW_IMAGE`, else from `features.showImage` in `~/.claude/arc-config.json` (a standing preference), else `open`:
 
 | mode | behaviour |
 |---|---|

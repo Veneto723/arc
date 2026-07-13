@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cl-switch-hook: a UserPromptSubmit hook that lets you switch/restart a cl
+// arc-switch-hook: a UserPromptSubmit hook that lets you switch/restart a cl
 // session by TYPING a plain message — with NO Bash permission classifier in the
 // path. It's the ONLY switch path (the old /switch and /restart slash commands were
 // removed) precisely because it sidesteps a deadlock: a slash command's !-bash
@@ -9,17 +9,17 @@
 // rate-limit.
 //
 // Triggers (the whole prompt, case-insensitive, leading /! optional):
-//   cl:switch            → cycle to the next account
-//   cl:switch <id>       → switch to a named account
-//   cl:restart           → reload the wrapper + relaunch, same account
-//   cl:handoff [codex]   → continue this conversation in Codex
-//   cl:help  (cl:cl)     → print the command cheat sheet (zero tokens)
-//   cl:role <name>       → claim a role in this room (the "fridge" — see cl-room.js)
-//   cl:note <to> <text>  → leave a sticky note for a roommate ("all" = broadcast)
-//   cl:notes [all]       → read your unread notes (marks read); `all` = whole fridge
-//   cl:anchors [reseal]  → which doc claims about the code have gone STALE (see cl-anchor.js)
-//   cl:peek              → read-only usage readout of all accounts (no switch)
-//   cl:remove-account <id> → remove an account (alias: cl:delete-account <id>)
+//   arc:switch            → cycle to the next account
+//   arc:switch <id>       → switch to a named account
+//   arc:restart           → reload the wrapper + relaunch, same account
+//   arc:handoff [codex]   → continue this conversation in Codex
+//   arc:help  (arc:cl)     → print the command cheat sheet (zero tokens)
+//   arc:role <name>       → claim a role in this room (the "fridge" — see arc-room.js)
+//   arc:note <to> <text>  → leave a sticky note for a roommate ("all" = broadcast)
+//   arc:notes [all]       → read your unread notes (marks read); `all` = whole fridge
+//   arc:anchors [reseal]  → which doc claims about the code have gone STALE (see arc-anchor.js)
+//   arc:peek              → read-only usage readout of all accounts (no switch)
+//   arc:remove-account <id> → remove an account (alias: arc:delete-account <id>)
 //   … plus add-account / export / import / delete (delete = the current CHAT)
 //
 // On a trigger it drops the same trigger file cl-runner polls for and BLOCKS the
@@ -30,14 +30,16 @@
 // the cl session. Always exits 0 (a hook error must never wedge the prompt).
 'use strict';
 
-const core = require('./cl-switch-core');
+const core = require('./arc-switch-core');
 
 // NOTE: delete-account / del-account MUST precede the bare `delete` alternative,
-// else `cl:delete-account` matches `delete` (+ `\b` at the hyphen) and misfires as
+// else `arc:delete-account` matches `delete` (+ `\b` at the hyphen) and misfires as
 // a CONVERSATION delete. They route to remove-account (account removal), not delete.
 // `notes` MUST precede `note` (a plain alternation would try `note` first and only
 // backtrack; being explicit costs nothing and documents the intent).
-const TRIGGER_RX = /^\s*[/!]?\s*cl:(switch|restart|handoff|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|anchors|help|cl)\b\s*(.*)$/i;
+// `arc:` is the current prefix; `cl:` is kept as a deprecated alias through the
+// migration so running sessions and muscle memory don't break.
+const TRIGGER_RX = /^\s*[/!]?\s*(?:arc|cl):(switch|restart|handoff|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|anchors|help|cl|arc)\b\s*(.*)$/i;
 
 function block(reason) {
   // UserPromptSubmit: block the prompt from reaching the model, show `reason`.
@@ -45,8 +47,8 @@ function block(reason) {
   process.exit(0);
 }
 
-// ---- consistent cl: alert colours -------------------------------------------
-// One palette across every cl: message: RED = destructive, GREEN = success,
+// ---- consistent arc: alert colours -------------------------------------------
+// One palette across every arc: message: RED = destructive, GREEN = success,
 // CYAN = neutral action, YELLOW = refusal/error (the default). The host renders
 // ANSI in the block reason but re-emits each display row, dropping colour across a
 // soft-wrap — so paint() re-applies the colour PER LINE.
@@ -60,9 +62,9 @@ function alertColor(msg) {
 function paint(text, ansi) {
   return String(text).split('\n').map((l) => (l ? ansi + l + CLR.rst : '')).join('\n');
 }
-// Block with the "[cl] " prefix and a semantic colour applied to the message body.
+// Block with the "[arc] " prefix and a semantic colour applied to the message body.
 function clBlock(message) {
-  return block(`[cl] ${paint(message, alertColor(message))}`);
+  return block(`[arc] ${paint(message, alertColor(message))}`);
 }
 
 // An ordinary prompt — i.e. a TURN BOUNDARY, the only moment a roommate's note can
@@ -76,20 +78,20 @@ function clBlock(message) {
 // hook. It earned its keep — a hand-supplied `cwd` in a test masked the fact that the
 // session's real cwd had drifted to a different room. Off by default; never throws.
 function fridgeTrace(o) {
-  if (process.env.CL_FRIDGE_DEBUG !== '1') return;
+  if ((process.env.ARC_FRIDGE_DEBUG || process.env.CL_FRIDGE_DEBUG) !== '1') return;
   try {
     const fs = require('fs'), os = require('os'), path = require('path');
-    fs.appendFileSync(path.join(os.homedir(), '.claude', 'cache', 'cl-fridge-hook.log'),
+    fs.appendFileSync(path.join(os.homedir(), '.claude', 'cache', 'arc-fridge-hook.log'),
       `${new Date().toISOString()} ${JSON.stringify(o)}\n`);
   } catch {}
 }
 
 function deliverFridge(hook) {
-  const session = (process.env.CL_SESSION || '').trim();
+  const session = ((process.env.ARC_SESSION || process.env.CL_SESSION) || '').trim();
   const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
   let injected = false, err = null;
   try {
-    const inj = require('./cl-fridge').injection(session, cwd);
+    const inj = require('./arc-fridge').injection(session, cwd);
     if (inj) {
       injected = true;
       process.stdout.write(JSON.stringify({
@@ -106,22 +108,22 @@ function run(raw) {
   try { hook = JSON.parse(raw || '{}'); } catch {}
   const prompt = typeof hook.prompt === 'string' ? hook.prompt : '';
   const m = prompt.match(TRIGGER_RX);
-  if (!m) deliverFridge(hook); // not a cl: command — deliver waiting notes, let it through
+  if (!m) deliverFridge(hook); // not a arc: command — deliver waiting notes, let it through
 
-  const session = (process.env.CL_SESSION || '').trim();
+  const session = ((process.env.ARC_SESSION || process.env.CL_SESSION) || '').trim();
   const action = m[1].toLowerCase();
   const arg = (m[2] || '').trim() || null;
 
-  if (action === 'help' || action === 'cl') {
+  if (action === 'help' || action === 'cl' || action === 'arc') {
     // Cheat sheet — rendered here from cl-help (no trigger, no relaunch, ZERO
     // tokens). Self-contained (own header), so no `[cl]` prefix.
-    return block(require('./cl-help')());
+    return block(require('./arc-help')());
   }
   if (action === 'role' || action === 'note' || action === 'notes') {
     // The fridge: a per-room append-only sticky-note ledger shared by the sessions
     // working in the same folder. Pure file ops, run here — zero tokens. Loaded
-    // lazily so a plain cl:switch stays lightweight.
-    const fridge = require('./cl-fridge');
+    // lazily so a plain arc:switch stays lightweight.
+    const fridge = require('./arc-fridge');
     const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
     const r = action === 'role' ? fridge.requestRole(session, arg || '', cwd)
       : action === 'note' ? fridge.requestNote(session, arg || '', cwd)
@@ -131,7 +133,7 @@ function run(raw) {
   if (action === 'anchors') {
     // Doc-vs-code staleness readout. Pure file ops + a git grep — zero tokens.
     const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
-    const r = require('./cl-anchor').requestAnchors(session, arg || '', cwd);
+    const r = require('./arc-anchor').requestAnchors(session, arg || '', cwd);
     return r.plain ? block(r.message) : clBlock(r.message);
   }
   if (action === 'peek' || action === 'usage') {
@@ -149,7 +151,7 @@ function run(raw) {
       transcriptPath: hook.transcript_path || null,
       cwd: hook.cwd || null,
       nativeSessionId: hook.session_id || null,
-      logicalSessionId: process.env.CL_LOGICAL_SESSION || null,
+      logicalSessionId: (process.env.ARC_LOGICAL_SESSION || process.env.CL_LOGICAL_SESSION) || null,
     });
     return clBlock(r.message);
   }
@@ -172,26 +174,26 @@ function run(raw) {
   }
   if (action === 'trash' || action === 'restore') {
     // Trash management — pure file ops handled synchronously here (zero tokens).
-    // cl:restore <id> is shorthand for cl:trash restore <id>. List results are
+    // arc:restore <id> is shorthand for arc:trash restore <id>. List results are
     // self-contained readouts (plain), everything else gets the alert colours.
     const r = core.requestTrash(session, action === 'restore' ? `restore ${arg || ''}`.trim() : (arg || ''));
     return r.plain ? block(r.message) : clBlock(r.message);
   }
   if (action === 'export' || action === 'import') {
     // Pure file ops — run synchronously in the hook (zero tokens, no session
-    // disruption). Loaded lazily so a plain cl:switch stays lightweight.
-    const sync = require('./cl-sync');
+    // disruption). Loaded lazily so a plain arc:switch stays lightweight.
+    const sync = require('./arc-sync');
     const r = action === 'export' ? sync.doExport(session, arg || '') : sync.doImport(session, arg || '');
     return clBlock(r.message);
   }
-  // Bare `cl:switch` → open the interactive arrow-key picker (cl-runner renders
-  // it on the freed TTY). An explicit `cl:switch <n|name>` → switch directly.
+  // Bare `arc:switch` → open the interactive arrow-key picker (cl-runner renders
+  // it on the freed TTY). An explicit `arc:switch <n|name>` → switch directly.
   if (!arg) {
     const r = core.requestPicker(session);
     return clBlock(r.message);
   }
   const r = core.requestSwitch(session, arg);
-  const note = (!r.switching && !r.menu) ? '\n(typed cl:switch — no model/classifier involved, works even when rate-limited)' : '';
+  const note = (!r.switching && !r.menu) ? '\n(typed arc:switch — no model/classifier involved, works even when rate-limited)' : '';
   return clBlock(`${r.message}${note}`);
 }
 

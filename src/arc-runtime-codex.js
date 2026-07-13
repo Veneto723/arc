@@ -1,10 +1,10 @@
-// cl-runtime-codex: launch Codex under cl with isolated accounts and cl hooks.
+// arc-runtime-codex: launch Codex under cl with isolated accounts and cl hooks.
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const A = require('./cl-codex-account');
+const A = require('./arc-codex-account');
 
 // Codex accepts `--dangerously-bypass-hook-trust` as a GLOBAL flag (verified: it
 // parses before the subcommand — `codex --dangerously-bypass-hook-trust exec …`).
@@ -30,8 +30,13 @@ function commandSpec(args, opts = {}) {
 }
 
 // Marker so the managed block is idempotent and human-recognisable.
-const HOOK_BLOCK_BEGIN = '# >>> cl-kit managed hooks (do not edit inside this block) >>>';
-const HOOK_BLOCK_END = '# <<< cl-kit managed hooks <<<';
+const HOOK_BLOCK_BEGIN = '# >>> arc managed hooks (do not edit inside this block) >>>';
+const HOOK_BLOCK_END = '# <<< arc managed hooks <<<';
+// The pre-rename marker (literal cl-kit) — stripped on write so we don't leave a
+// stale block behind. Must NOT be renamed to arc; it matches the OLD on-disk block.
+const LEGACY_BLOCK_BEGIN = '# >>> cl-kit managed hooks (do not edit inside this block) >>>';
+const LEGACY_BLOCK_END = '# <<< cl-kit managed hooks <<<';
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Build the [hooks] TOML block. Codex reads lifecycle hooks from `[hooks]` in
 // config.toml (TOML array-of-tables, `HookEventsToml`) — NOT a JSON hooks.json.
@@ -56,14 +61,14 @@ function hookBlock(script) {
 function ensureHooks(account) {
   fs.mkdirSync(account.home, { recursive: true });
   const file = path.join(account.home, 'config.toml');
-  const script = path.join(__dirname, 'cl-codex-hook.js').replace(/\\/g, '/');
+  const script = path.join(__dirname, 'arc-codex-hook.js').replace(/\\/g, '/');
 
   // Clean up the dead artifact the previous (wrong) implementation left behind:
   // a JSON hooks.json codex never read. Only remove it if it is CL's own — never
   // touch a file we didn't write.
   const stale = path.join(account.home, 'hooks.json');
   try {
-    if (fs.existsSync(stale) && fs.readFileSync(stale, 'utf8').replace(/\\/g, '/').includes('cl-codex-hook.js')) {
+    if (fs.existsSync(stale) && /(?:arc|cl)-codex-hook\.js/.test(fs.readFileSync(stale, 'utf8').replace(/\\/g, '/'))) {
       fs.unlinkSync(stale);
     }
   } catch { /* best-effort */ }
@@ -75,10 +80,14 @@ function ensureHooks(account) {
   }
 
   const block = hookBlock(script);
-  // Idempotent: replace an existing cl-managed block in place (so a moved scripts
+  // Migration: strip a pre-rename arc block (which pointed at the now-gone
+  // cl-codex-hook.js) so we don't leave a stale, dead hook behind.
+  const legacyRe = new RegExp(`\\n*${reEsc(LEGACY_BLOCK_BEGIN)}[\\s\\S]*?${reEsc(LEGACY_BLOCK_END)}\\n?`);
+  toml = toml.replace(legacyRe, '');
+  // Idempotent: replace an existing arc-managed block in place (so a moved scripts
   // dir re-points cleanly); otherwise append. Appending [[hooks.*]] array-of-tables
   // at the end is valid TOML and merges with any hooks the user defined themselves.
-  const re = new RegExp(`${HOOK_BLOCK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${HOOK_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n?`);
+  const re = new RegExp(`${reEsc(HOOK_BLOCK_BEGIN)}[\\s\\S]*?${reEsc(HOOK_BLOCK_END)}\\n?`);
   let next;
   if (re.test(toml)) {
     next = toml.replace(re, block);

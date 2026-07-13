@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// cl-postcommit: turn every git commit into a fridge note, so two cl sessions working
-// in one repo see each other's work WITHOUT anyone typing cl:note and WITHOUT needing
+// arc-postcommit: turn every git commit into a fridge note, so two cl sessions working
+// in one repo see each other's work WITHOUT anyone typing arc:note and WITHOUT needing
 // the task list. Wired as a repo's .git/hooks/post-commit; runs AFTER the commit, so it
 // can never block or fail it.
 //
@@ -17,7 +17,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const R = require('./cl-room');
+const R = require('./arc-room');
 
 const MAX_FILES = 12;
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'cache');
@@ -30,14 +30,16 @@ function git(cwd, args) {
 // The fridge role of `session`, but only if it was claimed in THIS room.
 function roleFor(session, room) {
   try {
-    const r = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, `cl-role-${session}.json`), 'utf8'));
+    const arc = path.join(CACHE_DIR, `arc-role-${session}.json`);
+    const rp = fs.existsSync(arc) ? arc : path.join(CACHE_DIR, `cl-role-${session}.json`); // legacy fallback
+    const r = JSON.parse(fs.readFileSync(rp, 'utf8'));
     return r.room === room.root ? r.role : null;
   } catch { return null; }
 }
 
 function run(cwd) {
   const room = R.resolveRoom(cwd);
-  const session = (process.env.CL_SESSION || '').trim();
+  const session = ((process.env.ARC_SESSION || process.env.CL_SESSION) || '').trim();
   const role = session ? roleFor(session, room) : null;
   if (!role) return { posted: false, why: 'no cl role for this commit' };
 

@@ -1,6 +1,6 @@
 ---
 name: share-with-roommate
-description: You may be sharing this repo with ANOTHER cl session — a "roommate". Common pairs are an `android` session while you are `frontend`, a `backend` session while you are `android`, or a read-only `research` session while you write code. They cannot see your work and you cannot see theirs; the only channel is a shared "fridge" of sticky notes. When you finish something that CHANGES THEIR WORLD — a shared API/contract/schema change, a decision that affects their side, a blocker they'll hit, or a feature they depend on that just shipped — leave ONE concise note so they learn it at their next turn. Broadcast with `cl note all "<one line>"`, or target a role with `cl note <role> "<one line>"`. Run `cl role` first to see who is actually in the room. Do NOT narrate routine steps — only what a teammate would need to ACT on. If `cl role` shows no roommate, do nothing.
+description: You may be sharing this repo with ANOTHER cl session — a "roommate". Common pairs are an `android` session while you are `frontend`, a `backend` session while you are `android`, or a read-only `research` session while you write code. They cannot see your work and you cannot see theirs; the only channel is a shared "fridge" of sticky notes. When you finish something that CHANGES THEIR WORLD — a shared API/contract/schema change, a decision that affects their side, a blocker they'll hit, or a feature they depend on that just shipped — leave ONE concise note so they learn it at their next turn. Broadcast with `arc note all "<one line>"`, or target a role with `arc note <role> "<one line>"`. Run `arc role` first to see who is actually in the room. Do NOT narrate routine steps — only what a teammate would need to ACT on. If `arc role` shows no roommate, do nothing.
 ---
 
 # Share with your roommate
@@ -8,7 +8,7 @@ description: You may be sharing this repo with ANOTHER cl session — a "roommat
 Two `cl` sessions in one repo are **roommates**: independent Claude Code or Codex
 sessions that can't see each other's context. The **fridge** is how they leave each
 other notes — and you, the agent, put a note there by **running a terminal command**
-(do not submit `cl:note` as a prompt; the runtime hook consumes that form before it
+(do not submit `arc:note` as a prompt; the runtime hook consumes that form before it
 reaches the model).
 
 ## When to leave a note (high signal only)
@@ -33,7 +33,7 @@ cl note backend "schema: added `retries` (int, default 0) to task_log"
 cl notes                        # read what your roommate left you (also arrives at your turn start)
 ```
 
-`cl note all` broadcasts to everyone in the room (simplest — you don't need to know their
+`arc note all` broadcasts to everyone in the room (simplest — you don't need to know their
 role name). Target a specific role only when it's for one of them. Your own notes never
 come back to you; the roommate receives them through cl at the start of their next turn.
 Claude sessions also show a waiting-note mark in their statusline.
@@ -43,4 +43,4 @@ Claude sessions also show a waiting-note mark in their statusline.
 - Commits already post themselves (a `post-commit` hook notes the sha + files), and
   completing a task posts a `done` note. So you don't need to announce *"I committed"* —
   use these notes for the **why / the heads-up**, the things a raw diff doesn't say.
-- If `cl role` reports no roommate ("(nobody else here yet)"), you're solo — don't post.
+- If `arc role` reports no roommate ("(nobody else here yet)"), you're solo — don't post.

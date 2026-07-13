@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cl-handoff: take the CURRENT Claude Code conversation into a Codex session that Codex
+// arc-handoff: take the CURRENT Claude Code conversation into a Codex session that Codex
 // RESUMES natively — the human keeps re-reading the real chat history, not a summary.
 //
 // Why seed-then-inject (proven, not guessed): a Codex rollout needs version-correct
@@ -18,7 +18,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const T = require('./cl-transpile');
+const T = require('./arc-transpile');
 
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'cache');
 const defaultCodexHome = () => path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
@@ -41,7 +41,10 @@ function findTranscript(convId) {
 
 // The current session's convId + cwd, from cl-runner's state file.
 function currentSession(session) {
-  try { const s = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, `cl-state-${session}.json`), 'utf8')); return { convId: s.convId || null, cwd: s.cwd || null }; }
+  try {
+    const arc = path.join(CACHE_DIR, `arc-state-${session}.json`);
+    const sp = fs.existsSync(arc) ? arc : path.join(CACHE_DIR, `cl-state-${session}.json`); // legacy fallback
+    const s = JSON.parse(fs.readFileSync(sp, 'utf8')); return { convId: s.convId || null, cwd: s.cwd || null }; }
   catch { return { convId: null, cwd: null }; }
 }
 
@@ -96,14 +99,14 @@ const HANDOFF_MARKER_TAG = '__CL_HANDOFF_SEED__';
 
 // ---- the command -------------------------------------------------------------
 // opts: { transcript, convId, cwd, keepLast, dryRun }
-// The `cl:handoff` hook passes `transcript` directly (UserPromptSubmit carries
+// The `arc:handoff` hook passes `transcript` directly (UserPromptSubmit carries
 // transcript_path); the terminal/test path resolves it from a convId.
 function handoff(session, opts = {}) {
   const cur = currentSession(session);
   let transcript = opts.transcript;
   if (!transcript) {
     const convId = opts.convId || cur.convId;
-    if (!convId) return { ok: false, message: 'no conversation to hand off — run this inside a cl session (`cl:handoff codex`).' };
+    if (!convId) return { ok: false, message: 'no conversation to hand off — run this inside a cl session (`arc:handoff codex`).' };
     transcript = findTranscript(convId);
   }
   if (!transcript || !fs.existsSync(transcript)) return { ok: false, message: `couldn't find the transcript to hand off (${transcript || opts.convId || '?'}).` };

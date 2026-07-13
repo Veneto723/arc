@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// cl-transpile: convert a Claude Code conversation transcript into a flat message list
+// arc-transpile: convert a Claude Code conversation transcript into a flat message list
 // that a Codex rollout can carry — TEXT-FIRST. Humans re-read the *text* of a chat, not
 // the tool minutiae, so text messages convert at full fidelity and tool calls degrade to
 // a short readable line ("[ran Bash: …]"). Proven safe: a Codex session resumes from
-// exactly these text records (see cl-handoff.js for the end-to-end path).
+// exactly these text records (see arc-handoff.js for the end-to-end path).
 //
 // This module is PURE and host-agnostic (no Codex, no filesystem side effects beyond the
-// optional reader) so it can be unit-tested without an installed Codex. cl-handoff.js
+// optional reader) so it can be unit-tested without an installed Codex. arc-handoff.js
 // wraps it with the Codex-specific seed/inject/resume orchestration.
 'use strict';
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cl-watch: emit one line per NEW unread note for a role, so a session can WAKE on a
+// arc-watch: emit one line per NEW unread note for a role, so a session can WAKE on a
 // delegation instead of waiting for a human to prompt it.
 //
 // The fridge delivers notes at TURN boundaries (a human prompt), so an idle session
@@ -17,8 +17,8 @@
 // waker can pull back an idle session, but nothing can wake a closed one.
 'use strict';
 
-const R = require('./cl-room');
-const F = require('./cl-fridge');
+const R = require('./arc-room');
+const F = require('./arc-fridge');
 
 const POLL_MS = 2500;
 
@@ -45,7 +45,7 @@ function poll(room, role, emitted, write) {
 }
 
 function run(roleArg, cwd) {
-  const session = (process.env.CL_SESSION || '').trim();
+  const session = ((process.env.ARC_SESSION || process.env.CL_SESSION) || '').trim();
   const room = R.resolveRoom(cwd || process.cwd());
   const role = resolveRole(roleArg, session, room);
   if (!role) {

@@ -1,4 +1,4 @@
-// cl-orchestrator: durable runtime-neutral identity above Claude/Codex sessions.
+// arc-orchestrator: durable runtime-neutral identity above Claude/Codex sessions.
 // Native transcripts remain owned by their runtimes; this registry stores only
 // lineage and non-secret metadata needed to launch, resume, and hand off safely.
 'use strict';
@@ -9,8 +9,18 @@ const path = require('path');
 const crypto = require('crypto');
 
 const VERSION = 1;
-const CL_HOME = path.resolve(process.env.CL_HOME || path.join(os.homedir(), '.cl'));
-const SESSIONS_DIR = path.join(CL_HOME, 'sessions');
+// The home moved ~/.cl -> ~/.arc. Prefer ARC_HOME, then legacy CL_HOME, else ~/.arc.
+const ARC_HOME = path.resolve(process.env.ARC_HOME || process.env.CL_HOME || path.join(os.homedir(), '.arc'));
+// One-time migration: adopt an existing ~/.cl if ~/.arc isn't there yet (atomic move;
+// on any failure we simply start fresh in ~/.arc — nothing is destroyed).
+try {
+  const legacy = path.join(os.homedir(), '.cl');
+  if (!process.env.ARC_HOME && !process.env.CL_HOME && !fs.existsSync(ARC_HOME) && fs.existsSync(legacy)) {
+    fs.renameSync(legacy, ARC_HOME);
+  }
+} catch { /* best-effort; fall back to a fresh ~/.arc */ }
+const CL_HOME = ARC_HOME; // deprecated alias kept for any external consumer
+const SESSIONS_DIR = path.join(ARC_HOME, 'sessions');
 const RUNTIMES = new Set(['claude', 'codex']);
 const ID_RX = /^[a-z0-9][a-z0-9-]{0,79}$/i;
 
@@ -129,6 +139,6 @@ function markInactive(id, runtime, state) {
 }
 
 module.exports = {
-  VERSION, CL_HOME, SESSIONS_DIR, atomicWrite, sessionPath, readSession, listSessions,
+  VERSION, ARC_HOME, CL_HOME, SESSIONS_DIR, atomicWrite, sessionPath, readSession, listSessions,
   findByNative, createSession, bindRuntime, ensureSession, markInactive,
 };
