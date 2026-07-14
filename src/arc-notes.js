@@ -37,6 +37,38 @@ function resolveCwd(session, cwd) {
   return process.cwd();
 }
 
+// ---- armed requests -----------------------------------------------------------
+// A request YOU sent that a peer hasn't answered is the same shape as an in-flight delegate:
+// if you go idle, nothing wakes you when the answer lands (see arc-stop-hook). So the Stop hook
+// offers to arm `arc await` — ONCE per request, or it would nag every single turn until answered.
+const armedFile = (session) => path.join(CACHE_DIR, `arc-armed-${session}.json`);
+function readArmed(session) {
+  try { return new Set(JSON.parse(fs.readFileSync(armedFile(String(session)), 'utf8')).seqs || []); }
+  catch { return new Set(); }
+}
+function markRequestsArmed(session, seqs) {
+  const cur = readArmed(session);
+  for (const s of seqs) cur.add(s);
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(armedFile(session), JSON.stringify({ seqs: [...cur], at: Date.now() }));
+  } catch {}
+  return cur;
+}
+
+// Requests I sent that are STILL unanswered and that I haven't already been told about.
+// Returns { role, notes } — empty notes when there is nothing new to say.
+function unarmedRequests(session, cwd) {
+  try {
+    const board = R.resolveBoard(resolveCwd(session, cwd));
+    const me = getRole(session, board);
+    if (!me) return { role: null, notes: [] };
+    const armed = readArmed(session);
+    const open = R.openRequests(board, me).filter((n) => n.from === me && !armed.has(n.seq));
+    return { role: me, notes: open };
+  } catch { return { role: null, notes: [] }; }
+}
+
 function getRole(session, board) {
   try {
     const r = JSON.parse(fs.readFileSync(roleFile(session), 'utf8'));
@@ -351,4 +383,5 @@ function injection(session, cwd) {
   } catch { return null; }    // the board must NEVER wedge a prompt
 }
 
-module.exports = { requestRole, requestNote, requestNotes, refreshRole, badge, injection, getRole, sessionPid, roleFile };
+module.exports = { requestRole, requestNote, requestNotes, refreshRole, badge, injection, getRole, sessionPid, roleFile,
+  unarmedRequests, markRequestsArmed, readArmed };

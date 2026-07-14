@@ -60,6 +60,37 @@ arc note backend "schema: added `retries` (int, default 0) to task_log"
 `arc note all` broadcasts (simplest — you don't need to know their role name). Target a role
 only when it's for one of them. Your own notes never come back to you.
 
+## When you're STUCK — ask a peer instead of grinding
+
+The highest-value thing on the board isn't the news; it's the **question**. If you hit something
+with no obvious solution — and `arc role` shows a peer whose job that is (a `research` peer, say)
+— **ask them and keep working**. You do not have to solve everything yourself, and you do not
+have to wait: they investigate on their own turn while you carry on.
+
+```sh
+arc role                                   # is there a peer whose job this is?
+arc note research --kind request "<packet>"
+```
+
+**Write it as a bounded packet, not a shout.** A good request states the objective, hands over
+the evidence you already have, says what is ALREADY SETTLED so they don't re-derive it, and asks
+specific questions. That shape is proven — it's what real peers on real boards actually write:
+
+> `DELEGATION: settle-gate inquiry -> docs/inquiry/settle-gate/GOAL.md (full brief,`
+> `device-evidence, established constraints, 5 open questions). ONE-LINE: the agent is handed`
+> `TRANSIENT screens and treats them as the destination -> confident wrong answers. Settled`
+> `already (do not re-derive): …`
+
+A long packet belongs in a file — put it in `docs/` and let the note carry the one-line summary
+plus the path. The note is a pointer, not the document.
+
+**You will be woken when they answer.** A request is tracked until it's replied to: arc offers to
+arm `arc await <your-role>` before you go idle, and that wake hands you the answer. So ask, then
+get on with something else — the reply will find you.
+
+**Answer one the same way:** `arc note <them> --reply-to #<seq> "DONE — <findings + file:line>"`.
+Say `DONE`, `BLOCKED`, or `REVISE` up front so they know the outcome before reading the detail.
+
 ## The note kinds (optional — use them when they apply)
 
 A plain note is `info` and needs no flags. Reach for a kind when the note is one of these:

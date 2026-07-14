@@ -1701,6 +1701,25 @@ try {
   });
   ok('a session with no ARC_SESSION is never touched', bare.stdout.trim() === '');
 
+  // ---- an UNANSWERED PEER REQUEST must wake you too -------------------------------
+  // Asking a peer and then going idle used to lose the answer: a peer replies on THEIR
+  // schedule, and nothing wakes an idle session — the reply just sat there until a human
+  // typed something. Same shape as an in-flight delegate, so: same fix, same channel.
+  const askSeq = RM.appendNote(board, { from: 'code', to: 'research', kind: 'request', body: 'why is the import flaky?' }) && RM.latestSeq(board);
+  const asked = fire({ hook_event_name: 'Stop', cwd: sboard });
+  ok('an UNANSWERED request you asked a peer arms the waker before you go idle',
+    asked.decision === 'block' && /STILL UNANSWERED/.test(asked.reason) && /arc await code/.test(asked.reason)
+    && /why is the import flaky/.test(asked.reason));
+  ok('...and it is offered ONCE, never nagged every turn',
+    !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
+  // once a peer REPLIES, it is no longer open — and the reply itself is delivered as a note
+  RM.appendNote(board, { from: 'research', to: 'code', replyTo: askSeq, body: 'DONE — tar --force-local' });
+  const replied = fire({ hook_event_name: 'Stop', cwd: sboard });
+  ok('a peer\'s reply is delivered as a note, not as another nag',
+    replied.decision === 'block' && /tar --force-local/.test(replied.reason) && !/STILL UNANSWERED/.test(replied.reason));
+  ok('an ANSWERED request is no longer open (the loop closed)',
+    !RM.openRequests(board, 'code').some((n) => n.seq === askSeq));
+
   // ---- the IDLE gap: arm a waker before stopping, exactly once --------------------
   const D = require(path.join(SRC, 'arc-delegate.js'));
   fs.mkdirSync(D.markerDir(board), { recursive: true });

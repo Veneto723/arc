@@ -57,20 +57,42 @@ function run(raw) {
   // 2. Nothing yet — but if a delegate is still out, arm the waker BEFORE going idle.
   const D = require('./arc-delegate');
   const pending = D.pendingFor(session, cwd);
-  if (!pending.length) return null;
-  D.markArmed(pending);                            // tell the agent once, never every turn
+  if (pending.length) {
+    D.markArmed(pending);                          // tell the agent once, never every turn
+    const role = pending[0].role;
+    const list = pending.map((p) => `${p.runtime}: "${String(p.task).slice(0, 60)}"`).join('\n  ');
+    out({
+      decision: 'block',
+      reason: `[arc] ${pending.length} delegate(s) you fired are STILL RUNNING:\n  ${list}\n\n`
+        + `Nothing can wake an idle session from the outside, so arm the waker before you stop:\n`
+        + `  Bash tool, run_in_background: true  →  arc await${role ? ` ${role}` : ''}\n\n`
+        + `It exits the moment the result lands on the board, and that exit re-invokes YOU with it. `
+        + `Then tell the user the delegate is running and that you'll report back when it lands.`,
+    });
+    return 'arm';
+  }
 
-  const role = pending[0].role;
-  const list = pending.map((p) => `${p.runtime}: "${String(p.task).slice(0, 60)}"`).join('\n  ');
+  // 3. A QUESTION you asked a PEER that nobody has answered yet is the same shape as an
+  //    in-flight delegate — you asked, so you want the answer. But a peer replies on THEIR
+  //    schedule, and if you go idle first, nothing wakes you: the reply just sits on the board
+  //    until a human happens to type something. Same fix, same channel: arm `arc await`, whose
+  //    EXIT re-invokes you. Offered ONCE per request (markRequestsArmed), never every turn.
+  const N = require('./arc-notes');
+  const open = N.unarmedRequests(session, cwd);
+  if (!open.notes.length) return null;
+  N.markRequestsArmed(session, open.notes.map((n) => n.seq));
+
+  const asked = open.notes.map((n) => `#${n.seq} → ${n.to || 'everyone'}: "${String(n.body).replace(/\s+/g, ' ').slice(0, 60)}"`).join('\n  ');
   out({
     decision: 'block',
-    reason: `[arc] ${pending.length} delegate(s) you fired are STILL RUNNING:\n  ${list}\n\n`
-      + `Nothing can wake an idle session from the outside, so arm the waker before you stop:\n`
-      + `  Bash tool, run_in_background: true  →  arc await${role ? ` ${role}` : ''}\n\n`
-      + `It exits the moment the result lands on the board, and that exit re-invokes YOU with it. `
-      + `Then tell the user the delegate is running and that you'll report back when it lands.`,
+    reason: `[arc] ${open.notes.length} request(s) you asked a peer are STILL UNANSWERED:\n  ${asked}\n\n`
+      + `They answer on their own schedule, and nothing can wake an idle session from outside. `
+      + `If you want the answer, arm the waker before you stop:\n`
+      + `  Bash tool, run_in_background: true  →  arc await ${open.role}\n\n`
+      + `It exits the moment they reply, and that exit re-invokes YOU with it. If the answer `
+      + `isn't worth waiting on, just say so and stop — you won't be asked about these again.`,
   });
-  return 'arm';
+  return 'request';
 }
 
 module.exports = { run };
