@@ -50,7 +50,7 @@ function run(raw) {
       const room = require('./arc-room').resolveRoom(cwd);
       const myRole = F.getRole(session, room);
       const task = m[2].trim().replace(/^["']|["']$/g, '');
-      require('./arc-delegate').spawnDelegate(m[1].toLowerCase(), room.root, myRole, task);
+      require('./arc-delegate').spawnDelegate(m[1].toLowerCase(), room.root, myRole, task, session);
       return block(`[arc] ✓ delegated to ${m[1].toLowerCase()} (background) — the result lands on the fridge`
         + (myRole ? ` for "${myRole}"` : ' as a broadcast') + '. Read it with arc:notes.');
     }

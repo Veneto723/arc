@@ -48,10 +48,61 @@ function runClaude(cwd, task) {
   return { ok: r.status === 0, out: String(r.stdout || '').trim(), err: String(r.stderr || '').trim(), status: r.status };
 }
 
+// ---- in-flight markers -------------------------------------------------------------
+// A delegate takes ~a minute. If the requester goes IDLE in that window, nothing can wake
+// it (see arc-stop-hook.js — arc holds no handle on the session's TTY). So a running
+// delegate leaves a marker naming the session that FIRED it; the Stop hook reads these to
+// arm a waker before that session stops. The marker is the delegate's own liveness, so it
+// is removed in a `finally` — a crashed delegate must not strand a marker forever, hence
+// the expiry sweep in pendingFor() as the backstop.
+function markerDir(room) { return path.join(room.planDir, 'delegates'); }
+
+function writeMarker(room, rec) {
+  try {
+    fs.mkdirSync(markerDir(room), { recursive: true });
+    fs.writeFileSync(path.join(markerDir(room), `${rec.id}.json`), JSON.stringify(rec));
+  } catch {}
+}
+function clearMarker(room, id) {
+  try { fs.unlinkSync(path.join(markerDir(room), `${id}.json`)); } catch {}
+}
+function readMarkers(room) {
+  let names = [];
+  try { names = fs.readdirSync(markerDir(room)); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    if (!n.endsWith('.json')) continue;
+    const file = path.join(markerDir(room), n);
+    try {
+      const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (Date.now() - (rec.started || 0) > TIMEOUT_MS + 60_000) { fs.unlinkSync(file); continue; } // dead delegate
+      out.push({ ...rec, file });
+    } catch { try { fs.unlinkSync(file); } catch {} }   // unreadable marker = no marker
+  }
+  return out;
+}
+
+// Delegates fired BY `session` that are still running and whose waker we have not yet
+// asked for. Excluding the armed ones is what stops the Stop hook nagging every turn.
+function pendingFor(session, cwd) {
+  if (!session) return [];
+  try {
+    const room = R.resolveRoom(cwd || process.cwd());
+    return readMarkers(room).filter((r) => r.session === session && !r.armed);
+  } catch { return []; }
+}
+function markArmed(pending) {
+  for (const p of pending) {
+    try { fs.writeFileSync(p.file, JSON.stringify({ ...p, armed: true, file: undefined })); } catch {}
+  }
+}
+
 // Fire a delegate in the BACKGROUND. Used by the arc:delegate sentinel (both runtimes'
 // hooks) and by `arc delegate` — a hook/CLI must return immediately, so we detach.
-function spawnDelegate(runtime, cwd, toRole, task) {
-  const child = spawn(process.execPath, [__filename, runtime, cwd, toRole || '-', task], { detached: true, stdio: 'ignore' });
+// `session` is the REQUESTER's arc session: it is passed as an ARGUMENT (never in the
+// env — see cleanEnv) purely so the marker can name who to wake.
+function spawnDelegate(runtime, cwd, toRole, task, session) {
+  const child = spawn(process.execPath, [__filename, runtime, cwd, toRole || '-', session || '-', task], { detached: true, stdio: 'ignore' });
   child.unref();
   return true;
 }
@@ -59,17 +110,20 @@ function spawnDelegate(runtime, cwd, toRole, task) {
 // `runners` is injectable so the note-posting path is testable without a real model call.
 function run(argv, runners) {
   const RUN = runners || { codex: runCodex, claude: runClaude };
-  const [runtime, cwd, toRoleRaw, ...rest] = argv;
+  const [runtime, cwd, toRoleRaw, sessionRaw, ...rest] = argv;
   const task = rest.join(' ').trim();
   const toRole = toRoleRaw && toRoleRaw !== '-' ? toRoleRaw : null;
+  const session = sessionRaw && sessionRaw !== '-' ? sessionRaw : null;
   if (!/^(claude|codex)$/.test(String(runtime)) || !cwd || !task) {
-    process.stderr.write('usage: arc-delegate.js <claude|codex> <cwd> <toRole|-> <task…>\n');
+    process.stderr.write('usage: arc-delegate.js <claude|codex> <cwd> <toRole|-> <session|-> <task…>\n');
     return 2;
   }
 
   const room = R.resolveRoom(cwd);
   R.ensureRoom(room);
   const started = Date.now();
+  const id = `${runtime}-${started}-${process.pid}`;
+  writeMarker(room, { id, session, role: toRole, runtime, task, started });
   let res;
   try { res = RUN[runtime](cwd, task); }
   catch (e) { res = { ok: false, out: '', err: String(e && e.message), status: -1 }; }
@@ -89,10 +143,14 @@ function run(argv, runners) {
   // from a delegate:<runtime> pseudo-role, so it never collides with a real roommate and
   // is always DELIVERED (unreadFor only excludes a role's own notes).
   R.appendNote(room, { from: `delegate:${runtime}`, to: toRole, body, priority: res.ok ? 'normal' : 'high' });
+  // ORDER MATTERS: the note must exist BEFORE the marker goes. If we cleared first, a Stop
+  // firing in the gap would see no note AND no in-flight delegate — and go idle with the
+  // result seconds away and no waker armed. Appending first makes the gap harmless.
+  clearMarker(room, id);
   process.stdout.write(`${res.ok ? '✓' : '✗'} delegate ${runtime} finished (${secs}s) → fridge note in room "${room.name}"\n`);
   return res.ok ? 0 : 1;
 }
 
-module.exports = { spawnDelegate, run, cleanEnv };
+module.exports = { spawnDelegate, run, cleanEnv, pendingFor, markArmed, markerDir };
 
 if (require.main === module) process.exit(run(process.argv.slice(2)));

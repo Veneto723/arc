@@ -132,8 +132,9 @@ Delegate a task to the OTHER model — it runs HEADLESS, you keep working. Unlik
 handoff (which REPLACES this session), a delegate runs beside you and reports back:
   arc:delegate codex <task>       fire it on Codex; result lands on the fridge
   arc:delegate claude <task>      fire it on Claude; result lands on the fridge
-                                  (claim a role first — arc:role — to have the result
-                                   addressed to you; arc watch <role> wakes you on it)
+                                  The result is handed to this session AUTOMATICALLY at the
+                                  end of a turn — you never have to go and ask for it. (Claim
+                                  a role with arc:role to have it addressed to you by name.)
 
 In your terminal (not inside a session):
   arc                     launch

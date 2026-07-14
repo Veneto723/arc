@@ -59,6 +59,57 @@ function run(roleArg, cwd) {
   setInterval(() => poll(room, role, emitted, write), POLL_MS);
 }
 
-module.exports = { run, poll, resolveRole };
+// ---- arc await ----------------------------------------------------------------------
+// `arc watch` streams forever, which suits a session that is already awake. But a session
+// about to go IDLE needs the opposite shape: something that EXITS the moment a note lands,
+// because in Claude Code a background command's EXIT is what re-invokes the agent — a
+// still-running command that merely prints does not. So this is `watch` with one change
+// that matters: it stops. That exit IS the wake.
+//
+// Armed by the Stop hook when a delegate is in flight (see arc-stop-hook.js). It does NOT
+// mark anything read — it only observes; the fridge delivers on the turn it wakes.
+const AWAIT_TIMEOUT_MS = 20 * 60 * 1000;   // outlives a delegate (10m cap), then gives up
+
+function awaitOnce(roleArg, cwd, opts) {
+  const o = opts || {};
+  const pollMs = o.pollMs || POLL_MS;
+  const timeoutMs = o.timeoutMs || AWAIT_TIMEOUT_MS;
+  const write = o.write || ((l) => process.stdout.write(l + '\n'));
+  const now = o.now || (() => Date.now());
+  const session = (process.env.ARC_SESSION || '').trim();
+  const room = R.resolveRoom(cwd || process.cwd());
+  const role = resolveRole(roleArg, session, room);
+  if (!role) {
+    process.stderr.write('[arc await] no role — pass one (`arc await research`) or claim one first (`arc:role research`).\n');
+    return 1;
+  }
+  const started = now();
+
+  const check = () => {
+    let u;
+    try { u = R.unreadFor(room, role); } catch { return false; }
+    if (!u.count) return false;
+    write(`[arc await] ${u.count} note(s) landed for "${role}" in room "${room.name}" — this exit is your wake-up:`);
+    for (const n of u.notes) {
+      write(`  #${n.seq} from ${n.from}${n.priority === 'high' ? ' [!]' : ''}: ${String(n.body).replace(/\s+/g, ' ').slice(0, 300)}`);
+    }
+    write('Read them properly (and mark them read) with:  arc notes');
+    return true;
+  };
+
+  return new Promise((resolve) => {
+    if (check()) return resolve(0);
+    const t = setInterval(() => {
+      if (check()) { clearInterval(t); return resolve(0); }
+      if (now() - started > timeoutMs) {
+        clearInterval(t);
+        write(`[arc await] nothing landed for "${role}" within ${Math.round(timeoutMs / 60000)}m — giving up (the delegate may have died).`);
+        return resolve(0);          // exit 0: a quiet wake, not a failure
+      }
+    }, pollMs);
+  });
+}
+
+module.exports = { run, poll, resolveRole, awaitOnce };
 
 if (require.main === module) run(process.argv[2], process.cwd());

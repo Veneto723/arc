@@ -168,11 +168,11 @@ function run(raw) {
     const task = m[2].trim().replace(/^["']|["']$/g, '');
     const room = require('./arc-room').resolveRoom(typeof hook.cwd === 'string' ? hook.cwd : process.cwd());
     const myRole = require('./arc-fridge').getRole(session, room);
-    require('./arc-delegate').spawnDelegate(runtime, room.root, myRole, task);
+    require('./arc-delegate').spawnDelegate(runtime, room.root, myRole, task, session);
     return clBlock(`✓ delegated to ${runtime} — "${task.slice(0, 60)}${task.length > 60 ? '…' : ''}"\n`
       + `  running in the BACKGROUND; you keep working. The result lands on the fridge`
       + (myRole ? ` for "${myRole}"` : ' as a broadcast (claim a role with arc:role to have it addressed to you)') + '.\n'
-      + `  read it with arc:notes — or wake on it:  arc watch ${myRole || '<role>'}`);
+      + `  arc hands it to this session automatically at the end of a turn — you do not have to ask for it.`);
   }
   if (action === 'add-account' || action === 'add') {
     const r = core.requestAddAccount(session, arg || '');

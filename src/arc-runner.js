@@ -1214,10 +1214,19 @@ async function main() {
       process.exit(1);
     }
     const room = require('./arc-room').resolveRoom(process.cwd());
-    const myRole = require('./arc-fridge').getRole(process.env.ARC_SESSION || '', room);
-    require('./arc-delegate').spawnDelegate(runtime, room.root, myRole, task);
+    const session = process.env.ARC_SESSION || '';
+    const myRole = require('./arc-fridge').getRole(session, room);
+    require('./arc-delegate').spawnDelegate(runtime, room.root, myRole, task, session);
     process.stdout.write(`[arc] delegated to ${runtime} (background) — the result will land on the fridge`
       + (myRole ? ` for "${myRole}"` : ' as a broadcast') + `. Read it with \`arc notes\`.\n`);
+    return;
+  }
+  // `arc await [role]` — block until a note lands, then EXIT. Meant to be run by an agent
+  // as a BACKGROUND task before it goes idle: in Claude Code a background command's EXIT
+  // re-invokes the agent, so this exit is what hands an idle session its delegate result
+  // with nobody typing anything. arc-stop-hook arms it automatically.
+  if (userArgs[0] === 'await') {
+    require('./arc-watch').awaitOnce(userArgs[1], process.cwd()).then((code) => process.exit(code));
     return;
   }
   if (userArgs[0] === 'role' || userArgs[0] === 'note' || userArgs[0] === 'notes') {

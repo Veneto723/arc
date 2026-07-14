@@ -1543,7 +1543,8 @@ try {
   spawnSync('git', ['init', '-q'], { cwd: droom });
 
   // success path: posts a note addressed to the requester, from delegate:<runtime>
-  const code = D.run(['codex', droom, 'code', 'find', 'the', 'flake'],
+  // argv: <runtime> <cwd> <toRole|-> <session|-> <task…>
+  const code = D.run(['codex', droom, 'code', 'sess-1', 'find', 'the', 'flake'],
     { codex: () => ({ ok: true, out: 'ANSWER: it is a tar --force-local bug', err: '', status: 0 }) });
   const room = RM.resolveRoom(droom);
   let notes = RM.allNotes(room);
@@ -1555,22 +1556,132 @@ try {
     && fs.readdirSync(room.planDir).some((f) => /^delegate-codex-.*\.md$/.test(f)));
 
   // failure path: HIGH priority so it can't be missed
-  D.run(['claude', droom, 'code', 'do', 'x'], { claude: () => ({ ok: false, out: '', err: 'boom', status: 3 }) });
+  D.run(['claude', droom, 'code', '-', 'do', 'x'], { claude: () => ({ ok: false, out: '', err: 'boom', status: 3 }) });
   notes = RM.allNotes(room);
   const fail = notes[notes.length - 1];
   ok('a FAILED delegate still reports back, at HIGH priority',
     fail.from === 'delegate:claude' && fail.priority === 'high' && /FAILED/.test(fail.body) && /boom/.test(fail.body));
 
   // no role -> broadcast (to: null) so it is still delivered to the room
-  D.run(['codex', droom, '-', 'anon', 'task'], { codex: () => ({ ok: true, out: 'ok', err: '', status: 0 }) });
+  D.run(['codex', droom, '-', '-', 'anon', 'task'], { codex: () => ({ ok: true, out: 'ok', err: '', status: 0 }) });
   ok('with no role, the result is BROADCAST rather than dropped', RM.allNotes(room).slice(-1)[0].to === null);
 
-  ok('delegate refuses an unknown runtime / empty task', D.run(['gpt', droom, '-', 'x'], {}) === 2 && D.run(['codex', droom, '-'], {}) === 2);
+  ok('delegate refuses an unknown runtime / empty task', D.run(['gpt', droom, '-', '-', 'x'], {}) === 2 && D.run(['codex', droom, '-', '-'], {}) === 2);
   ok('arc:delegate is a live sentinel (matcher accepts it)',
     /^\s*[/!]?\s*arc:(switch|restart|handoff|delegate)\b/i.test('arc:delegate codex find the bug'));
 
+  // ---- in-flight markers: how the Stop hook knows a result is still coming ----------
+  // A finished delegate must leave NOTHING behind (else the Stop hook would nag forever).
+  ok('a FINISHED delegate leaves no in-flight marker',
+    D.pendingFor('sess-1', droom).length === 0);
+
+  // A delegate that is mid-run has a marker naming the session that fired it.
+  let seen = null;
+  D.run(['codex', droom, 'code', 'sess-1', 'slow', 'one'], {
+    codex: () => { seen = D.pendingFor('sess-1', droom); return { ok: true, out: 'done', err: '', status: 0 }; },
+  });
+  ok('a RUNNING delegate is visible to the session that fired it',
+    seen && seen.length === 1 && seen[0].runtime === 'codex' && seen[0].role === 'code' && /slow one/.test(seen[0].task));
+  ok('a delegate is INVISIBLE to a session that did not fire it (no cross-session nagging)',
+    (() => { let other = null;
+      D.run(['codex', droom, 'code', 'sess-1', 'x'], { codex: () => { other = D.pendingFor('sess-OTHER', droom); return { ok: true, out: 'y', err: '', status: 0 }; } });
+      return other && other.length === 0; })());
+
   fs.rmSync(droom, { recursive: true, force: true });
 } catch (e) { ok('arc-delegate works', false, e.message + '\n' + (e.stack || '')); }
+
+// ---- arc-stop-hook (auto-feed at TURN END, no human keystroke) ---------------
+section('arc-stop-hook (a note is never left sitting on the fridge)');
+try {
+  const RM = require(path.join(SRC, 'arc-room.js'));
+  const F = require(path.join(SRC, 'arc-fridge.js'));
+  const HOOK = path.join(SRC, 'arc-stop-hook.js');
+
+  const sroom = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-'));
+  spawnSync('git', ['init', '-q'], { cwd: sroom });
+  const room = RM.resolveRoom(sroom);
+  RM.ensureRoom(room);
+
+  // A real session that has claimed a role (that is what makes notes addressable). A role
+  // lease requires a LIVE arc-runner behind the session, so stand in its state file first.
+  const SESSION = 'stop-sess-1';
+  const scache = path.join(CLAUDE, 'cache'); fs.mkdirSync(scache, { recursive: true });
+  fs.writeFileSync(path.join(scache, `arc-state-${SESSION}.json`), JSON.stringify({ pid: process.pid, cwd: sroom }));
+  const claimed = F.requestRole(SESSION, 'code', sroom);
+  ok('(setup) the stop-hook session holds a role', claimed.ok === true);
+
+  const fire = (payload, env) => {
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify(payload), encoding: 'utf8',
+      env: { ...process.env, ARC_SESSION: SESSION, ...(env || {}) },
+    });
+    try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
+  };
+
+  // nothing on the fridge, nothing in flight -> the session is allowed to go idle
+  ok('Stop hook stays SILENT when there is nothing to deliver',
+    !fire({ hook_event_name: 'Stop', cwd: sroom }).decision);
+
+  // a note lands mid-turn (e.g. a delegate finishing) -> handed over at turn END
+  RM.appendNote(room, { from: 'delegate:codex', to: 'code', body: 'ANSWER: the flake is a tar bug', priority: 'normal' });
+  const fed = fire({ hook_event_name: 'Stop', cwd: sroom });
+  ok('a note that lands MID-TURN is fed to the model at turn end — no human keystroke',
+    fed.decision === 'block' && /ANSWER: the flake is a tar bug/.test(fed.reason) && /END of your turn/.test(fed.reason));
+
+  // idempotent: injection() advanced the cursor, so the SAME note cannot block twice
+  ok('the same note can never block twice (cursor advanced -> no Stop loop)',
+    !fire({ hook_event_name: 'Stop', cwd: sroom }).decision);
+
+  // the loop guard: we NEVER chain a block onto our own block
+  RM.appendNote(room, { from: 'delegate:codex', to: 'code', body: 'second answer', priority: 'normal' });
+  ok('stop_hook_active is honoured (never chains a block onto its own block)',
+    !fire({ hook_event_name: 'Stop', cwd: sroom, stop_hook_active: true }).decision);
+  ok('...and the note it held back is still delivered on the NEXT stop (nothing is lost)',
+    /second answer/.test(fire({ hook_event_name: 'Stop', cwd: sroom }).reason || ''));
+
+  // a non-arc session (no ARC_SESSION) must be left completely alone
+  const bare = spawnSync(process.execPath, [HOOK], {
+    input: JSON.stringify({ hook_event_name: 'Stop', cwd: sroom }), encoding: 'utf8',
+    env: { ...process.env, ARC_SESSION: '' },
+  });
+  ok('a session with no ARC_SESSION is never touched', bare.stdout.trim() === '');
+
+  // ---- the IDLE gap: arm a waker before stopping, exactly once --------------------
+  const D = require(path.join(SRC, 'arc-delegate.js'));
+  fs.mkdirSync(D.markerDir(room), { recursive: true });
+  fs.writeFileSync(path.join(D.markerDir(room), 'codex-1.json'),
+    JSON.stringify({ id: 'codex-1', session: SESSION, role: 'code', runtime: 'codex', task: 'a long job', started: Date.now() }));
+
+  const armed = fire({ hook_event_name: 'Stop', cwd: sroom });
+  ok('with a delegate STILL RUNNING, the hook blocks to arm the waker before going idle',
+    armed.decision === 'block' && /still running/i.test(armed.reason) && /arc await code/.test(armed.reason)
+    && /run_in_background/.test(armed.reason));
+  ok('the waker is armed ONCE — it does not nag on every later turn',
+    !fire({ hook_event_name: 'Stop', cwd: sroom }).decision);
+
+  // an EXPIRED marker (delegate died) must not strand the session in "still running"
+  fs.writeFileSync(path.join(D.markerDir(room), 'codex-2.json'),
+    JSON.stringify({ id: 'codex-2', session: SESSION, role: 'code', runtime: 'codex', task: 'zombie', started: Date.now() - (60 * 60 * 1000) }));
+  ok('a dead delegate\'s marker EXPIRES rather than nagging forever',
+    D.pendingFor(SESSION, sroom).length === 0);
+
+  // ---- arc await: the EXIT is the wake --------------------------------------------
+  // Run it as a real subprocess, because "it exits" IS the property under test — in Claude
+  // Code a background command's exit re-invokes the agent, and a command that merely prints
+  // does not. If this ever stops exiting, an idle session silently never wakes.
+  RM.appendNote(room, { from: 'delegate:codex', to: 'code', body: 'the delegate landed', priority: 'normal' });
+  const aw = spawnSync(process.execPath, ['-e',
+    `require(${JSON.stringify(path.join(SRC, 'arc-watch.js'))}).awaitOnce('code', ${JSON.stringify(sroom)}, { pollMs: 20 }).then((c) => process.exit(c));`,
+  ], { encoding: 'utf8', timeout: 8000, env: { ...process.env, ARC_SESSION: SESSION } });
+  ok('`arc await` EXITS the moment a note lands (that exit is what wakes an idle session)',
+    aw.status === 0 && !aw.error && /the delegate landed/.test(aw.stdout) && /arc notes/.test(aw.stdout));
+
+  // and it does NOT consume the note — the fridge still delivers it on the waking turn
+  ok('`arc await` only OBSERVES — it never advances the read cursor',
+    RM.unreadFor(room, 'code').count === 1);
+
+  fs.rmSync(sroom, { recursive: true, force: true });
+} catch (e) { ok('arc-stop-hook works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- arc-bundle (first-party bundle installer) -------------------------------
 section('arc-bundle (manifest + installer)');

@@ -68,6 +68,10 @@ function coreHookEntries(scriptsDir) {
   const H = [
     ['UserPromptSubmit', 'arc-switch-hook.js', ''],
     ['UserPromptSubmit', 'arc-notify.js', 'start'],
+    // arc-stop-hook BEFORE arc-notify on Stop: the fridge's second delivery point. It can
+    // block the stop to hand over a note that landed MID-TURN (e.g. a delegate's result),
+    // so the session never goes idle on top of an unread answer it asked for.
+    ['Stop', 'arc-stop-hook.js', ''],
     ['Stop', 'arc-notify.js', 'done'],
     ['StopFailure', 'arc-notify.js', 'fail'],
     ['Notification', 'arc-notify.js', 'wait'],
