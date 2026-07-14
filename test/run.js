@@ -1290,8 +1290,29 @@ try {
 
   // The statusline must actually SHOW it — a fact nobody surfaces is a fact nobody has.
   const um = fs.readFileSync(path.join(SRC, 'usage-monitor.js'), 'utf8');
-  ok('the statusline renders DEAF loudly, with the command that fixes it',
-    /f\.deaf \?/.test(um) && /DEAF/.test(um) && /arc join \$\{f\.role\}/.test(um));
+  ok('the statusline renders DEAF loudly',
+    /f\.deaf \?/.test(um) && /DEAF/.test(um));
+  // And it must NOT tell the USER to run `arc join` — a listener started outside the session
+  // cannot wake it (only a background command the SESSION launched re-invokes the agent), so it
+  // would look fixed while staying deaf. Only the agent can arm.
+  ok('...without telling the user to run a listener that could never wake the session',
+    !/DEAF[^`]*run: arc join/.test(um));
+
+  // THE BUG THE WARNING CAUGHT, minutes after it shipped — in the session that wrote it.
+  // "Ask once per cycle" used to close the cycle only when a Stop hook happened to OBSERVE a live
+  // listener. That observation is not guaranteed: the hook that asked has already blocked the
+  // turn, so its next firing returns immediately on stop_hook_active — and if a note lands before
+  // any LATER turn ends, the listener exits with the offer marker never cleared. The session is
+  // then deaf, and the hook says "already asked" forever. Arming is the compliance, so the cycle
+  // must close when the listener is ARMED, not when someone gets lucky enough to see it.
+  A6.clearWaiting(DS); A6.clearOffered(DS);
+  A6.markOffered(DS);                                  // arc asked
+  const prevEnv2 = process.env.ARC_SESSION;
+  process.env.ARC_SESSION = DS;
+  A6.awaitOnce('code', drepo, { pollMs: 5, maxPolls: 1, write: () => {} });   // the agent armed
+  if (prevEnv2 === undefined) delete process.env.ARC_SESSION; else process.env.ARC_SESSION = prevEnv2;
+  ok('ARMING clears the offer — so a listener that exits on a wake gets RE-OFFERED, not left deaf',
+    A6.wasOffered(DS) === false);
 
   A6.clearWaiting(DS); A6.clearOffered(DS);
   fs.rmSync(drepo, { recursive: true, force: true });

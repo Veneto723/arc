@@ -653,7 +653,11 @@ function boardSeg(f) {
   // still CLAIMS for free (the claim is handled in-hook, zero tokens) and then cannot take the
   // turn that arms, so the session SQUATS the role in silence. Loud, because nothing else would
   // ever tell you. (Raised by the scout peer: "the statusline already knows both facts".)
-  const deaf = f.deaf ? `\x1b[1;91m⚠ ${f.role} · DEAF — run: arc join ${f.role}\x1b[0m` : '';
+  // NB the hint is aimed at the USER, and it must not tell them to run `arc join` themselves: a
+  // listener started outside the session cannot wake it (only a background command the SESSION
+  // launched re-invokes the agent), so it would look fixed while staying deaf. Only the agent can
+  // arm — so ask the agent.
+  const deaf = f.deaf ? `\x1b[1;91m⚠ ${f.role} · DEAF (tell me to re-arm)\x1b[0m` : '';
   if (!f.count) return deaf;
   const notes = `\x1b[1;93m📌 ${f.count} from ${f.senders.join(', ')}\x1b[0m`;
   return deaf ? `${deaf} ${notes}` : notes;

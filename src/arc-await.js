@@ -117,6 +117,16 @@ function awaitOnce(roleArg, cwd, opts) {
     const prev = waitingFor(session);
     if (prev && prev.pid !== process.pid) { try { process.kill(prev.pid); } catch { /* already gone */ } }
     markWaiting(session, role, process.pid);
+    // ARMING IS THE COMPLIANCE — so the offer is fulfilled HERE, the moment the listener exists.
+    //
+    // It used to be cleared only when a Stop hook happened to observe a live listener, and that
+    // observation is not guaranteed: the hook that asked already blocked the turn, so its next
+    // firing returns immediately on stop_hook_active — and if a note lands before any LATER turn
+    // ends, the listener exits without the marker ever being cleared. From then on the session is
+    // deaf and the hook says "already asked this cycle" forever. It happened to the session that
+    // wrote this: the DEAF statusline warning (added minutes earlier for the rate-limit squat)
+    // caught it. Clearing on arm makes the cycle close where it actually closes.
+    clearOffered(session);
   }
 
   // A listener exists to WAKE ITS SESSION — so when that session dies, it has nothing left to
