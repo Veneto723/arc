@@ -81,19 +81,77 @@ const leasePath = (room, role) => path.join(room.planDir, `lease-${role}.json`);
 
 // ---- notes -------------------------------------------------------------------
 // One line = one note. `seq` is the 1-based line number, assigned at READ time.
+// ---- the note schema ---------------------------------------------------------
+// Notes were free prose, and two real sessions promptly invented a taxonomy BY HAND —
+// "DELEGATION: …", "Re your #8", "CORRECTION to #13 — I was WRONG", "VERDICT: …". So the
+// structure is real; it was just encoded where only a human could follow it. These fields make
+// it MACHINE-READABLE. All are OPTIONAL: `arc note all "build is broken"` still works, and every
+// note written before this stays valid (an absent kind reads as `info`).
+//
+// The one that matters most is `supersedes`. The ledger is append-only ON PURPOSE (you never
+// rewrite history, you append a correction) — but nothing linked the correction to what it
+// corrected, so a reader could act on a claim its own author had publicly retracted. Now they
+// are linked, and the retracted note is marked wherever it is read.
+const KINDS = ['info', 'request', 'result', 'correction', 'blocker', 'decision'];
+const DEFAULT_KIND = 'info';
+// How loudly a kind wants to be read. Used to RANK the injection digest: a blocker or a
+// retraction must never sit below routine news.
+const KIND_RANK = { blocker: 0, correction: 1, decision: 2, request: 3, result: 4, info: 5 };
+
+function normalizeKind(k) {
+  const s = String(k || '').trim().toLowerCase();
+  return KINDS.includes(s) ? s : DEFAULT_KIND;   // unknown kind degrades to info, never throws
+}
+const asSeq = (v) => { const n = parseInt(v, 10); return Number.isInteger(n) && n > 0 ? n : undefined; };
+
 function appendNote(room, note) {
   ensureRoom(room);
   const rec = {
     ts: new Date().toISOString(),
     from: String(note.from || 'unknown'),
     to: note.to ? String(note.to) : null,      // null = broadcast to the whole flat
+    kind: normalizeKind(note.kind),
     priority: note.priority === 'high' ? 'high' : 'normal',
     body: String(note.body || ''),
-    refs: note.refs && typeof note.refs === 'object' ? note.refs : undefined, // {sha, files, tests, anchors}
+    replyTo: asSeq(note.replyTo),              // this note ANSWERS that note (a thread)
+    supersedes: asSeq(note.supersedes),        // this note RETRACTS/replaces that note
+    refs: note.refs && typeof note.refs === 'object' ? note.refs : undefined, // {sha, files, tests, delegateId}
   };
+  // A correction/result almost always names its target; if the caller gave one but no kind,
+  // infer the obvious one rather than filing a retraction as routine news.
+  if (!note.kind) {
+    if (rec.supersedes) rec.kind = 'correction';
+    else if (rec.replyTo) rec.kind = 'result';
+  }
+  // A blocker or a retraction is high-priority by nature — don't make callers remember.
+  if (rec.kind === 'blocker' || rec.kind === 'correction') rec.priority = 'high';
+  for (const k of Object.keys(rec)) if (rec[k] === undefined) delete rec[k];
   // Single-line O_APPEND: atomic between processes on one filesystem.
   fs.appendFileSync(notesPath(room), JSON.stringify(rec) + '\n');
   return rec;
+}
+
+// seq -> the note that RETRACTED it (or undefined). Derived from the ledger, so it cannot lie
+// and needs no back-writing: history stays append-only.
+function supersededMap(room, all) {
+  const notes = all || allNotes(room);
+  const m = new Map();
+  for (const n of notes) if (n.supersedes) m.set(n.supersedes, n);   // last writer wins
+  return m;
+}
+
+// A `request` with no `result`/`correction` replying to it: asked, and never answered. This is
+// the thing that used to scroll silently away.
+function openRequests(room, role) {
+  const all = allNotes(room);
+  const answered = new Set(all.filter((n) => n.replyTo).map((n) => n.replyTo));
+  return all.filter((n) => n.kind === 'request' && !answered.has(n.seq)
+    && (!role || n.from === role || n.to === role || n.to == null));
+}
+
+// Every note answering `seq`, oldest first — the thread under a request.
+function repliesTo(room, seq, all) {
+  return (all || allNotes(room)).filter((n) => n.replyTo === seq);
 }
 
 function allNotes(room) {
@@ -265,6 +323,7 @@ module.exports = {
   PLAN_DIR, GITIGNORE_BODY,
   canonical, repoRoot, resolveRoom, ensureRoom,
   notesPath, appendNote, allNotes, noteCount, latestSeq,
+  KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo,
   readCursor, writeCursor, unreadFor, markRead,
   isAlive, roleHolder, claimRole, releaseRole, liveRoles,
   atomicWriteJson, withLock, vacantLeaseForConv,

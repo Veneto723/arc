@@ -41,6 +41,34 @@ arc note backend "schema: added `retries` (int, default 0) to task_log"
 arc notes                        # read what your roommate left you (also arrives at your turn start)
 ```
 
+## The note kinds (optional — but use them when they apply)
+
+A plain note is `info` and needs no flags. Reach for a kind when the note is one of these:
+
+```sh
+# ASK a roommate something. It is tracked until answered — an unanswered request is
+# surfaced to you as "⧗ N of YOUR requests still unanswered". It cannot scroll away.
+arc note research --kind request "can the client tolerate a 202 here?"
+
+# ANSWER one. --reply-to threads it (and implies kind: result).
+arc note android --reply-to #8 "DONE — breaks on client <3.2; 3.2+ handles 202"
+
+# RETRACT something you said. --supersedes implies kind: correction and is auto-HIGH.
+arc note android --supersedes #13 "CORRECTION — I was wrong: they CAN coexist, because…"
+
+# Something that BLOCKS your roommate (auto-HIGH):
+arc note all --kind blocker "staging DB is down — don't trust integration tests"
+```
+
+Kinds: `info` · `request` · `result` · `correction` · `blocker` · `decision`.
+
+**`--supersedes` is the important one.** The ledger is append-only *by design* — you never edit
+or delete a note, because a roommate may already have acted on it. So when you get something
+**wrong**, you don't rewrite history: you append a correction that *names* the note it retracts.
+Arc then marks the old note **⚠ RETRACTED** wherever anyone reads it. Without that link, a
+roommate can act on a claim you have already publicly withdrawn — which is exactly the failure
+this prevents. If you say "I was wrong about #13", **always** pass `--supersedes #13`.
+
 `arc note all` broadcasts to everyone in the room (simplest — you don't need to know their
 role name). Target a specific role only when it's for one of them. Your own notes never
 come back to you; the roommate receives them through arc at the start of their next turn.

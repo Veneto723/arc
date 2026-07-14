@@ -1226,6 +1226,52 @@ try {
   ok('state writes are atomic (no .tmp files left in the room)',
     !fs.readdirSync(room2.planDir).some((f) => f.includes('.tmp-')));
 
+  // ---- the NOTE SCHEMA: kind · replyTo · supersedes ---------------------------------
+  // Two real sessions invented this taxonomy BY HAND ("DELEGATION:", "Re your #8",
+  // "CORRECTION to #13 — I was WRONG"). These fields make it machine-readable — and every
+  // one is OPTIONAL, so a bare note and every pre-schema note stay valid.
+  const sroom = R2.resolveRoom(path.join(base2, 'schema')); fs.mkdirSync(path.join(base2, 'schema', '.git'), { recursive: true });
+  R2.ensureRoom(sroom);
+  const sn1 = R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'request', body: 'investigate X' });
+  const sn2 = R2.appendNote(sroom, { from: 'research', to: 'android', replyTo: 1, body: 'they are mutually exclusive' });
+  const sn3 = R2.appendNote(sroom, { from: 'research', to: 'android', supersedes: 2, body: 'CORRECTION: I was WRONG' });
+  R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'request', body: 'never answered' });
+  const plain = R2.appendNote(sroom, { from: 'android', to: 'research', body: 'just news' });
+  ok('a plain note still needs no flags and defaults to kind:info',
+    plain.kind === 'info' && plain.replyTo === undefined && plain.supersedes === undefined);
+  ok('an unknown kind degrades to info rather than throwing',
+    R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'nonsense', body: 'x' }).kind === 'info');
+  ok('--reply-to INFERS kind:result; --supersedes INFERS kind:correction',
+    sn2.kind === 'result' && sn2.replyTo === 1 && sn3.kind === 'correction' && sn3.supersedes === 2);
+  ok('a correction (and a blocker) is auto-HIGH priority — a retraction is never routine',
+    sn3.priority === 'high' && R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'blocker', body: 'db down' }).priority === 'high');
+  ok('supersededMap derives which note was RETRACTED, and by whom',
+    R2.supersededMap(sroom).get(2).seq === 3 && !R2.supersededMap(sroom).has(1));
+  ok('openRequests finds a request with NO reply, and ignores an answered one',
+    (() => { const o = R2.openRequests(sroom).map((n) => n.seq); return o.includes(4) && !o.includes(1); })());
+  ok('repliesTo threads the answers under a request', R2.repliesTo(sroom, 1).length === 1);
+  ok('KINDS/KIND_RANK rank a blocker + correction ABOVE routine info',
+    R2.KIND_RANK.blocker < R2.KIND_RANK.info && R2.KIND_RANK.correction < R2.KIND_RANK.info && R2.KINDS.includes('decision'));
+
+  // the READ path must make a retraction impossible to miss
+  const F2 = F;
+  mkSession('reader', process.pid);
+  writeJSON(path.join(cache, 'arc-state-reader.json'), { pid: process.pid, cwd: path.join(base2, 'schema') });
+  F2.requestRole('reader', 'android', path.join(base2, 'schema'));
+  const readOut = F2.requestNotes('reader', '', path.join(base2, 'schema')).message;
+  ok('reading a RETRACTED note warns loudly and names the note that retracts it',
+    /RETRACTED by #3/.test(readOut) && /do NOT act on this/.test(readOut));
+  ok('the readout shows the kind and the thread link',
+    /<correction>/.test(readOut) && /↩ re #1/.test(readOut));
+
+  // flags parse through the real requestNote, and a dangling reference is refused
+  const F3 = F2.requestNote('reader', 'research --kind request "check the thing"', path.join(base2, 'schema'));
+  ok('arc:note --kind request is accepted and reported back', F3.ok && /kind: request/.test(F3.message));
+  ok('a dangling --reply-to is REFUSED (a note must never point at nothing)',
+    !F2.requestNote('reader', 'research --reply-to #9999 "x"', path.join(base2, 'schema')).ok);
+  ok('an unknown --kind is REFUSED with the valid list',
+    /unknown --kind/.test(F2.requestNote('reader', 'research --kind wat "x"', path.join(base2, 'schema')).message));
+
   // the AMBIENT badge (what the statusline paints) — derived, self-clearing
   // NO-ROLE BLACKOUT: badge used to return null with no role, so a session that had fallen off
   // the fridge received nothing AND was never told — notes piled up invisibly. It must WARN.

@@ -56,6 +56,11 @@ The fridge — sticky notes between sessions working in the same folder:
                          restart + switch, like your model and effort
   arc:role                who am I, who else is here?
   arc:note <role> <text>  leave a note for a roommate  ·  arc:note all <text> broadcasts
+  arc:note <role> --kind request <text>      ASK — tracked until answered (⧗ shown to you)
+  arc:note <role> --reply-to #N <text>       ANSWER #N (threads it; kind: result)
+  arc:note <role> --supersedes #N <text>     RETRACT #N — every future reader of #N is warned
+                         kinds: info · request · result · correction · blocker · decision
+                         (blocker + correction are auto-HIGH; plain notes need no flags)
   arc:notes               read YOUR unread notes now (they also arrive AUTOMATICALLY
                          at the start of your next turn) — ZERO tokens
   arc:notes all           the whole fridge, nothing marked read
