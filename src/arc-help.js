@@ -100,8 +100,12 @@ Why the arc: forms?
 Delegate a task to the OTHER model — it runs HEADLESS and you keep working:
   arc:delegate codex <task>       fire it on Codex; result lands on the fridge
   arc:delegate claude <task>      fire it on Claude; result lands on the fridge
-                                  The result is handed to this session AUTOMATICALLY at the
-                                  end of a turn — you never have to go and ask for it. (Claim
+  arc:delegate <rt> --advisor <task>   READ-ONLY review — returns an APPROVE/REVISE VERDICT
+                                  (a REVISE lands at HIGH priority: a gate, not just a note)
+  arc:delegate <rt> --model <id> <task>   target a specific model (e.g. --model claude-fable-5
+                                  to consult Fable, or a cheap model to review)
+                                  The result/verdict is handed to this session AUTOMATICALLY at
+                                  the end of a turn — you never have to go and ask for it. (Claim
                                   a role with arc:role to have it addressed to you by name.)
 
 In your terminal (not inside a session):

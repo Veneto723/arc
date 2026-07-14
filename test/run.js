@@ -1334,8 +1334,8 @@ try {
   spawnSync('git', ['init', '-q'], { cwd: droom });
 
   // success path: posts a note addressed to the requester, from delegate:<runtime>
-  // argv: <runtime> <cwd> <toRole|-> <session|-> <task…>
-  const code = D.run(['codex', droom, 'code', 'sess-1', 'find', 'the', 'flake'],
+  // argv: <runtime> <cwd> <toRole|-> <session|-> <task|advisor> <model|-> <task…>
+  const code = D.run(['codex', droom, 'code', 'sess-1', 'task', '-', 'find', 'the', 'flake'],
     { codex: () => ({ ok: true, out: 'ANSWER: it is a tar --force-local bug', err: '', status: 0 }) });
   const room = RM.resolveRoom(droom);
   let notes = RM.allNotes(room);
@@ -1347,17 +1347,51 @@ try {
     && fs.readdirSync(room.planDir).some((f) => /^delegate-codex-.*\.md$/.test(f)));
 
   // failure path: HIGH priority so it can't be missed
-  D.run(['claude', droom, 'code', '-', 'do', 'x'], { claude: () => ({ ok: false, out: '', err: 'boom', status: 3 }) });
+  D.run(['claude', droom, 'code', '-', 'task', '-', 'do', 'x'], { claude: () => ({ ok: false, out: '', err: 'boom', status: 3 }) });
   notes = RM.allNotes(room);
   const fail = notes[notes.length - 1];
   ok('a FAILED delegate still reports back, at HIGH priority',
     fail.from === 'delegate:claude' && fail.priority === 'high' && /FAILED/.test(fail.body) && /boom/.test(fail.body));
 
   // no role -> broadcast (to: null) so it is still delivered to the room
-  D.run(['codex', droom, '-', '-', 'anon', 'task'], { codex: () => ({ ok: true, out: 'ok', err: '', status: 0 }) });
+  D.run(['codex', droom, '-', '-', 'task', '-', 'anon', 'task'], { codex: () => ({ ok: true, out: 'ok', err: '', status: 0 }) });
   ok('with no role, the result is BROADCAST rather than dropped', RM.allNotes(room).slice(-1)[0].to === null);
 
-  ok('delegate refuses an unknown runtime / empty task', D.run(['gpt', droom, '-', '-', 'x'], {}) === 2 && D.run(['codex', droom, '-', '-'], {}) === 2);
+  ok('delegate refuses an unknown runtime / empty task', D.run(['gpt', droom, '-', '-', 'task', '-', 'x'], {}) === 2 && D.run(['codex', droom, '-', '-', 'task', '-'], {}) === 2);
+
+  // ---- ADVISOR mode: read-only review with a verdict contract (a "gate", not a note) ------
+  // The injected runner receives (cwd, task, opts) so we can assert advisor/model are threaded.
+  let advisorOpts = null;
+  D.run(['codex', droom, 'code', 'sess-1', 'advisor', 'gpt-5.6-luna', 'review', 'my', 'plan'], {
+    codex: (cwd, task, opts) => { advisorOpts = opts; return { ok: true, out: 'VERDICT: REVISE\n1. missing rollback — add a backup step', err: '', status: 0 }; },
+  });
+  ok('advisor mode threads {advisor:true, model} into the runner',
+    advisorOpts && advisorOpts.advisor === true && advisorOpts.model === 'gpt-5.6-luna');
+  const rev = RM.allNotes(room).slice(-1)[0];
+  ok('a REVISE verdict posts from advisor:<runtime> at HIGH priority (a gate)',
+    rev.from === 'advisor:codex' && rev.priority === 'high' && /VERDICT: REVISE/.test(rev.body) && /gpt-5\.6-luna/.test(rev.body));
+  ok('advisor writes an advisor-<runtime> transcript (not delegate-)',
+    /full: .*advisor-codex-.*\.md/.test(rev.body) && fs.readdirSync(room.planDir).some((f) => /^advisor-codex-.*\.md$/.test(f)));
+  // an APPROVE verdict is normal priority (nothing to act on)
+  D.run(['claude', droom, 'code', 'sess-1', 'advisor', '-', 'review'], { claude: () => ({ ok: true, out: 'VERDICT: APPROVE\nlooks correct', err: '', status: 0 }) });
+  const appr = RM.allNotes(room).slice(-1)[0];
+  ok('an APPROVE verdict is NORMAL priority (no gate tripped)',
+    appr.from === 'advisor:claude' && appr.priority === 'normal' && /VERDICT: APPROVE/.test(appr.body));
+  // a model that ignores the contract → UNCLEAR, treated as a tripped gate (HIGH)
+  D.run(['codex', droom, 'code', 'sess-1', 'advisor', '-', 'review'], { codex: () => ({ ok: true, out: 'sure, looks fine to me', err: '', status: 0 }) });
+  const unclear = RM.allNotes(room).slice(-1)[0];
+  ok('an ignored verdict contract → UNCLEAR at HIGH priority (fail-loud)',
+    /VERDICT: UNCLEAR/.test(unclear.body) && unclear.priority === 'high');
+
+  // parseVerdict + parseDelegateSpec (the shared parser every caller uses)
+  ok('parseVerdict reads the first-line verdict, case-insensitive, null when absent',
+    D.parseVerdict('verdict: approve\nx') === 'APPROVE' && D.parseVerdict('VERDICT: REVISE') === 'REVISE' && D.parseVerdict('no verdict here') === null);
+  const sp = D.parseDelegateSpec('claude --advisor --model claude-fable-5 review my migration plan');
+  ok('parseDelegateSpec extracts runtime + --advisor + --model + task',
+    sp && sp.runtime === 'claude' && sp.advisor === true && sp.model === 'claude-fable-5' && sp.task === 'review my migration plan');
+  ok('parseDelegateSpec: plain task has advisor=false, model=null; bad runtime -> null',
+    (() => { const p = D.parseDelegateSpec('codex "fix the bug"'); return p && p.runtime === 'codex' && p.advisor === false && p.model === null && p.task === 'fix the bug'; })()
+    && D.parseDelegateSpec('gpt do a thing') === null && D.parseDelegateSpec('claude') === null);
 
   // Assert against the REAL hook, never a hand-copied regex: the old test inlined its own
   // copy of TRIGGER_RX, and the copy drifted (it still listed the deleted `handoff`), which
@@ -1379,14 +1413,14 @@ try {
 
   // A delegate that is mid-run has a marker naming the session that fired it.
   let seen = null;
-  D.run(['codex', droom, 'code', 'sess-1', 'slow', 'one'], {
+  D.run(['codex', droom, 'code', 'sess-1', 'task', '-', 'slow', 'one'], {
     codex: () => { seen = D.pendingFor('sess-1', droom); return { ok: true, out: 'done', err: '', status: 0 }; },
   });
   ok('a RUNNING delegate is visible to the session that fired it',
     seen && seen.length === 1 && seen[0].runtime === 'codex' && seen[0].role === 'code' && /slow one/.test(seen[0].task));
   ok('a delegate is INVISIBLE to a session that did not fire it (no cross-session nagging)',
     (() => { let other = null;
-      D.run(['codex', droom, 'code', 'sess-1', 'x'], { codex: () => { other = D.pendingFor('sess-OTHER', droom); return { ok: true, out: 'y', err: '', status: 0 }; } });
+      D.run(['codex', droom, 'code', 'sess-1', 'task', '-', 'x'], { codex: () => { other = D.pendingFor('sess-OTHER', droom); return { ok: true, out: 'y', err: '', status: 0 }; } });
       return other && other.length === 0; })());
 
   fs.rmSync(droom, { recursive: true, force: true });

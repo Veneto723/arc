@@ -1200,20 +1200,23 @@ async function main() {
   // never TYPE it; but it can RUN `arc note ...` via its Bash tool, which lands here in a
   // fresh process (no session restart needed). Reuses the same arc-fridge functions the
   // sentinels do. Output mirrors the CLI form (`arc note`, not `arc:note`).
-  // `arc delegate <claude|codex> <task>` — the terminal/AGENT form of arc:delegate. Fires
-  // a HEADLESS run on the chosen runtime in the background; the result lands on the fridge.
+  // `arc delegate <claude|codex> [--advisor] [--model <id>] <task>` — the terminal/AGENT form
+  // of arc:delegate. Fires a HEADLESS run in the background; the result/verdict lands on the fridge.
   if (userArgs[0] === 'delegate') {
-    const runtime = String(userArgs[1] || '').toLowerCase();
-    const task = userArgs.slice(2).join(' ').trim();
-    if (!/^(claude|codex)$/.test(runtime) || !task) {
-      process.stderr.write('usage: arc delegate <claude|codex> <task>\n  e.g.  arc delegate codex "find why the import test is flaky"\n');
+    const D = require('./arc-delegate');
+    const spec = D.parseDelegateSpec(userArgs.slice(1).join(' '));
+    if (!spec) {
+      process.stderr.write('usage: arc delegate <claude|codex> [--advisor] [--model <id>] <task>\n'
+        + '  do it:      arc delegate codex "find why the import test is flaky"\n'
+        + '  review it:  arc delegate claude --advisor --model claude-fable-5 "review my plan: …"\n');
       process.exit(1);
     }
     const room = require('./arc-room').resolveRoom(process.cwd());
     const session = process.env.ARC_SESSION || '';
     const myRole = require('./arc-fridge').getRole(session, room);
-    require('./arc-delegate').spawnDelegate(runtime, room.root, myRole, task, session);
-    process.stdout.write(`[arc] delegated to ${runtime} (background) — the result will land on the fridge`
+    D.spawnDelegate(spec.runtime, room.root, myRole, spec.task, session, { advisor: spec.advisor, model: spec.model });
+    const what = spec.advisor ? `asked ${spec.runtime} to REVIEW` : `delegated to ${spec.runtime}`;
+    process.stdout.write(`[arc] ${what}${spec.model ? ` (${spec.model})` : ''} (background) — the ${spec.advisor ? 'verdict' : 'result'} will land on the fridge`
       + (myRole ? ` for "${myRole}"` : ' as a broadcast') + `. Read it with \`arc notes\`.\n`);
     return;
   }

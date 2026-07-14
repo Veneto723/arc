@@ -148,19 +148,22 @@ function run(raw) {
   if (action === 'delegate') {
     // Fire a HEADLESS run on the chosen runtime; the result comes back as a fridge note.
     // The delegate runs ALONGSIDE you — you keep the session and keep working.
-    const m = (arg || '').match(/^(claude|codex)\s+([\s\S]+)$/i);
-    if (!m) {
-      return clBlock('usage: arc:delegate <claude|codex> <task>\n'
-        + '  e.g.  arc:delegate codex "find why the import test is flaky"\n'
-        + '  It runs in the BACKGROUND and posts the result to the fridge — you keep working.');
+    //   arc:delegate <claude|codex> [--advisor] [--model <id>] <task>
+    const D = require('./arc-delegate');
+    const spec = D.parseDelegateSpec(arg || '');
+    if (!spec) {
+      return clBlock('usage: arc:delegate <claude|codex> [--advisor] [--model <id>] <task>\n'
+        + '  do it:     arc:delegate codex "find why the import test is flaky"\n'
+        + '  review it:  arc:delegate claude --advisor --model claude-fable-5 "review my migration plan: …"\n'
+        + '  --advisor = READ-ONLY review with an APPROVE/REVISE verdict. It runs in the BACKGROUND;\n'
+        + '  the result lands on the fridge — you keep working.');
     }
-    const runtime = m[1].toLowerCase();
-    const task = m[2].trim().replace(/^["']|["']$/g, '');
     const room = require('./arc-room').resolveRoom(typeof hook.cwd === 'string' ? hook.cwd : process.cwd());
     const myRole = require('./arc-fridge').getRole(session, room);
-    require('./arc-delegate').spawnDelegate(runtime, room.root, myRole, task, session);
-    return clBlock(`✓ delegated to ${runtime} — "${task.slice(0, 60)}${task.length > 60 ? '…' : ''}"\n`
-      + `  running in the BACKGROUND; you keep working. The result lands on the fridge`
+    D.spawnDelegate(spec.runtime, room.root, myRole, spec.task, session, { advisor: spec.advisor, model: spec.model });
+    const what = spec.advisor ? `asked ${spec.runtime}${spec.model ? ` (${spec.model})` : ''} to REVIEW` : `delegated to ${spec.runtime}${spec.model ? ` (${spec.model})` : ''}`;
+    return clBlock(`✓ ${what} — "${spec.task.slice(0, 56)}${spec.task.length > 56 ? '…' : ''}"\n`
+      + `  running in the BACKGROUND; you keep working. ${spec.advisor ? 'The verdict' : 'The result'} lands on the fridge`
       + (myRole ? ` for "${myRole}"` : ' as a broadcast (claim a role with arc:role to have it addressed to you)') + '.\n'
       + `  arc hands it to this session automatically at the end of a turn — you do not have to ask for it.`);
   }
