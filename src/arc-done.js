@@ -162,9 +162,17 @@ function verdict(evidence, gateMode) {
 // injection already render.
 function buildNote(payload, evidence, proven, role) {
   const subject = payload.task_subject || `task ${payload.task_id}`;
+  // A proven tick CARRIES EVIDENCE (sha + files), so it is a `result` and ranks above routine
+  // news. An unverified tick is a CLAIM, so it is plain `info` and sinks in the digest — the
+  // note is still delivered (a roommate genuinely wants to know the design spec is done), it
+  // just doesn't arrive dressed like proof. That is the whole difference: weight, not silence.
+  //
+  // The old wording — "UNVERIFIED — taken on trust" — read like an accusation. Most uncommitted
+  // ticks are simply non-code work (a design doc, a sign-off), where no commit is EXPECTED. State
+  // the fact, don't raise an eyebrow.
   const body = proven
     ? `✓ done: ${subject}`
-    : `✓ done: ${subject}  (UNVERIFIED — no commit found; taken on trust)`;
+    : `✓ done: ${subject}  (no commit — not code-backed)`;
   const refs = { task: String(payload.task_id) };
   if (proven) {
     refs.sha = evidence.commits[0].sha;
@@ -172,7 +180,7 @@ function buildNote(payload, evidence, proven, role) {
     refs.files = evidence.files.slice(0, MAX_FILES);
     if (evidence.files.length > MAX_FILES) refs.more = evidence.files.length - MAX_FILES;
   }
-  return { from: role, to: null, priority: 'normal', body, refs };
+  return { from: role, to: null, kind: proven ? 'result' : 'info', priority: 'normal', body, refs };
 }
 
 // ---- hook entry points -------------------------------------------------------

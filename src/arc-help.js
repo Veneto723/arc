@@ -77,8 +77,11 @@ The fridge — sticky notes between sessions working in the same folder:
   against the HEAD sha it recorded when the task was created, and sticks a note on the
   fridge carrying the commit sha and the changed files. Nobody has to remember to say
   "P-014 is done" — the tick IS the message, and it comes with evidence.
+  A commit-backed tick is a <result> and ranks above routine news; an uncommitted one is plain
+  <info> and sinks — still delivered (non-code work is real work), just not dressed as proof.
     features.doneGate in arc-config.json (or ARC_DONE_GATE):
-      note    default — always posts; an uncommitted "done" is posted, flagged UNVERIFIED
+      note    default — always posts; an uncommitted "done" posts as info, "(no commit —
+              not code-backed)", so it never outranks a tick that proves itself
       strict  REFUSES to mark a task done when no commit backs it (the agent is told why)
       off     no notes, no gate
 

@@ -751,6 +751,23 @@ try {
   ok("'strict' lets a committed one through", D.verdict(withCommit, 'strict').block === false);
   ok('unknown evidence (null) counts as UNPROVEN, never as proven', D.verdict(null, 'strict').block === true && D.verdict(null, 'note').proven === false);
 
+  // ---- WEIGHT, NOT SILENCE ------------------------------------------------------------
+  // A tick with no commit is still DELIVERED (non-code work — a design doc, a sign-off — is
+  // real work a roommate wants to know about). It just must not arrive dressed like proof:
+  // proven -> <result> (ranks up, carries sha+files), unproven -> <info> (sinks in the digest).
+  const provenNote = D.buildNote({ task_id: '1', task_subject: 'Ship P-014' },
+    { commits: [{ sha: 'abc1234' }], files: ['src/a.js'] }, true, 'coding');
+  const claimNote = D.buildNote({ task_id: '2', task_subject: 'Present design for sign-off' },
+    { commits: [], files: [] }, false, 'coding');
+  ok('a commit-backed tick is <result> and carries its evidence (sha + files)',
+    provenNote.kind === 'result' && provenNote.refs.sha === 'abc1234' && provenNote.refs.files[0] === 'src/a.js');
+  ok('an uncommitted tick is <info> — still posted, but it sinks instead of outranking proof',
+    claimNote.kind === 'info' && !claimNote.refs.sha && RM.KIND_RANK.result < RM.KIND_RANK.info);
+  ok('the uncommitted wording states the fact without the accusation',
+    /no commit — not code-backed/.test(claimNote.body) && !/UNVERIFIED|taken on trust/.test(claimNote.body));
+  ok('a non-code tick still reaches roommates (weight, not silence)',
+    claimNote.to === null && /Present design for sign-off/.test(claimNote.body));
+
   // --- evidence, against a REAL git repo ---
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'done-'));
   const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
@@ -790,6 +807,8 @@ try {
     ok('the note is FROM the completing role', n.from === 'coding');
     ok('the note is a broadcast (any roommate sees it)', n.to === null);
     ok('the note names the task', /Implement P-014/.test(n.body));
+    // A commit-backed tick CARRIES EVIDENCE, so it is a <result> and ranks above routine news.
+    ok('a PROVEN tick is kind:result (it proves itself, so it outranks info)', n.kind === 'result');
     ok('the note CARRIES THE SHA as evidence', typeof n.refs.sha === 'string' && n.refs.sha.length >= 7);
     ok('the note carries the changed files', n.refs.files.includes('feature.js'));
 
