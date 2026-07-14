@@ -644,11 +644,19 @@ function renderFull(data, sessionEta, weekEta, poolRows, acc, model, effort) {
 // length − this role's cursor), so it cannot lie and clears itself the moment the
 // notes are read. Nothing has to remember to tell you.
 function boardSeg(f) {
-  if (!f || !f.count) return '';
+  if (!f) return '';
   // Holding NO role means you receive nothing — so say it loudly rather than showing an
   // empty statusline while notes quietly pile up in the board.
   if (f.noRole) return `\x1b[1;91m⚠ ${f.count} notes · no role — arc:role <name>\x1b[0m`;
-  return `\x1b[1;93m📌 ${f.count} from ${f.senders.join(', ')}\x1b[0m`;
+  // DEAF: you hold a role but never armed a listener, so every peer addressing you is talking to
+  // an empty chair. The usual cause is an arming turn that could not run — a rate-limited account
+  // still CLAIMS for free (the claim is handled in-hook, zero tokens) and then cannot take the
+  // turn that arms, so the session SQUATS the role in silence. Loud, because nothing else would
+  // ever tell you. (Raised by the scout peer: "the statusline already knows both facts".)
+  const deaf = f.deaf ? `\x1b[1;91m⚠ ${f.role} · DEAF — run: arc join ${f.role}\x1b[0m` : '';
+  if (!f.count) return deaf;
+  const notes = `\x1b[1;93m📌 ${f.count} from ${f.senders.join(', ')}\x1b[0m`;
+  return deaf ? `${deaf} ${notes}` : notes;
 }
 
 // The initiative dial (arc:mode). The circle FILLS as the agent gets more proactive:

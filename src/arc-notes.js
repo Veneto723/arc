@@ -25,8 +25,38 @@ function sessionPid(session) {
 
 // Which CONVERSATION this session is running. A relaunch mints a new ARC_SESSION but resumes
 // the SAME conversation — so this is the identity a role should actually follow.
+//
+// THE FORK FALLBACK. A forked session's conversation id DOES NOT EXIST at launch: Claude Code
+// mints it after the runner has already written arc-state, and the runner only reconciles the
+// real id AFTER claude exits — which never happens while the peer is alive. So arc-state says
+// `null` forever, and an invited peer could not invite (nothing to fork) and lost its role on
+// restart (the claim had no conversation to be adopted by). But the statusline BRIDGES the live
+// id to disk every single turn, so the truth was already sitting there, unread. Read it.
+// (Found by the scout peer, whose own claim proved it: convId null while the bridge had the id.)
+const activeFile = (session) => path.join(CACHE_DIR, `arc-active-${session}.json`);
 function sessionConv(session) {
-  try { return JSON.parse(fs.readFileSync(stateFile(session), 'utf8')).convId || null; } catch { return null; }
+  try { const c = JSON.parse(fs.readFileSync(stateFile(session), 'utf8')).convId; if (c) return c; } catch {}
+  try { return JSON.parse(fs.readFileSync(activeFile(String(session)), 'utf8')).convId || null; } catch { return null; }
+}
+
+// A claim written BEFORE the conversation id was knowable (every fork) carries convId:null, and
+// role-adoption-on-restart matches a vacant claim BY CONVERSATION — so that peer would silently
+// lose its role on the next restart. The id becomes knowable a turn later (above), so heal the
+// claim in place as soon as it does. Idempotent and self-cancelling: once the claim carries a
+// conversation, this is a single cheap read that returns null forever after.
+function healClaimConv(session, cwd) {
+  try {
+    const board = R.resolveBoard(resolveCwd(session, cwd));
+    const role = getRole(session, board);
+    if (!role) return null;
+    const claim = R.roleClaim(board, role);
+    if (!claim || claim.convId) return null;            // no claim of ours, or already healed
+    const conv = sessionConv(session);
+    const pid = sessionPid(session);
+    if (!conv || !pid || claim.pid !== pid) return null; // only ever heal OUR OWN live claim
+    R.claimRole(board, role, pid, session, conv);
+    return { role, conv };
+  } catch { return null; }
 }
 
 // Which folder is this session in? The hook payload SHOULD carry `cwd`, but don't
@@ -325,8 +355,20 @@ function badge(session, cwd) {
       const n = R.noteCount(board);
       return n ? { noRole: true, count: n, board: board.name } : null;
     }
+    // DEAF: holding a role while unreachable. arc ASKED this session to arm a listener (the
+    // offer marker) and it never did — the tell-tale of a turn that could not run, e.g. the
+    // account was rate-limited when the claim landed. The claim itself costs zero tokens (it is
+    // handled in-hook), so the session SQUATS the role while hearing nothing, and every peer
+    // addressing it is talking to an empty chair. Nothing else would ever say so.
+    // (Raised by the scout peer: "the statusline already knows both facts".)
+    let deaf = false;
+    try {
+      const A = require('./arc-await');
+      deaf = A.wasOffered(session) && !A.isWaiting(session);
+    } catch {}
     const u = R.unreadFor(board, role);
-    return u.count ? { count: u.count, senders: u.senders, role, board: board.name } : null;
+    if (u.count) return { count: u.count, senders: u.senders, role, board: board.name, deaf };
+    return deaf ? { deaf: true, count: 0, role, board: board.name } : null;
   } catch { return null; }
 }
 
@@ -415,4 +457,4 @@ function injection(session, cwd) {
 
 module.exports = { requestRole, requestNote, requestNotes, refreshRole, badge, injection, getRole, sessionPid, roleFile,
   unarmedRequests, markRequestsArmed, readArmed,
-  sessionConv, resolveCwd, VALID_ROLE };   // arc-invite builds on the same primitives
+  sessionConv, resolveCwd, VALID_ROLE, healClaimConv };   // arc-invite builds on the same primitives

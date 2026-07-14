@@ -374,6 +374,19 @@ function stripConvArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const x = args[i];
     if (x === '--continue' || x === '-c') continue;
+    // A FORK HAPPENS ONCE, AT BIRTH. Carrying --fork-session into a RELAUNCH (switch/restart)
+    // makes the session fork ITSELF again: claude resumes the peer's conversation and immediately
+    // branches it into a NEW one, abandoning the history the peer just built. This is the whole
+    // of "arc:switch didn't restore my session" — the user hit it the first time an invited peer
+    // ran out of tokens and switched accounts to keep going, which is exactly when a peer most
+    // needs its conversation to survive. From the second launch on, an invited peer is just a
+    // session with its own conversation, and it must RESUME that, not re-fork it.
+    if (x === '--fork-session') continue;
+    // The opening prompt arc:invite injects (`arc:role <role>`) is a BIRTH instruction — it exists
+    // to make the newborn claim + arm itself. Replaying it on every relaunch would re-send it as a
+    // prompt forever. It is not needed: the role is re-adopted from the claim (which carries the
+    // conversation id, see arc-notes.healClaimConv) and the listener re-arms at the first idle.
+    if (/^arc:/i.test(x)) continue;
     if (x === '--resume' || x === '-r' || x === '--session-id') {
       if (args[i + 1] && !args[i + 1].startsWith('-')) i++; // also drop its value
       continue;
@@ -1730,7 +1743,15 @@ async function main() {
   }
 }
 
-main().catch(e => {
-  process.stderr.write('[arc] fatal: ' + e.message + '\n');
-  process.exit(1);
-});
+// Pure, side-effect-free helpers, exported so they can be TESTED. stripConvArgs earned this:
+// it silently ate an invited peer's conversation (a surviving --fork-session re-forked the
+// session on every relaunch) and nothing could unit-test it, because requiring this file used to
+// LAUNCH CLAUDE. A function that decides how a conversation is re-opened has to be testable.
+module.exports = { stripConvArgs, explicitConvId, preservedFlags };
+
+if (require.main === module) {
+  main().catch((e) => {
+    process.stderr.write('[arc] fatal: ' + e.message + '\n');
+    process.exit(1);
+  });
+}

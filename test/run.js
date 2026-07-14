@@ -1170,6 +1170,134 @@ try {
 // <caller conv> --fork-session "arc:role <role>"`, and the existing fresh-claim pass-through
 // does the claiming + arming in the new session's first turn. These tests inject a spawn
 // recorder — nothing real opens.
+// ---- BUG-4: a FORKED session had no conversation identity ---------------------------
+// A fork's conversation id does not exist at launch — Claude Code mints it after the runner has
+// already written arc-state, and the runner only reconciles the real id AFTER claude exits. So
+// arc-state said `null` forever while the peer was alive, and THREE things broke off that one
+// fact. (Found by the scout peer, whose own claim carried convId:null; the third one was found
+// by the user, who lived it: an invited peer ran out of tokens, switched accounts to keep
+// going, and its conversation vanished.)
+section('BUG-4 (a forked peer had no conversation: could not invite, lost its role, re-forked)');
+try {
+  const F5 = require(path.join(SRC, 'arc-notes.js'));
+  const RM5 = require(path.join(SRC, 'arc-board.js'));
+  const RUN = require(path.join(SRC, 'arc-runner.js'));
+
+  const frepo = fs.mkdtempSync(path.join(os.tmpdir(), 'fork-'));
+  spawnSync('git', ['init', '-q'], { cwd: frepo });
+  const fboard = RM5.resolveBoard(frepo); RM5.ensureBoard(fboard);
+  const FS_ = 'fork-sess-' + process.pid;
+  const cache = path.join(CLAUDE, 'cache');
+  fs.mkdirSync(cache, { recursive: true });
+
+  // A LIVE FORK, exactly as the runner leaves it: state written with convId:null, while the
+  // statusline has already bridged the real id to disk.
+  fs.writeFileSync(path.join(cache, `arc-state-${FS_}.json`),
+    JSON.stringify({ pid: process.pid, cwd: frepo, convId: null }));
+  fs.writeFileSync(path.join(cache, `arc-active-${FS_}.json`),
+    JSON.stringify({ convId: 'fork-conv-9999' }));
+
+  ok('a fork\'s conversation id is read from the statusline bridge, not the stale state file',
+    F5.sessionConv(FS_) === 'fork-conv-9999');
+
+  // …which is what lets an invited peer INVITE. Without it, invite refused "nothing to fork",
+  // so the peer graph could only ever be a one-level star around whoever started it.
+  const I5 = require(path.join(SRC, 'arc-invite.js'));
+  let spawnedFork = null;
+  const okInv = I5.requestInvite(FS_, 'grandchild', frepo, {
+    spawn: (b, a) => { spawnedFork = a; return { status: 0 }; }, hasWt: true,
+    ensureTrusted: () => ({ ok: true, already: true }),
+  });
+  ok('...so an INVITED peer can now invite in turn (a peer tree, not a one-level star)',
+    okInv.ok === true && spawnedFork.join(' ').includes('--resume fork-conv-9999'));
+
+  // The CLAIM was written before the id was knowable, so it carries null — and role adoption on
+  // restart matches a vacant claim BY CONVERSATION. That peer would silently lose its role.
+  F5.requestRole(FS_, 'scout', frepo);
+  const raw = RM5.roleClaim(fboard, 'scout');
+  ok('(setup) a fork\'s claim is born with a conversation, now that one is readable',
+    !!raw && raw.convId === 'fork-conv-9999');
+
+  // And a claim that ALREADY carries null — every fork born before this fix — heals in place; the
+  // Stop hook calls it every turn until it sticks. Write the broken shape DIRECTLY: claimRole
+  // deliberately refuses to overwrite a known conversation with null, which is the right instinct
+  // and also means it cannot be used to reproduce the damage.
+  fs.writeFileSync(path.join(fboard.planDir, 'claim-scout.json'),
+    JSON.stringify({ role: 'scout', pid: process.pid, sessionId: FS_, convId: null, at: Date.now() }));
+  ok('(setup) the broken shape is reproduced', RM5.roleClaim(fboard, 'scout').convId === null);
+  const healed = F5.healClaimConv(FS_, frepo);
+  ok('a null-conversation claim HEALS once the id becomes knowable (role survives a restart)',
+    healed && healed.conv === 'fork-conv-9999'
+    && RM5.roleClaim(fboard, 'scout').convId === 'fork-conv-9999');
+  ok('...and healing is idempotent — a no-op once the claim carries a conversation',
+    F5.healClaimConv(FS_, frepo) === null);
+  ok('...and it NEVER touches a claim held by another live session',
+    (() => {
+      RM5.claimRole(fboard, 'other', 999999, 'someone-else', null);   // a dead pid = not ours
+      F5.healClaimConv(FS_, frepo);
+      return RM5.roleClaim(fboard, 'other') === null;                 // still vacant, untouched
+    })());
+
+  // THE ONE THAT DESTROYED A CONVERSATION. `--fork-session` must NEVER survive into a relaunch:
+  // on switch/restart the runner rebuilds args and re-adds --resume, so a surviving --fork-session
+  // means claude resumes the peer's conversation and immediately BRANCHES it into a new one —
+  // abandoning everything the peer built. The user hit this the first time an invited peer ran out
+  // of tokens and switched accounts, which is precisely when its history mattered most.
+  const born = ['--account', 'whale', '--resume', 'caller-conv', '--fork-session', 'arc:role scout'];
+  const relaunch = RUN.stripConvArgs(born);
+  ok('a relaunch NEVER re-forks: --fork-session is stripped (this is what ate a conversation)',
+    !relaunch.includes('--fork-session'));
+  ok('...and the birth prompt is not replayed forever (role re-adopts, listener re-arms on idle)',
+    !relaunch.some((a) => /^arc:/i.test(a)));
+  ok('...while the real flags survive untouched',
+    relaunch.includes('--account') && relaunch.includes('whale') && !relaunch.includes('caller-conv'));
+
+  fs.rmSync(frepo, { recursive: true, force: true });
+  for (const f of [`arc-state-${FS_}.json`, `arc-active-${FS_}.json`, `arc-role-${FS_}.json`]) {
+    try { fs.unlinkSync(path.join(cache, f)); } catch {}
+  }
+} catch (e) { ok('BUG-4', false, e.message + '\n' + (e.stack || '')); }
+
+// ---- (d) the rate-limit SQUAT: holding a role while deaf ----------------------------
+// A claim costs ZERO tokens (it is handled in-hook), but ARMING a listener costs a turn. On a
+// rate-limited account the claim lands and the arming turn cannot run — so the session SQUATS the
+// role while hearing nothing, and every peer addressing it is talking to an empty chair. Nothing
+// in arc would have said so. The statusline already knew both facts. (Raised by the scout peer.)
+section('(d) the rate-limit squat — a role-holder that never armed is shown as DEAF');
+try {
+  const F6 = require(path.join(SRC, 'arc-notes.js'));
+  const A6 = require(path.join(SRC, 'arc-await.js'));
+  const RM6 = require(path.join(SRC, 'arc-board.js'));
+  const drepo = fs.mkdtempSync(path.join(os.tmpdir(), 'deaf-'));
+  spawnSync('git', ['init', '-q'], { cwd: drepo });
+  const dboard2 = RM6.resolveBoard(drepo); RM6.ensureBoard(dboard2);
+  const DS = 'deaf-sess-' + process.pid;
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${DS}.json`),
+    JSON.stringify({ pid: process.pid, cwd: drepo, convId: 'dc1' }));
+  F6.requestRole(DS, 'code', drepo);
+  A6.clearWaiting(DS); A6.clearOffered(DS);
+
+  ok('a role-holder we have NOT yet asked to arm is not called deaf (that is just a fresh claim)',
+    !(F6.badge(DS, drepo) || {}).deaf);
+
+  A6.markOffered(DS);          // arc asked it to arm...
+  ok('...but once arc ASKED and it never armed, it is DEAF (the rate-limit squat)',
+    (F6.badge(DS, drepo) || {}).deaf === true);
+
+  A6.markWaiting(DS, 'code', process.pid);   // ...and complying clears it
+  ok('...and arming clears the warning immediately',
+    !(F6.badge(DS, drepo) || {}).deaf);
+
+  // The statusline must actually SHOW it — a fact nobody surfaces is a fact nobody has.
+  const um = fs.readFileSync(path.join(SRC, 'usage-monitor.js'), 'utf8');
+  ok('the statusline renders DEAF loudly, with the command that fixes it',
+    /f\.deaf \?/.test(um) && /DEAF/.test(um) && /arc join \$\{f\.role\}/.test(um));
+
+  A6.clearWaiting(DS); A6.clearOffered(DS);
+  fs.rmSync(drepo, { recursive: true, force: true });
+  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${DS}.json`)); } catch {}
+} catch (e) { ok('(d) rate-limit squat', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- the stance GATE: arc:mode drives whether an agent may spawn a peer ------------
 // Everything else the stance governs is a model-level STEER (injected advice), which is right
 // for a note: cheap, reversible, and "was this the user's order?" is a judgment only the model

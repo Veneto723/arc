@@ -60,6 +60,12 @@ function run(raw) {
   if (!session) return null;                       // not an arc session — stay out of the way
   const cwd = typeof hook.cwd === 'string' ? hook.cwd : process.cwd();
 
+  // 0. A FORKED session's claim was written before its conversation id existed (see
+  //    arc-notes.healClaimConv). The id is knowable by now, so heal the claim — otherwise this
+  //    peer silently loses its role on the next restart, and can never invite anyone itself.
+  //    Idempotent: one cheap read once healed.
+  try { require('./arc-notes').healClaimConv(session, cwd); } catch { /* never wedge a turn */ }
+
   // 1. Anything on the board for me? Hand it over instead of going idle.
   const inj = require('./arc-notes').injection(session, cwd);
   if (inj) {
