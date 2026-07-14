@@ -38,7 +38,7 @@ const core = require('./arc-switch-core');
 // backtrack; being explicit costs nothing and documents the intent).
 // `arc:` is the current prefix; `arc:` is kept as a deprecated alias through the
 // migration so running sessions and muscle memory don't break.
-const TRIGGER_RX = /^\s*[/!]?\s*arc:(switch|restart|delegate|mode|stance|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|anchors|help|arc)\b\s*(.*)$/i;
+const TRIGGER_RX = /^\s*[/!]?\s*arc:(switch|restart|delegate|mode|stance|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|join|anchors|help|arc)\b\s*(.*)$/i;
 
 function block(reason) {
   // UserPromptSubmit: block the prompt from reaching the model, show `reason`.
@@ -124,15 +124,40 @@ function run(raw) {
     // tokens). Self-contained (own header), so no `[arc]` prefix.
     return block(require('./arc-help')());
   }
-  if (action === 'role' || action === 'note' || action === 'notes') {
+  if (action === 'role' || action === 'join' || action === 'note' || action === 'notes') {
     // The board: a per-board append-only sticky-note ledger shared by the sessions
     // working in the same folder. Pure file ops, run here — zero tokens. Loaded
     // lazily so a plain arc:switch stays lightweight.
     const board = require('./arc-notes');
     const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
-    const r = action === 'role' ? board.requestRole(session, arg || '', cwd)
+    const r = (action === 'role' || action === 'join') ? board.requestRole(session, arg || '', cwd)
       : action === 'note' ? board.requestNote(session, arg || '', cwd)
         : board.requestNotes(session, arg || '', cwd);
+    // A SUCCESSFUL NEW CLAIM is the one sentinel that deliberately COSTS A TURN. The claim
+    // itself already happened (above, in-hook, instant) — but a claim without a listener is
+    // addressable and deaf, and only the agent's own background command can arm one: a hook-
+    // spawned process is invisible to the harness, so its exit wakes nobody. A blocked
+    // sentinel has no turn to arm in — proven live: the user claimed via arc:role, went idle,
+    // and a peer's request would have sat unheard. So instead of blocking, PASS THE PROMPT
+    // THROUGH with instructions: the model arms and confirms, and the session goes idle
+    // reachable. Query / refusal / already-armed still block at zero tokens — the turn is
+    // spent only when it buys the one thing a block cannot.
+    if ((action === 'role' || action === 'join') && r.ok && !r.plain && r.armNeeded) {
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit',
+          additionalContext: `[arc] The user's role claim was already handled by a hook — the claim is DONE:\n`
+            + `${r.message}\n\n`
+            + `Your ONLY job this turn: make this session reachable while idle.\n`
+            + `  1. run in the BACKGROUND (run_in_background: true)  →  arc join ${r.role}\n`
+            + `  2. Tell the user you are standing by as "${r.role}" — and if they gave no other\n`
+            + `     instruction, STOP there. Do not start work nobody asked for.\n`
+            + `(That background command blocks until a note lands, then EXITS — the exit is what\n`
+            + `wakes this session. Without it, notes sit unread until a human types something.)`,
+        },
+      }));
+      process.exit(0);
+    }
     return r.plain ? block(r.message) : clBlock(r.message);
   }
   if (action === 'anchors') {

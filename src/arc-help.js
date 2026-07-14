@@ -53,7 +53,11 @@ Move chats between PCs (discrete export/import — no realtime sync):
 
 The board — sticky notes between sessions working in the same folder:
   arc:role <name>         claim a role in this board (research | coding | …) — survives
-                         restart + switch, like your model and effort
+                         restart + switch, like your model and effort. The ONE sentinel
+                         that costs a turn: a fresh claim hands the agent ONE small turn
+                         to run "arc join <name>", so arc:role research alone makes a
+                         live responder. (query/refusal/re-claim still cost zero.
+                          arc:join is the same sentinel by another name.)
   arc:role                who am I, who else is here?
   arc:note <role> <text>  leave a note for a peer  ·  arc:note all <text> broadcasts
   arc:note <role> --kind request <text>      ASK — tracked until answered (⧗ shown to you)
@@ -144,12 +148,12 @@ TYPE the arc: form, which the hook eats before the model):
   arc note <role> "<text>" leave a note for one peer
   arc notes               read your unread notes
   arc note <role> --kind request "<packet>"   ASK a peer — tracked until they answer
-  arc await [role]        block until a note lands, then EXIT. Run as a BACKGROUND task
-                         before going idle: that EXIT re-invokes you with the note.
-                         arc ARMS THIS FOR YOU at every idle if you hold a role — an idle
-                         session is otherwise unreachable, so holding a role means being
-                         reachable. Never times out. ("arc watch" was removed: it streamed
-                         forever and never exited, so it could never wake anything by itself.)
+  arc join [role]         claim the role (if not yours) AND LISTEN: blocks until a note
+                         lands, then EXITS. Run as a BACKGROUND task: that EXIT re-invokes
+                         you with the note — an idle session is otherwise unreachable.
+                         Never times out. arc asks you to run this at every idle if you
+                         hold a role, so being on a board MEANS being reachable.
+                         (role/arc:role DECLARES a role · join LISTENS as it)
   arc claudex [stop]      show (or stop) the auto-managed GPT-in-Claude translator sidecars
   (skill: peers = the whole protocol — WHEN a note is worth leaving, how to ask when
    you're stuck, the note kinds, and what to do when a peer's note wakes you)

@@ -1052,6 +1052,120 @@ try {
     !/CL_[A-Z_]+/.test(readme) && !/cl-(credentials|profiles|deleted|runner|export|import|notify)/.test(readme));
 } catch (e) { ok('audit regressions', false, e.message + '\n' + (e.stack || '')); }
 
+// ---- arc:role / arc:join auto-arm (the one sentinel that deliberately costs a turn) ----
+// Proven live: a responder claimed via the arc:role sentinel, went idle, and was DEAF — a
+// blocked sentinel has no turn, and only the agent's own background command can arm a
+// listener. So a successful NEW claim now PASSES THROUGH: the hook does the claim (instant,
+// in-hook), then hands the model one turn with orders to `arc join`. Query, refusal, and
+// already-armed still block at zero tokens — the turn is spent only when it buys the one
+// thing a block cannot.
+section('arc:role auto-arm (fresh claim passes through; the turn runs `arc join`)');
+try {
+  const AW = require(path.join(SRC, 'arc-await.js'));
+  const swhook2 = path.join(SRC, 'arc-switch-hook.js');
+
+  const jrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'autoarm-'));
+  fs.mkdirSync(path.join(jrepo, '.git'), { recursive: true });
+  const JS = 'autoarm-sess-' + process.pid;
+  fs.mkdirSync(path.join(CLAUDE, 'cache'), { recursive: true });
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${JS}.json`),
+    JSON.stringify({ pid: process.pid, cwd: jrepo }));
+
+  const askRole = (prompt, cwd) => {
+    const r = spawnSync(process.execPath, [swhook2], {
+      input: JSON.stringify({ prompt, cwd: cwd || jrepo }), encoding: 'utf8',
+      env: { ...process.env, ARC_SESSION: JS },
+    });
+    try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
+  };
+
+  // The headline: a fresh claim does NOT block — it hands the model a turn with join orders.
+  AW.clearWaiting(JS);
+  const fresh = askRole('arc:role research');
+  const ctx = (fresh.hookSpecificOutput && fresh.hookSpecificOutput.additionalContext) || '';
+  ok('a FRESH claim passes through as a turn (no block), with the claim already done',
+    !fresh.decision && /claim is DONE/.test(ctx) && /you are "research"/.test(ctx));
+  ok('...and the turn has exactly one job: run `arc join research` in the background',
+    /run_in_background: true/.test(ctx) && /arc join research/.test(ctx));
+  ok('...and it forbids inventing work ("do not start work nobody asked for")',
+    /Do not start work nobody asked for/i.test(ctx));
+
+  // Re-claim with a LIVE listener: nothing left for a turn to buy — block at zero tokens.
+  AW.markWaiting(JS, 'research', process.pid);
+  const armed = askRole('arc:role research');
+  ok('a re-claim with a LIVE listener blocks at zero tokens ("already armed")',
+    armed.decision === 'block' && /already armed/.test(armed.reason || ''));
+
+  // A listener armed for the OLD role hears nothing on the new one — that is armNeeded too.
+  const moved = askRole('arc:join android');
+  const mctx = (moved.hookSpecificOutput && moved.hookSpecificOutput.additionalContext) || '';
+  ok('arc:join is the same sentinel: switching roles with an OLD-role listener re-arms',
+    !moved.decision && /OLD role "research"/.test(mctx) && /arc join android/.test(mctx));
+
+  // The zero-token forms stay zero-token.
+  ok('the bare `arc:role` query still blocks (zero tokens)',
+    askRole('arc:role').decision === 'block');
+  const norepo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'noboard-'));
+  ok('a non-repo refusal still blocks (zero tokens) — no turn spent on a failed claim',
+    /not a git repository/.test(askRole('arc:role research', norepo2).reason || ''));
+
+  AW.clearWaiting(JS);
+  fs.rmSync(jrepo, { recursive: true, force: true });
+  fs.rmSync(norepo2, { recursive: true, force: true });
+} catch (e) { ok('arc:role auto-arm', false, e.message + '\n' + (e.stack || '')); }
+
+// ---- arc join (claim if needed + listen, one background command) --------------------
+// The agent-facing verb: `arc role` DECLARES, `arc join` LISTENS (claiming on the way if the
+// role isn't yet held). Meant for run_in_background — the exit is the wake.
+section('arc join (claim + listen in one command)');
+try {
+  const RM2 = require(path.join(SRC, 'arc-board.js'));
+  const jrepo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'join-'));
+  fs.mkdirSync(path.join(jrepo2, '.git'), { recursive: true });
+  const board2 = RM2.resolveBoard(jrepo2); RM2.ensureBoard(board2);
+  const JS2 = 'join-sess-' + process.pid;
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${JS2}.json`),
+    JSON.stringify({ pid: process.pid, cwd: jrepo2 }));
+
+  const runJoin = (args, env) => spawnSync(process.execPath,
+    [path.join(SRC, 'arc-runner.js'), 'join', ...args],
+    { encoding: 'utf8', cwd: jrepo2, timeout: 30000, env: { ...process.env, ARC_SESSION: JS2, ...(env || {}) } });
+
+  // A note is already waiting → join claims, reports, and EXITS immediately (that exit is
+  // the wake). This is the whole command's contract in one run.
+  RM2.appendNote(board2, { from: 'android', to: 'research', kind: 'request', body: 'first job' });
+  const j1 = runJoin(['research']);
+  ok('`arc join research` claims the role and exits the moment a note is waiting',
+    j1.status === 0 && /you are "research"/.test(j1.stdout) && /first job/.test(j1.stdout)
+    && /arc notes/.test(j1.stdout));
+  ok('...and it only OBSERVES — the note is still unread for the waking turn to deliver',
+    RM2.unreadFor(board2, 'research').count === 1);
+
+  // Re-join (role already mine) — no re-claim, straight to listening.
+  const j2 = runJoin(['research']);
+  ok('re-joining your own role says so and listens (no duplicate claim)',
+    j2.status === 0 && /already "research"/.test(j2.stdout));
+
+  // Bare `arc join` falls back to the session's claimed role.
+  const j3 = runJoin([]);
+  ok('bare `arc join` reuses the role this session already holds',
+    j3.status === 0 && /already "research"/.test(j3.stdout));
+
+  // Refusals EXIT non-zero — backgrounded, that exit reports the failure instead of hanging.
+  const noRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'joinnr-'));
+  const j4 = spawnSync(process.execPath, [path.join(SRC, 'arc-runner.js'), 'join', 'research'],
+    { encoding: 'utf8', cwd: noRepo, timeout: 30000, env: { ...process.env, ARC_SESSION: JS2 } });
+  ok('`arc join` in a NON-REPO refuses and exits 1 (a failed claim must not listen)',
+    j4.status === 1 && /not a git repository/.test(j4.stderr || ''));
+  const j5 = spawnSync(process.execPath, [path.join(SRC, 'arc-runner.js'), 'join'],
+    { encoding: 'utf8', cwd: noRepo, timeout: 30000, env: { ...process.env, ARC_SESSION: JS2 } });
+  ok('bare `arc join` with no role anywhere explains itself and exits 1',
+    j5.status === 1 && /which role/.test(j5.stderr || ''));
+
+  fs.rmSync(jrepo2, { recursive: true, force: true });
+  fs.rmSync(noRepo, { recursive: true, force: true });
+} catch (e) { ok('arc join', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- arc-await (the ONLY thing that can reach an idle session) -------------------
 // arc runs claude on a real TTY and holds no handle into it; Claude Code has no timer hook.
 // So exactly one thing pulls back an idle session: a background command IT started, whose
@@ -1298,11 +1412,11 @@ try {
   // roles claimed from a SUBDIR still land in the repo-root board
   const ra = F.requestRole('sa', 'research', path.join(repo2, 'sub'));
   ok('arc:role claims a role from a subdir (board = repo root)', ra.ok === true && /the "proj" board/.test(ra.message));
-  // The claim makes you ADDRESSABLE, not yet reachable-while-idle — a listener needs a TURN,
-  // and the sentinel form has none (proven live: the user claimed via arc:role, no Stop fired).
-  // The confirmation must say so, or a human believes a bare claim made a live responder.
-  ok('...and the confirmation tells the truth about WHEN the listener arms',
-    /listener: arms at the end of the next agent turn/.test(ra.message) && /arc await research/.test(ra.message));
+  // The claim makes you ADDRESSABLE, not yet reachable-while-idle — a listener needs a TURN.
+  // The result carries armNeeded so the sentinel hook can SPEND one (pass-through) to arm; the
+  // message carries the instruction for the CLI path, where the agent is already mid-turn.
+  ok('...and a fresh claim reports armNeeded + the exact arm command',
+    ra.armNeeded === true && ra.role === 'research' && /arc join research/.test(ra.message));
   ok('arc:role coding (second peer)', F.requestRole('sb', 'coding', repo2).ok === true);
   const rc = F.requestRole('sc', 'coding', repo2);
   ok('a third session is REFUSED a held role', rc.ok === false && /already held by a LIVE session/.test(rc.message));
@@ -1725,7 +1839,7 @@ try {
   // a TURN). So the one thing left to say is "arm your listener", said exactly once.
   const first = fire({ hook_event_name: 'Stop', cwd: sboard });
   ok('with nothing to deliver, the hook arms the LISTENER (an idle role-holder is unreachable)',
-    first.decision === 'block' && /arc await code/.test(first.reason || ''));
+    first.decision === 'block' && /arc join code/.test(first.reason || ''));
   ok('...and then goes SILENT — asked once per cycle, never nagged every turn',
     !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
 
@@ -1760,7 +1874,7 @@ try {
   const askSeq = RM.appendNote(board, { from: 'code', to: 'research', kind: 'request', body: 'why is the import flaky?' }) && RM.latestSeq(board);
   const asked = fire({ hook_event_name: 'Stop', cwd: sboard });
   ok('an UNANSWERED request you asked a peer arms the waker before you go idle',
-    asked.decision === 'block' && /STILL UNANSWERED/.test(asked.reason) && /arc await code/.test(asked.reason)
+    asked.decision === 'block' && /STILL UNANSWERED/.test(asked.reason) && /arc join code/.test(asked.reason)
     && /why is the import flaky/.test(asked.reason));
   ok('...and it is offered ONCE, never nagged every turn',
     !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
@@ -1791,7 +1905,7 @@ try {
 
   const lis = fire({ hook_event_name: 'Stop', cwd: sboard });
   ok('holding a role, with nothing pending, the hook ARMS the listener before going idle',
-    lis.decision === 'block' && /arc await code/.test(lis.reason || '')
+    lis.decision === 'block' && /arc join code/.test(lis.reason || '')
     && /run_in_background/.test(lis.reason || ''));
   ok('...and it says WHY (an idle session cannot be reached), not just what to run',
     /idle/i.test(lis.reason || '') && /reach/i.test(lis.reason || ''));
@@ -1812,7 +1926,7 @@ try {
   A2.markWaiting(SESSION, 'code', 999999);
   A2.clearOffered(SESSION);
   ok('a DEAD listener re-arms (a crash must not make a session permanently unreachable)',
-    /arc await code/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+    /arc join code/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
 
   // NOT gated on a peer existing. Such a check is evaluated at the exact moment it stops
   // being true: a session that idles ALONE and only then gets a peer (arc:invite, a second
@@ -1821,7 +1935,7 @@ try {
   const others = RM.liveRoles(board).filter((r) => (r.role || r) !== 'code');
   const solo = fire({ hook_event_name: 'Stop', cwd: sboard });
   ok('armed even with NO peer on the board — a peer can join while you are idle',
-    others.length === 0 && /arc await code/.test(solo.reason || ''));
+    others.length === 0 && /arc join code/.test(solo.reason || ''));
 
   // NOT gated on stance. Listening is not acting: a passive session that wakes on a note
   // reads it and tells the user; it still won't self-initiate work. Muting the ear would not
@@ -1830,7 +1944,7 @@ try {
   St2.setStance(SESSION, 'passive');
   cycle();
   ok('a PASSIVE session is armed too (listening is not acting)',
-    /arc await code/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+    /arc join code/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
   ok('...and the passive directive no longer contradicts it by forbidding the listener',
     !/no background watching/i.test(St2.directive('passive'))
     && /listening is exempt/i.test(St2.directive('passive')));

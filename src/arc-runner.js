@@ -1293,11 +1293,42 @@ async function main() {
     for (const p of list) process.stdout.write(`  127.0.0.1:${p.port}\t${p.alive ? 'up  ' : 'dead'}\tpid ${p.pid}\t${p.account}\t${p.model}\t-> ${p.upstream}\n`);
     return;
   }
-  // `arc await [role]` — block until a note lands, then EXIT. Run by an agent as a BACKGROUND
-  // task before it goes idle: in Claude Code a background command's EXIT re-invokes the agent,
-  // so this exit is what reaches an idle session with nobody typing anything. It never times
-  // out. arc-stop-hook arms it automatically for any session holding a role, which is what
-  // makes being on a board mean being reachable.
+  // `arc join [role]` — claim the role (if it isn't already yours) and LISTEN: block until a
+  // note lands, then EXIT. Run by an agent as a BACKGROUND task: in Claude Code a background
+  // command's EXIT re-invokes the agent, so this exit is what reaches an idle session with
+  // nobody typing anything. It never times out. ONE verb for "be on this board and reachable"
+  // — this is what the Stop hook and every opening prompt teach. (The vocabulary split is
+  // deliberate: `arc:role`/`arc role` DECLARES, `arc join` LISTENS — and joining costs the
+  // turn it runs in, because only the agent's own background command can wake the session.)
+  if (userArgs[0] === 'join') {
+    const N = require('./arc-notes');
+    const B = require('./arc-board');
+    const session = process.env.ARC_SESSION || '';
+    const cwd = process.cwd();
+    const board = B.resolveBoard(cwd);
+    let role = String(userArgs[1] || '').trim().toLowerCase();
+    if (!role) role = N.getRole(session, board) || '';
+    if (!role) {
+      process.stderr.write('[arc join] which role? `arc join research` claims it and listens.\n');
+      process.exit(1);
+    }
+    if (N.getRole(session, board) !== role) {
+      const r = N.requestRole(session, role, cwd);
+      if (!r.ok) {
+        const msg = String(r.message).replace(/arc:role/g, 'arc role');
+        process.stderr.write(`[arc join] ${msg}\n`);
+        process.exit(1);          // a refused claim EXITS — if backgrounded, that exit reports it
+      }
+      process.stdout.write(`[arc join] you are "${role}" on the "${board.name}" board  (${board.root})\n`);
+    } else {
+      process.stdout.write(`[arc join] already "${role}" on the "${board.name}" board — listening.\n`);
+    }
+    require('./arc-await').awaitOnce(role, cwd, { label: 'arc join' }).then((code) => process.exit(code));
+    return;
+  }
+  // `arc await [role]` — the bare LISTEN half of `arc join` (no claim). Kept as a working
+  // primitive (deployed hooks on other machines still teach it) but no longer documented:
+  // `arc join` is the one verb surfaces teach.
   if (userArgs[0] === 'await') {
     require('./arc-await').awaitOnce(userArgs[1], process.cwd()).then((code) => process.exit(code));
     return;

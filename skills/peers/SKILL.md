@@ -1,6 +1,6 @@
 ---
 name: peers
-description: You may be sharing this repo with ANOTHER arc session — a "peer" (e.g. a read-only `research` session while you write code, or an `android` session while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel. Use this skill for BOTH halves of that protocol. SPEAKING — when you finish something that changes their world (a shared API/contract/schema change, a decision that constrains their side, a blocker they'll hit, a feature they now build on), leave ONE concise note: `arc note all "<one line>"` or `arc note <role> "<one line>"`; run `arc role` first to see who is actually there, and never narrate routine progress. LISTENING — you arm nothing: notes arrive automatically at your turn start, and a note that lands mid-work is handed to you at your turn end. The one ask: when arc tells you to run `arc await <your-role>` as a background task before going idle, do it — an idle session is otherwise unreachable, and that command's exit is what wakes you. Also covers note kinds (request/result/correction/blocker) and retracting a note you got wrong with `--supersedes`.
+description: You may be sharing this repo with ANOTHER arc session — a "peer" (e.g. a read-only `research` session while you write code, or an `android` session while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel. Use this skill for BOTH halves of that protocol. SPEAKING — when you finish something that changes their world (a shared API/contract/schema change, a decision that constrains their side, a blocker they'll hit, a feature they now build on), leave ONE concise note: `arc note all "<one line>"` or `arc note <role> "<one line>"`; run `arc role` first to see who is actually there, and never narrate routine progress. LISTENING — you arm nothing: notes arrive automatically at your turn start, and a note that lands mid-work is handed to you at your turn end. The one ask: when arc tells you to run `arc join <your-role>` as a background task before going idle, do it — an idle session is otherwise unreachable, and that command's exit is what wakes you. Also covers note kinds (request/result/correction/blocker) and retracting a note you got wrong with `--supersedes`.
 ---
 
 # Peers & the board
@@ -117,7 +117,7 @@ A long packet belongs in a file — put it in `docs/` and let the note carry the
 plus the path. The note is a pointer, not the document.
 
 **You will be woken when they answer.** A request is tracked until it's replied to: arc offers to
-arm `arc await <your-role>` before you go idle, and that wake hands you the answer. So ask, then
+arm `arc join <your-role>` before you go idle, and that wake hands you the answer. So ask, then
 get on with something else — the reply will find you.
 
 **Answer one the same way:** `arc note <them> --reply-to <seq> "DONE — <findings + file:line>"`.
@@ -163,7 +163,7 @@ You are reachable on three channels, and **you have to arm none of them**:
 |---|---|
 | **turn start** | waiting notes are injected into your context |
 | **turn end** | a note that landed *while you worked* is handed over — no human types anything |
-| **while idle** | arc asks you to arm `arc await <role>`; its exit wakes you |
+| **while idle** | arc asks you to run `arc join <role>`; its exit wakes you |
 
 All three run in **every stance, passive included** — listening isn't acting, so the dial
 doesn't touch it. You never poll, and you never decide to listen.
@@ -173,7 +173,7 @@ doesn't touch it. You never poll, and you never decide to listen.
 When you're about to stop, arc may say:
 
 ```
-  run in the BACKGROUND (run_in_background: true)  →  arc await research
+  run in the BACKGROUND (run_in_background: true)  →  arc join research
 ```
 
 **Do it, then finish your turn normally.** That's the whole ask. It blocks for free until a note

@@ -73,15 +73,21 @@ function clearOffered(session) {
   try { fs.unlinkSync(offerFile(String(session))); } catch { /* already gone */ }
 }
 
-// Is a waiter ALREADY listening for this session? Used by the Stop hook to stay quiet.
-function isWaiting(session) {
+// The live waiter's marker ({pid, role, at}), or null. LIVENESS is the test, not existence —
+// a marker whose pid died is swept so the session re-arms instead of staying deaf forever.
+// The role matters to callers: a listener armed for your OLD role hears nothing on your new
+// one, so "waiting" without "waiting-as-whom" would report a deaf session as reachable.
+function waitingFor(session) {
   try {
     const m = JSON.parse(fs.readFileSync(awaitFile(String(session)), 'utf8'));
-    if (m && m.pid && R.isAlive(m.pid)) return true;
+    if (m && m.pid && R.isAlive(m.pid)) return m;
     clearWaiting(session);          // stale: the waiter died. Re-arm.
-    return false;
-  } catch { return false; }
+    return null;
+  } catch { return null; }
 }
+
+// Is a waiter ALREADY listening for this session? Used by the Stop hook to stay quiet.
+function isWaiting(session) { return waitingFor(session) !== null; }
 
 // Resolve the role to wait on: an explicit arg, else this session's own claimed role.
 function resolveRole(roleArg, session, board) {
@@ -92,13 +98,14 @@ function resolveRole(roleArg, session, board) {
 
 function awaitOnce(roleArg, cwd, opts) {
   const o = opts || {};
+  const tag = o.label || 'arc await';   // `arc join` listens through this too — its output should say so
   const pollMs = o.pollMs || POLL_MS;
   const write = o.write || ((l) => process.stdout.write(l + '\n'));
   const session = (process.env.ARC_SESSION || '').trim();
   const board = R.resolveBoard(cwd || process.cwd());
   const role = resolveRole(roleArg, session, board);
   if (!role) {
-    process.stderr.write('[arc await] no role — pass one (`arc await research`) or claim one first (`arc role research`).\n');
+    process.stderr.write(`[${tag}] no role — \`arc join research\` claims one and listens.\n`);
     return Promise.resolve(1);
   }
   if (session) markWaiting(session, role, process.pid);
@@ -107,7 +114,7 @@ function awaitOnce(roleArg, cwd, opts) {
     let u;
     try { u = R.unreadFor(board, role); } catch { return false; }
     if (!u.count) return false;
-    write(`[arc await] ${u.count} note(s) landed for "${role}" on the "${board.name}" board — this exit is your wake-up:`);
+    write(`[${tag}] ${u.count} note(s) landed for "${role}" on the "${board.name}" board — this exit is your wake-up:`);
     for (const n of u.notes) {
       write(`  #${n.seq} from ${n.from}${n.priority === 'high' ? ' [!]' : ''}: ${String(n.body).replace(/\s+/g, ' ').slice(0, 300)}`);
     }
@@ -127,7 +134,7 @@ function awaitOnce(roleArg, cwd, opts) {
   });
 }
 
-module.exports = { awaitOnce, resolveRole, isWaiting, markWaiting, clearWaiting, awaitFile,
+module.exports = { awaitOnce, resolveRole, isWaiting, waitingFor, markWaiting, clearWaiting, awaitFile,
   markOffered, wasOffered, clearOffered, offerFile };
 
 if (require.main === module) {
