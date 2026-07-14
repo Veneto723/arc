@@ -86,7 +86,7 @@ function run(raw) {
       reason: `[arc] ${open.notes.length} request(s) you asked a peer are STILL UNANSWERED:\n  ${asked}\n\n`
         + `They answer on their own schedule, and nothing can wake an idle session from outside. `
         + `If you want the answer, arm the waker before you stop:\n`
-        + `  Bash tool, run_in_background: true  →  arc await ${open.role}\n\n`
+        + `  run it in the BACKGROUND (run_in_background: true), in whichever shell you use  →  arc await ${open.role}\n\n`
         + `It exits the moment they reply, and that exit re-invokes YOU with it. If the answer `
         + `isn't worth waiting on, just say so and stop — you won't be asked about these again.`,
     });
@@ -121,7 +121,7 @@ function run(raw) {
     reason: `[arc] You hold the role "${open.role}" on this board, so a peer can address you at any time — `
       + `but you are about to go idle, and an idle session cannot be reached: notes arrive on a TURN, and `
       + `nothing outside can start one. Arm your listener before you stop:\n`
-      + `  Bash tool, run_in_background: true  →  arc await ${open.role}\n\n`
+      + `  run it in the BACKGROUND (run_in_background: true), in whichever shell you use  →  arc await ${open.role}\n\n`
       + `It blocks (costing nothing) until a note lands, then EXITS — and that exit re-invokes you with it. `
       + `Do this, then finish your turn normally; you won't be asked again while it's listening.`,
   });

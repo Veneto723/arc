@@ -55,15 +55,27 @@ if ($hasClaude) {
   Write-Host "  arc MCP server installed (register later: claude mcp add --scope user arc node `"$mcpDest\server.js`")"
 }
 
-# 2. bin shim + PATH
+# 2. bin shims + PATH — TWO of them, and both are load-bearing.
+#    arc.cmd covers cmd.exe + PowerShell, which resolve a bare `arc` through PATHEXT.
+#    Bash does NOT do PATHEXT: it looks for a file literally named `arc`, so with only the .cmd
+#    every `arc role` / `arc notes` / `arc await` died with 127 inside Claude Code's Bash tool —
+#    which is exactly where the `peers` skill tells agents to run them. The bin dir was on PATH
+#    the whole time; the NAME just wasn't resolvable. An extensionless shim fixes that, and it
+#    cannot shadow the .cmd for PowerShell/cmd, since neither will execute an extensionless file.
 $runnerCmd = "@echo off`r`nnode `"%USERPROFILE%\.claude\scripts\arc-runner.js`" %*"
 Set-Content (Join-Path $bin 'arc.cmd') $runnerCmd -Encoding ascii
+# LF endings + no BOM: a CRLF shebang makes sh fail with a bare "not found" that names the
+# interpreter, not the file — one of the more confusing ways to lose an afternoon.
+# $USERPROFILE not $HOME: node.exe is a Windows binary and cannot read a /c/Users/... MSYS path.
+$runnerSh = "#!/bin/sh`nexec node `"`$USERPROFILE/.claude/scripts/arc-runner.js`" `"`$@`"`n"
+[IO.File]::WriteAllText((Join-Path $bin 'arc'), $runnerSh, (New-Object Text.UTF8Encoding $false))
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (($userPath -split ';') -notcontains $bin) {
   [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $bin), 'User')
-  Write-Host "  arc.cmd  -> $bin  (added to your user PATH — open a NEW terminal to use 'arc')" -ForegroundColor Yellow
+  Write-Host "  arc.cmd + arc  -> $bin  (added to your user PATH — open a NEW terminal to use 'arc')" -ForegroundColor Yellow
 } else {
   Write-Host "  arc.cmd  -> $bin  (already on PATH)"
+  Write-Host "  arc      -> $bin  (POSIX shim, so 'arc' also works in Git Bash / the agent's Bash tool)"
 }
 
 # 3. no slash commands — every arc action is a zero-token arc: sentinel (arc:switch,

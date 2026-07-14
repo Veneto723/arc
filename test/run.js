@@ -948,6 +948,45 @@ try {
   try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-role-${S}.json`)); } catch {}
 } catch (e) { ok('arc-runner board CLI works', false, e.message); }
 
+// ---- the bin shims: `arc` must be runnable BY THE AGENT ---------------------------
+// Found in the wild, not by a test: the Stop hook told this very session to run
+// `arc await code`, and it died with exit 127. The installer shipped only arc.cmd —
+// cmd.exe and PowerShell resolve a bare `arc` through PATHEXT, but BASH DOES NOT. It looks
+// for a file literally named `arc`. So every `arc role` / `arc notes` / `arc note` /
+// `arc await` was dead inside Claude Code's Bash tool: precisely where the `peers` skill
+// tells agents to run them. The bin dir was on PATH all along; the NAME was unresolvable.
+//
+// The unit tests all passed while this was broken, because they call the MODULE
+// (require('arc-await.js')) and never the COMMAND the hook actually hands the agent. So this
+// section asserts the SHIPPING SURFACE — what a user installs, and what an agent is told to
+// type — rather than the internals.
+section('bin shims (the `arc` an AGENT types must exist for BOTH shells)');
+try {
+  const ps1 = fs.readFileSync(path.join(ROOT, 'install.ps1'), 'utf8');
+
+  ok('install.ps1 still writes arc.cmd (cmd.exe + PowerShell, via PATHEXT)',
+    /Join-Path \$bin 'arc\.cmd'/.test(ps1));
+  ok('install.ps1 ALSO writes an extensionless `arc` (bash does not do PATHEXT -> 127)',
+    /Join-Path \$bin 'arc'\)/.test(ps1));
+
+  // The shim's two content traps, both silent and both nasty:
+  // Grab the whole assignment line: PowerShell escapes a quote as `" , so [^"]* would stop
+  // at the first escape and silently capture a fragment (it did — and "failed" a good shim).
+  const shim = (ps1.match(/\$runnerSh = (.*)/) || [])[1] || '';
+  ok('the POSIX shim has a #!/bin/sh shebang', /#!\/bin\/sh/.test(shim));
+  ok('the POSIX shim uses $USERPROFILE, not $HOME (node.exe cannot read /c/Users/... MSYS paths)',
+    /\$USERPROFILE/.test(shim) && !/\$HOME/.test(shim));
+  ok('the POSIX shim forwards args ("$@") — else `arc await code` would drop the role',
+    /\$@/.test(shim));
+  ok('the POSIX shim is written LF + no BOM (a CRLF shebang fails as "not found")',
+    /WriteAllText\(\(Join-Path \$bin 'arc'\)/.test(ps1) && /UTF8Encoding \$false/.test(ps1));
+
+  // The hook must not name a specific tool: it named "Bash tool" — the one that was broken.
+  const hookSrc = fs.readFileSync(path.join(SRC, 'arc-stop-hook.js'), 'utf8');
+  ok('the Stop hook does not hard-code one shell/tool when telling the agent to arm',
+    !/Bash tool/.test(hookSrc) && /run_in_background/.test(hookSrc));
+} catch (e) { ok('bin shims', false, e.message); }
+
 // ---- arc-await (the ONLY thing that can reach an idle session) -------------------
 // arc runs claude on a real TTY and holds no handle into it; Claude Code has no timer hook.
 // So exactly one thing pulls back an idle session: a background command IT started, whose

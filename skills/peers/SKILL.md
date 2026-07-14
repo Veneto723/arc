@@ -167,7 +167,7 @@ doesn't touch it. You never poll, and you never decide to listen.
 When you're about to stop, arc may say:
 
 ```
-  Bash tool, run_in_background: true  →  arc await research
+  run in the BACKGROUND (run_in_background: true)  →  arc await research
 ```
 
 **Do it, then finish your turn normally.** That's the whole ask. It blocks for free until a note
