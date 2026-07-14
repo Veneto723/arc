@@ -557,18 +557,17 @@ try {
   ok('wires TaskCreated -> arc-done (baseline the HEAD sha)', cmds('TaskCreated').includes('arc-done.js'));
   ok('wires TaskCompleted -> arc-done (the git-derived gate)', cmds('TaskCompleted').includes('arc-done.js'));
 
-  // install.ps1 wires the SAME hooks by hand. If the two lists drift, a fresh install
-  // silently lacks whatever the newer one added — which is exactly how the gate would
-  // "work on this machine" and nowhere else.
+  // install.ps1 used to wire the same hooks BY HAND, in PowerShell — a second copy of the list
+  // that drifted the instant the node side grew something it did not know about (a PreToolUse
+  // hook needs a `matcher`, or it spawns node on every single tool call). A duplicated list is a
+  // bug with a delay fuse: the gate would "work on this machine" and nowhere else. The installer
+  // now DELEGATES to arc-wire-settings.js; this keeps it that way.
   const ps = fs.readFileSync(path.join(ROOT, 'install.ps1'), 'utf8');
-  const wireSrc = fs.readFileSync(wire, 'utf8');
-  const events = [...wireSrc.matchAll(/event:\s*'([A-Za-z]+)',\s*script:\s*'([\w.-]+)'/g)]
-    .map(([, ev, sc]) => `${ev}:${sc}`);
-  const missing = events.filter((e) => {
-    const [ev, sc] = e.split(':');
-    return !new RegExp(`Ensure-Hook \\$settings '${ev}'[^\\n]*${sc.replace('.', '\\.')}`).test(ps);
-  });
-  ok(`install.ps1 wires every hook arc-wire-settings does (${events.length})`, missing.length === 0, `missing: ${missing.join(', ')}`);
+  ok('install.ps1 delegates settings wiring to arc-wire-settings.js (one source of truth)',
+    /arc-wire-settings\.js/.test(ps));
+  ok('...and no hand-rolled hook wiring survives in the installer (that is how lists drift)',
+    !/Ensure-Hook/.test(ps));
+
   ok('installer publishes the peer skill at the shared agent path',
     ps.includes("'.agents\\skills'") && ps.includes("'skills\\peers\\*'"));
   // the merged skill superseded two others — a stale copy would keep teaching the old split
@@ -1171,6 +1170,113 @@ try {
 // <caller conv> --fork-session "arc:role <role>"`, and the existing fresh-claim pass-through
 // does the claiming + arming in the new session's first turn. These tests inject a spawn
 // recorder — nothing real opens.
+// ---- the stance GATE: arc:mode drives whether an agent may spawn a peer ------------
+// Everything else the stance governs is a model-level STEER (injected advice), which is right
+// for a note: cheap, reversible, and "was this the user's order?" is a judgment only the model
+// can make. `arc invite` is different in kind — it spawns a REAL SESSION (window, process, its
+// own quota), and injected text cannot actually STOP an agent from running a command. So this
+// one rides a PreToolUse hook and becomes enforceable: passive DENIES, balanced ASKS, active
+// ALLOWS. The user's own `arc:invite` is a PROMPT, not a tool call, so it never reaches the gate
+// — passive restrains the AGENT, never the human.
+section('arc:mode gate (PreToolUse: passive denies · balanced asks · active allows)');
+try {
+  const HOOKP = path.join(SRC, 'arc-pretool-hook.js');
+  const St3 = require(path.join(SRC, 'arc-stance.js'));
+  const RM4 = require(path.join(SRC, 'arc-board.js'));
+  const F4 = require(path.join(SRC, 'arc-notes.js'));
+
+  const grepo = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-'));
+  spawnSync('git', ['init', '-q'], { cwd: grepo });
+  const gboard = RM4.resolveBoard(grepo); RM4.ensureBoard(gboard);
+  const GS = 'gate-sess-' + process.pid;
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${GS}.json`),
+    JSON.stringify({ pid: process.pid, cwd: grepo, convId: 'gc1' }));
+  F4.requestRole(GS, 'code', grepo);
+
+  const gate = (command, tool = 'Bash', session = GS) => {
+    const r = spawnSync(process.execPath, [HOOKP], {
+      input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: { command }, cwd: grepo }),
+      encoding: 'utf8', env: { ...process.env, ARC_SESSION: session },
+    });
+    if (!r.stdout || !r.stdout.trim()) return { decision: null, raw: '' };   // no output = defer
+    try { const j = JSON.parse(r.stdout); return { decision: j.hookSpecificOutput.permissionDecision, reason: j.hookSpecificOutput.permissionDecisionReason, sys: j.systemMessage }; }
+    catch { return { decision: 'PARSE-ERROR', raw: r.stdout }; }
+  };
+
+  // The three dial positions.
+  St3.setStance(GS, 'passive');
+  const den = gate('arc invite frontend');
+  ok('PASSIVE denies an agent-initiated `arc invite`',
+    den.decision === 'deny' && /passive/i.test(den.reason || ''));
+  ok('...and tells the USER how to get the peer anyway (type arc:invite yourself)',
+    /arc:invite/.test(den.sys || '') && /arc:mode balanced/.test(den.sys || ''));
+
+  St3.setStance(GS, 'balanced');
+  ok('BALANCED asks — the permission prompt IS the confirmation',
+    gate('arc invite frontend').decision === 'ask');
+
+  St3.setStance(GS, 'active');
+  ok('ACTIVE allows — auto-approved, no prompt',
+    gate('arc invite frontend').decision === 'allow');
+
+  // The runaway guard: even ACTIVE asks once the board is crowded. Fails OPEN to a prompt, never
+  // to a refusal — "spawn a helper" looks locally reasonable every single time, and each peer
+  // burns its own quota.
+  for (const r of ['a1', 'a2', 'a3']) RM4.claimRole(gboard, r, process.pid, `other-${r}`, null);
+  const capped = gate('arc invite frontend');
+  ok('ACTIVE still ASKS once several peers are already live (runaway guard)',
+    capped.decision === 'ask' && /already live/i.test(capped.reason || ''));
+  for (const r of ['a1', 'a2', 'a3']) RM4.releaseRole(gboard, r, process.pid);
+
+  // Inertness. This hook sits in front of EVERY shell call, so anything that is not an invite
+  // must produce NO output at all (= defer to the normal permission flow).
+  St3.setStance(GS, 'passive');   // the strictest stance, to prove the bail-outs are real
+  ok('a non-invite command is not touched, even in passive (no output = defer)',
+    gate('git status').decision === null && gate('arc note code "hi"').decision === null
+    && gate('arc join code').decision === null);
+  // FAILS CLOSED by design: a mention inside a string is gated too. A false positive costs a
+  // prompt; a false negative would let a session spawn ungated. And the honest limit — this is a
+  // guardrail against self-initiation, not a sandbox: any string matcher can be walked around.
+  ok('an invite hidden in a STRING is still gated (fails closed, never silently through)',
+    gate('echo "run arc invite frontend"').decision === 'deny');
+  ok('...but a CHAINED invite IS caught (cd x && arc invite y)',
+    gate('cd /tmp && arc invite frontend').decision === 'deny');
+  ok('a non-shell tool is never gated (matcher is Bash|PowerShell)',
+    gate('arc invite frontend', 'Read').decision === null);
+  ok('the PowerShell tool is gated too (an invited peer may have no Bash tool at all)',
+    gate('arc invite frontend', 'PowerShell').decision === 'deny');
+  ok('a NON-arc session is left completely alone (no ARC_SESSION)',
+    gate('arc invite frontend', 'Bash', '').decision === null);
+
+  // `arc invite` must stay OFF the allowlist, or the gate could never see an "ask": an allow
+  // rule would satisfy the permission check before the prompt ever happened.
+  const W2 = require(path.join(SRC, 'arc-wire-settings.js'));
+  ok('`arc invite` is not allowlisted (else balanced could never ask)',
+    !W2.BOARD_PERMISSIONS.some((p) => /invite/.test(p)));
+
+  // The hook must be wired with a MATCHER — unmatched it would spawn node on every Read/Grep.
+  const entries = W2.coreHookEntries('C:/x/scripts');
+  const pre = entries.find((e) => e.event === 'PreToolUse');
+  ok('the gate is wired on PreToolUse, MATCHED to the shell tools only',
+    !!pre && pre.matcher === 'Bash|PowerShell' && /arc-pretool-hook\.js/.test(pre.command));
+  const st2 = {};
+  W2.mergeHooks(st2, entries);
+  W2.mergeHooks(st2, entries);      // idempotent
+  const grp = st2.hooks.PreToolUse.filter((g) => g.matcher === 'Bash|PowerShell');
+  ok('...and it merges into its own matcher group, idempotently',
+    grp.length === 1 && grp[0].hooks.length === 1);
+
+  // The stance TEXT must teach the same rule the gate enforces, or the agent learns one thing
+  // and the machine does another.
+  ok('the passive directive warns that invite is refused',
+    /arc invite/.test(St3.directive('passive')) && /REFUSED/.test(St3.directive('passive')));
+  ok('the active directive grants the spawn (and mentions the cap)',
+    /arc invite/.test(St3.directive('active')) && /auto-approved/.test(St3.directive('active')));
+
+  fs.rmSync(grepo, { recursive: true, force: true });
+  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${GS}.json`)); } catch {}
+} catch (e) { ok('arc:mode gate', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- board permissions (an unattended peer must be able to run the board commands) -------
 // The first INVITED peer reported `No such tool available: Bash` — it had only PowerShell. A
 // Bash-only allowlist therefore matched nothing, `arc join` raised a permission prompt, and the

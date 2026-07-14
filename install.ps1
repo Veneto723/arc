@@ -136,51 +136,18 @@ Set-ItemProperty -Path $nk -Name 'ShowBanner' -Value 1 -Type DWord
 Set-ItemProperty -Path $nk -Name 'ShowInActionCenter' -Value 1 -Type DWord
 Write-Host "  toast banners enabled for the PowerShell AppID"
 
-# 7. settings.json: merge hooks + statusline (never remove existing entries)
-$settingsPath = Join-Path $claudeDir 'settings.json'
-$settings = @{}
-if (Test-Path $settingsPath) {
-  Copy-Item $settingsPath "$settingsPath.bak-arc" -Force
-  $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-}
-function Ensure-Hook($obj, [string]$event, [string]$command) {
-  if (-not $obj.hooks) { $obj | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) -Force }
-  $hooks = $obj.hooks
-  $existing = $hooks.PSObject.Properties[$event]
-  $frag = ($command -split '"')[1]  # match on the script path
-  if ($existing -and (($existing.Value | ConvertTo-Json -Depth 10) -like "*$($frag -replace '\\','\\')*")) { return }
-  $entry = [pscustomobject]@{ hooks = @([pscustomobject]@{ type = 'command'; command = $command }) }
-  if ($existing) {
-    # append our command into the first matcher group
-    $existing.Value[0].hooks += [pscustomobject]@{ type = 'command'; command = $command }
-  } else {
-    $hooks | Add-Member -NotePropertyName $event -NotePropertyValue @($entry) -Force
-  }
-}
-$node = 'node'
-# classifier-immune switch fallback FIRST (so `arc:switch` works even rate-limited)
-Ensure-Hook $settings 'UserPromptSubmit' "$node `"$($scripts -replace '\\','/')/arc-switch-hook.js`""
-Ensure-Hook $settings 'UserPromptSubmit' "$node `"$($scripts -replace '\\','/')/arc-notify.js`" start"
-Ensure-Hook $settings 'Stop' "$node `"$($scripts -replace '\\','/')/arc-notify.js`" done"
-Ensure-Hook $settings 'StopFailure' "$node `"$($scripts -replace '\\','/')/arc-notify.js`" fail"
-Ensure-Hook $settings 'Notification' "$node `"$($scripts -replace '\\','/')/arc-notify.js`" wait"
-# the board's git-derived "done": baseline HEAD on task creation, diff it on completion.
-# Fires in an ordinary session — no agent team, no experimental flag.
-Ensure-Hook $settings 'TaskCreated' "$node `"$($scripts -replace '\\','/')/arc-done.js`""
-Ensure-Hook $settings 'TaskCompleted' "$node `"$($scripts -replace '\\','/')/arc-done.js`""
-if (-not $settings.statusLine) {
-  $settings | Add-Member -NotePropertyName statusLine -NotePropertyValue ([pscustomobject]@{
-    type = 'command'; command = "node `"$scripts\usage-monitor.js`" --compact"
-  }) -Force
-}
+# 7. settings.json: hooks + permissions + statusline — DELEGATED to arc-wire-settings.js.
+#    This used to be a second, hand-maintained copy of the wiring in PowerShell, and it drifted
+#    the moment the node side grew something the PS side did not know about (a PreToolUse hook
+#    needs a `matcher`, or it spawns node on EVERY tool call). One source of truth instead: the
+#    installer runs the same merge the rest of arc uses. It backs up settings.json, merges
+#    idempotently, and never removes a user's own entries.
+node "$($scripts -replace '\\','/')/arc-wire-settings.js" "$scripts"
+if ($LASTEXITCODE -ne 0) { throw 'settings.json wiring failed — nothing was changed.' }
+#   (arc-wire-settings writes UTF-8 WITHOUT a BOM: Node's JSON.parse rejects a BOM'd settings.json.)
 # (No Bash allow-rule: switching/restart use the zero-token arc:switch / arc:restart
 # sentinels caught by the UserPromptSubmit hook — no !-bash, no classifier. The
 # old /switch /restart slash commands that needed the allow-rule were removed.)
-
-# Write UTF-8 *without* BOM: PS 5.1's `Set-Content -Encoding utf8` prepends a BOM
-# that Node's JSON.parse (used by arc-runner / doctor) rejects as invalid JSON.
-[System.IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "  settings.json hooks + statusline wired (backup at settings.json.bak-arc)"
 
 Write-Host ""
 Write-Host "Done. Next:" -ForegroundColor Green

@@ -47,7 +47,18 @@ function mergeHooks(settings, entries) {
     const match = e.match || e.command;
     const present = groups.some((g) => Array.isArray(g.hooks) && g.hooks.some((x) => typeof x.command === 'string' && x.command.includes(match)));
     if (present) continue;
-    if (groups.length && Array.isArray(groups[0].hooks)) groups[0].hooks.push({ type: 'command', command: e.command });
+    // A MATCHER is not decoration on PreToolUse — it is what stops the hook from spawning node
+    // on EVERY tool call (Read, Grep, Edit, …), which would tax every action in the session to
+    // police one command. So a matched entry lives in its OWN group and never gets folded into
+    // an unmatched one.
+    if (e.matcher) {
+      const g = groups.find((x) => x.matcher === e.matcher && Array.isArray(x.hooks));
+      if (g) g.hooks.push({ type: 'command', command: e.command });
+      else groups.push({ matcher: e.matcher, hooks: [{ type: 'command', command: e.command }] });
+      added++;
+      continue;
+    }
+    if (groups.length && Array.isArray(groups[0].hooks) && !groups[0].matcher) groups[0].hooks.push({ type: 'command', command: e.command });
     else groups.push({ hooks: [{ type: 'command', command: e.command }] });
     added++;
   }
@@ -78,7 +89,15 @@ function coreHookEntries(scriptsDir) {
     ['TaskCreated', 'arc-done.js', ''],
     ['TaskCompleted', 'arc-done.js', ''],
   ];
-  return H.map(([event, script, arg]) => ({ event, script, command: `node "${S}/${script}"${arg ? ' ' + arg : ''}` }));
+  const entries = H.map(([event, script, arg]) => ({ event, script, command: `node "${S}/${script}"${arg ? ' ' + arg : ''}` }));
+  // The stance gate for `arc invite`. MATCHED to the shell tools only: unmatched, it would spawn
+  // node on every Read/Grep/Edit in the session to police one command. A session may be handed
+  // EITHER shell tool (the first invited peer had PowerShell and no Bash at all), so both.
+  entries.push({
+    event: 'PreToolUse', script: 'arc-pretool-hook.js', matcher: 'Bash|PowerShell',
+    command: `node "${S}/arc-pretool-hook.js"`,
+  });
+  return entries;
 }
 
 // Wire arc's core hooks + statusline into settings.json.
