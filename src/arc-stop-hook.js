@@ -80,6 +80,9 @@ function run(raw) {
   const open = N.unarmedRequests(session, cwd);
   if (open.notes.length) {
     N.markRequestsArmed(session, open.notes.map((n) => n.seq));
+    // A live listener already guarantees the wake — the reply will exit it and re-invoke us.
+    // Telling the agent to arm what is armed is exactly the nag this hook promises not to be.
+    if (require('./arc-await').isWaiting(session)) return null;
     const asked = open.notes.map((n) => `#${n.seq} → ${n.to || 'everyone'}: "${String(n.body).replace(/\s+/g, ' ').slice(0, 60)}"`).join('\n  ');
     out({
       decision: 'block',

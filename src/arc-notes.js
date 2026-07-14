@@ -113,6 +113,20 @@ function requestRole(session, arg, cwd) {
   }
   if (!VALID_ROLE.test(role)) return { ok: false, message: `invalid role "${role}" — letters/digits/dash/underscore, starting with a letter.` };
 
+  // A board is the git repo root the peers SHARE. In a non-repo cwd, resolveBoard falls back
+  // to the folder itself — the right lenient behaviour for note DELIVERY (never crash a hook),
+  // but exactly wrong for a CLAIM: it silently mints a junk board and the session stands by on
+  // it, deaf to its real peers. Caught live in the first two-session drill: the responder was
+  // launched in E:\ and claimed research on an "e:\" board while its peer was on "e:\arc" —
+  // two boards, zero contact, no error anywhere. Refuse BEFORE ensureBoard, so we don't even
+  // leave a .plan/ at a drive root.
+  if (!fs.existsSync(path.join(board.root, '.git'))) {
+    return { ok: false, message:
+      `"${board.root}" is not a git repository, so there is no board here to claim a role on.\n` +
+      `A board is the repo ROOT that peer sessions share — cd into the project repo and claim again.\n` +
+      `(Really want a board right here? \`git init\` makes this folder a root.)` };
+  }
+
   R.ensureBoard(board);
   const pid = sessionPid(session);
   if (!pid) return { ok: false, message: 'cannot find this session\'s arc-runner pid — is it running under `arc`?' };

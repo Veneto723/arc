@@ -1242,6 +1242,18 @@ try {
   const rc = F.requestRole('sc', 'coding', repo2);
   ok('a third session is REFUSED a held role', rc.ok === false && /already held by a LIVE session/.test(rc.message));
 
+  // Caught live in the first two-session drill: a responder launched in a NON-REPO dir (E:\)
+  // claimed its role on a junk "e:\" board while its peer sat on "e:\arc" — two boards, zero
+  // contact, no error anywhere. A claim in a non-repo must REFUSE and say where to go, and it
+  // must not leave a .plan/ behind (minting one at a drive root is how the junk spreads).
+  const norepo = fs.mkdtempSync(path.join(os.tmpdir(), 'norepo-'));
+  const nrc = F.requestRole('sd', 'research', norepo);
+  ok('claiming a role in a NON-REPO dir is refused (wrong-board drill bug)',
+    nrc.ok === false && /not a git repository/.test(nrc.message) && /cd into the project repo/.test(nrc.message));
+  ok('...and the refusal leaves no .plan behind (no junk boards at drive roots)',
+    !fs.existsSync(path.join(norepo, '.plan')));
+  fs.rmSync(norepo, { recursive: true, force: true });
+
   // notes
   ok('arc:note needs a role', F.requestNote('sc', 'coding hi', repo2).ok === false);
   ok('arc:note rejects a note to yourself', F.requestNote('sa', 'research hi', repo2).ok === false);
@@ -1764,6 +1776,15 @@ try {
   const NOROLE = 'sess-norole-' + process.pid;
   ok('a session with NO role is never nagged (nobody can address it)',
     !fire({ hook_event_name: 'Stop', cwd: sboard }, { ARC_SESSION: NOROLE }).decision);
+
+  // An unanswered request while a listener is ALREADY live: the wake is guaranteed — the
+  // reply will exit the listener and re-invoke us. Prompting "arm the waker" for an armed
+  // waker is exactly the nag this hook promises not to be.
+  A2.markWaiting(SESSION, 'code', process.pid);
+  RM.appendNote(board, { from: 'code', to: 'research', kind: 'request', body: 'second ask, listener live' });
+  ok('an unanswered request with a LIVE listener stays SILENT (wake already guaranteed)',
+    !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
+  A2.clearWaiting(SESSION);
 
   // ---- arc await: the EXIT is the wake --------------------------------------------
   // Run it as a real subprocess, because "it exits" IS the property under test — in Claude
