@@ -6,7 +6,7 @@
 // WHY a model-level STEER and not a CLI gate: "passive = act only on the USER's order" is a
 // distinction only the model can make — when you say "delegate this", the agent runs `arc
 // delegate`, and that IS on your order. A CLI gate can't tell that from self-initiation. So the
-// stance is INJECTED into the agent's context each turn (see arc-switch-hook.deliverFridge) and
+// stance is INJECTED into the agent's context each turn (see arc-switch-hook.deliverBoard) and
 // the agent self-governs. PASSIVE injects nothing — the baseline is the model's natural reactive
 // default (no grant), so it costs zero tokens; BALANCED/ACTIVE inject an explicit GRANT.
 'use strict';
@@ -43,10 +43,10 @@ function setStance(session, stance) {
 // The per-turn directive injected into the agent's context. null = inject nothing.
 function directive(stance) {
   if (stance === 'active') {
-    return "[arc stance: ACTIVE] You MAY use arc's agent tools on your own judgment when they clearly help — leave a roommate a note (`arc note`) when you change something that affects them, delegate heavy sub-tasks (`arc delegate`), watch for results (`arc await`). Still confirm anything irreversible or outward-facing before doing it.";
+    return "[arc stance: ACTIVE] You MAY use arc's agent tools on your own judgment when they clearly help — leave a peer a note (`arc note`) when you change something that affects them, delegate heavy sub-tasks (`arc delegate`), watch for results (`arc await`). Still confirm anything irreversible or outward-facing before doing it.";
   }
   if (stance === 'balanced') {
-    return "[arc stance: BALANCED] You MAY leave a roommate a note (`arc note`) when you change something that affects their work — but do NOT delegate, fan out background work, or broadcast unless the user asks.";
+    return "[arc stance: BALANCED] You MAY leave a peer a note (`arc note`) when you change something that affects their work — but do NOT delegate, fan out background work, or broadcast unless the user asks.";
   }
   return null; // passive: no proactivity granted (the reactive baseline)
 }
@@ -54,7 +54,7 @@ function directive(stance) {
 // One-line description, for the picker help + the set confirmation.
 function summary(stance) {
   return stance === 'active' ? 'self-initiate arc tools when they clearly help (note · delegate · watch)'
-    : stance === 'balanced' ? 'may note roommates on real changes; no delegate / fan-out unless asked'
+    : stance === 'balanced' ? 'may note peers on real changes; no delegate / fan-out unless asked'
       : 'act only on your order — no self-initiated notes, delegates, or fan-out';
 }
 

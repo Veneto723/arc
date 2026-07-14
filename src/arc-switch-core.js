@@ -596,7 +596,7 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
   if (emptyHdr) return { ok: false, message: `--header "${emptyHdr[0]}" needs a non-empty value.` };
   // An env map must not fight the fields that OWN routing (baseUrl/modelMap/headers), and
   // must never touch arc's control plane (ARC_SESSION etc. — that would detach the session
-  // from its runner and its fridge role). Reject loudly rather than silently dropping.
+  // from its runner and its board role). Reject loudly rather than silently dropping.
   const badEnv = Object.keys(envMap).find((k) => !C.envKeyAllowed(k));
   if (badEnv) {
     return { ok: false, message: /^ARC_/i.test(badEnv)

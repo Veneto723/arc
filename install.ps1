@@ -75,16 +75,18 @@ New-Item -ItemType Directory -Force $skills | Out-Null
 Copy-Item (Join-Path $kit 'skills\*') $skills -Recurse -Force
 Write-Host "  Claude skills -> $skills"
 
-# The roommate protocol is runtime-neutral and uses arc's terminal commands, so
+# The peer protocol is runtime-neutral and uses arc's terminal commands, so
 # publish it at the cross-agent discovery path as well.
 $agentSkills = Join-Path $env:USERPROFILE '.agents\skills'
-$roommateSkill = Join-Path $agentSkills 'roommates'
-New-Item -ItemType Directory -Force $roommateSkill | Out-Null
-Copy-Item (Join-Path $kit 'skills\roommates\*') $roommateSkill -Recurse -Force
-Write-Host "  shared skill -> $roommateSkill"
-# `roommates` replaced share-with-roommate + fridge-responder (one protocol, one skill).
-# Sweep the superseded pair so a stale copy can't keep matching and teaching the old split.
-foreach ($stale in @('share-with-roommate', 'fridge-responder')) {
+$peerSkill = Join-Path $agentSkills 'peers'
+New-Item -ItemType Directory -Force $peerSkill | Out-Null
+Copy-Item (Join-Path $kit 'skills\peers\*') $peerSkill -Recurse -Force
+Write-Host "  shared skill -> $peerSkill"
+# `peers` supersedes the earlier names: share-with-roommate + fridge-responder (two halves of
+# one protocol) were merged into `roommates`, which the board/peer/claim rename made `peers`.
+# Sweep ALL the historical names — a stale copy keeps matching and teaching the old vocabulary.
+# (NB these are literal past names, NOT subject to the room->board rename.)
+foreach ($stale in @('share-with-roommate', 'fridge-responder', 'roommates')) {
   foreach ($root in @($agentSkills, (Join-Path $env:USERPROFILE '.claude\skills'))) {
     $p = Join-Path $root $stale
     if (Test-Path $p) { Remove-Item -Recurse -Force $p; Write-Host "  removed superseded skill -> $p" -ForegroundColor DarkGray }
@@ -150,7 +152,7 @@ Ensure-Hook $settings 'UserPromptSubmit' "$node `"$($scripts -replace '\\','/')/
 Ensure-Hook $settings 'Stop' "$node `"$($scripts -replace '\\','/')/arc-notify.js`" done"
 Ensure-Hook $settings 'StopFailure' "$node `"$($scripts -replace '\\','/')/arc-notify.js`" fail"
 Ensure-Hook $settings 'Notification' "$node `"$($scripts -replace '\\','/')/arc-notify.js`" wait"
-# the fridge's git-derived "done": baseline HEAD on task creation, diff it on completion.
+# the board's git-derived "done": baseline HEAD on task creation, diff it on completion.
 # Fires in an ordinary session — no agent team, no experimental flag.
 Ensure-Hook $settings 'TaskCreated' "$node `"$($scripts -replace '\\','/')/arc-done.js`""
 Ensure-Hook $settings 'TaskCompleted' "$node `"$($scripts -replace '\\','/')/arc-done.js`""

@@ -62,13 +62,13 @@ function setStatusline(settings, command) {
 
 // arc's own core hooks, as merge entries relative to a scripts dir.
 // arc-switch-hook FIRST on UserPromptSubmit so the classifier-immune switch runs first.
-// TaskCreated/TaskCompleted drive the fridge's git-derived "done" (arc-done.js).
+// TaskCreated/TaskCompleted drive the board's git-derived "done" (arc-done.js).
 function coreHookEntries(scriptsDir) {
   const S = scriptsDir.replace(/\\/g, '/'); // forward slashes work in a hook command
   const H = [
     ['UserPromptSubmit', 'arc-switch-hook.js', ''],
     ['UserPromptSubmit', 'arc-notify.js', 'start'],
-    // arc-stop-hook BEFORE arc-notify on Stop: the fridge's second delivery point. It can
+    // arc-stop-hook BEFORE arc-notify on Stop: the board's second delivery point. It can
     // block the stop to hand over a note that landed MID-TURN (e.g. a delegate's result),
     // so the session never goes idle on top of an unread answer it asked for.
     ['Stop', 'arc-stop-hook.js', ''],

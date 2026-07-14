@@ -1,28 +1,28 @@
 #!/usr/bin/env node
 // arc-delegate: run a task HEADLESSLY on a chosen runtime and post the RESULT to the
-// fridge, so the delegating session picks it up at its next turn (or immediately, if it
+// board, so the delegating session picks it up at its next turn (or immediately, if it
 // is running the arc-watch waker).
 //
 //   node arc-delegate.js <claude|codex> <cwd> <toRole|-> <task…>
 //
 // Two delegation flavours exist, and they are NOT the same thing:
-//   • arc:note <role> <task>   → hand work to a LIVE roommate session (arc-watch wakes it)
+//   • arc:note <role> <task>   → hand work to a LIVE peer session (arc-watch wakes it)
 //   • arc:delegate <rt> <task> → fire a HEADLESS run on a chosen MODEL, report back here
 // This file is the second one. It is spawned DETACHED by the sentinel (a hook must return
 // instantly), so you keep working while the delegate runs.
 //
 // CRITICAL: the delegate runs with ARC_SESSION STRIPPED. Otherwise its own
-// UserPromptSubmit hook would inject the REQUESTER's unread fridge notes into the
+// UserPromptSubmit hook would inject the REQUESTER's unread board notes into the
 // delegate and ADVANCE THEIR CURSOR — silently stealing notes from the real session.
-// With no session id, arc-fridge.injection() returns null and the hook stays quiet.
+// With no session id, arc-notes.injection() returns null and the hook stays quiet.
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const R = require('./arc-room');
+const R = require('./arc-board');
 
-const MAX_BODY = 1200;             // fridge notes are a digest, never a dump
+const MAX_BODY = 1200;             // board notes are a digest, never a dump
 const TIMEOUT_MS = 10 * 60 * 1000; // a delegate is a task, not a residency
 
 // An ADVISOR is a READ-ONLY reviewer with a verdict contract, so its result is a trustworthy
@@ -42,7 +42,7 @@ function parseVerdict(out) {
   return m ? m[1].toUpperCase() : null;
 }
 
-// Never let the delegate inherit the requester's fridge identity (ARC_*), NOR a provider
+// Never let the delegate inherit the requester's board identity (ARC_*), NOR a provider
 // credential from the PARENT session (ANTHROPIC_*/OPENAI_*). The delegate must use only the
 // login the runtime resolves for itself, or the account arc sets in runClaude — otherwise a
 // gateway key left in the parent env could silently redirect or mis-bill the delegate.
@@ -121,33 +121,33 @@ function parseDelegateSpec(argStr) {
 // arm a waker before that session stops. The marker is the delegate's own liveness, so it
 // is removed in a `finally` — a crashed delegate must not strand a marker forever, hence
 // the expiry sweep in pendingFor() as the backstop.
-function markerDir(room) { return path.join(room.planDir, 'delegates'); }
+function markerDir(board) { return path.join(board.planDir, 'delegates'); }
 
-function writeMarker(room, rec) {
+function writeMarker(board, rec) {
   try {
-    fs.mkdirSync(markerDir(room), { recursive: true });
-    fs.writeFileSync(path.join(markerDir(room), `${rec.id}.json`), JSON.stringify(rec));
+    fs.mkdirSync(markerDir(board), { recursive: true });
+    fs.writeFileSync(path.join(markerDir(board), `${rec.id}.json`), JSON.stringify(rec));
   } catch {}
 }
-function clearMarker(room, id) {
-  try { fs.unlinkSync(path.join(markerDir(room), `${id}.json`)); } catch {}
+function clearMarker(board, id) {
+  try { fs.unlinkSync(path.join(markerDir(board), `${id}.json`)); } catch {}
 }
-function readMarkers(room) {
+function readMarkers(board) {
   let names = [];
-  try { names = fs.readdirSync(markerDir(room)); } catch { return []; }
+  try { names = fs.readdirSync(markerDir(board)); } catch { return []; }
   // RECONCILE AGAINST THE LEDGER, don't just wait for a timeout. A delegate that crashes
   // between appending its note and clearing its marker used to look "still running" for a
   // full 11 minutes, and the Stop hook would keep nagging you to arm a waker for work that
   // was already done. The note carries the delegate's id, so a finished delegate is provable.
   let done = new Set();
-  try { done = new Set(R.allNotes(room).map((n) => n.refs && n.refs.delegateId).filter(Boolean)); } catch {}
+  try { done = new Set(R.allNotes(board).map((n) => n.refs && n.refs.delegateId).filter(Boolean)); } catch {}
   const out = [];
   for (const n of names) {
     if (!n.endsWith('.json')) continue;
-    const file = path.join(markerDir(room), n);
+    const file = path.join(markerDir(board), n);
     try {
       const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (done.has(rec.id)) { fs.unlinkSync(file); continue; }                                  // its result is on the fridge → finished
+      if (done.has(rec.id)) { fs.unlinkSync(file); continue; }                                  // its result is on the board → finished
       if (Date.now() - (rec.started || 0) > TIMEOUT_MS + 60_000) { fs.unlinkSync(file); continue; } // never reported → dead
       out.push({ ...rec, file });
     } catch { try { fs.unlinkSync(file); } catch {} }   // unreadable marker = no marker
@@ -160,8 +160,8 @@ function readMarkers(room) {
 function pendingFor(session, cwd) {
   if (!session) return [];
   try {
-    const room = R.resolveRoom(cwd || process.cwd());
-    return readMarkers(room).filter((r) => r.session === session && !r.armed);
+    const board = R.resolveBoard(cwd || process.cwd());
+    return readMarkers(board).filter((r) => r.session === session && !r.armed);
   } catch { return []; }
 }
 function markArmed(pending) {
@@ -173,7 +173,7 @@ function markArmed(pending) {
 // Fire a delegate in the BACKGROUND. Used by the arc:delegate sentinel and by `arc delegate`
 // — a hook/CLI must return immediately, so we detach. The caller's identity (session, role,
 // ACCOUNT) travels as an ARGUMENT, never in the env: cleanEnv strips ARC_* so a delegate can
-// never inherit the requester's fridge cursor or account by accident.
+// never inherit the requester's board cursor or account by accident.
 //   opts: { toRole?, session?, advisor?, model?, account? }
 // Encoded as ONE json argv slot rather than a row of positional flags — the positional form
 // had grown to seven slots, which is exactly how an off-by-one lands in the wrong field.
@@ -201,22 +201,22 @@ function run(argv, runners) {
     return 2;
   }
 
-  const room = R.resolveRoom(cwd);
-  R.ensureRoom(room);
+  const board = R.resolveBoard(cwd);
+  R.ensureBoard(board);
   const started = Date.now();
   const kind = advisor ? 'advisor' : 'delegate';
   const id = `${runtime}-${started}-${process.pid}`;
-  writeMarker(room, { id, session, role: toRole, runtime, task, started, advisor });
+  writeMarker(board, { id, session, role: toRole, runtime, task, started, advisor });
   let res;
   try { res = RUN[runtime](cwd, task, { advisor, model, account }); }
   catch (e) { res = { ok: false, out: '', err: String(e && e.message), status: -1 }; }
   const secs = Math.round((Date.now() - started) / 1000);
   const verdict = advisor && res.ok ? parseVerdict(res.out) : null;
 
-  // The full run lives beside the room's other coordination state (.plan is gitignored),
+  // The full run lives beside the board's other coordination state (.plan is gitignored),
   // so the NOTE can stay a digest and still point at everything.
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const full = path.join(room.planDir, `${kind}-${runtime}-${stamp}.md`);
+  const full = path.join(board.planDir, `${kind}-${runtime}-${stamp}.md`);
   try { fs.writeFileSync(full, `# ${kind} ${runtime}${model ? ' ' + model : ''}\n\n## task\n${task}\n\n## stdout\n${res.out}\n\n## stderr\n${res.err}\n`); } catch {}
 
   const clip = (s) => (s.length > MAX_BODY ? s.slice(0, MAX_BODY) + '…' : s);
@@ -238,12 +238,12 @@ function run(argv, runners) {
   }
   // The delegate id rides on the note, so a stranded marker can be RECONCILED against the
   // ledger (see readMarkers) instead of haunting the Stop hook until it expires.
-  R.appendNote(room, { from, to: toRole, body, priority, refs: { delegateId: id } });
+  R.appendNote(board, { from, to: toRole, body, priority, refs: { delegateId: id } });
   // ORDER MATTERS: the note must exist BEFORE the marker goes. If we cleared first, a Stop
   // firing in the gap would see no note AND no in-flight delegate — and go idle with the
   // result seconds away and no waker armed. Appending first makes the gap harmless.
-  clearMarker(room, id);
-  process.stdout.write(`${res.ok ? '✓' : '✗'} ${kind} ${runtime} finished (${secs}s)${verdict ? ` — VERDICT ${verdict}` : ''} → fridge note in room "${room.name}"\n`);
+  clearMarker(board, id);
+  process.stdout.write(`${res.ok ? '✓' : '✗'} ${kind} ${runtime} finished (${secs}s)${verdict ? ` — VERDICT ${verdict}` : ''} → note on the "${board.name}" board\n`);
   return res.ok ? 0 : 1;
 }
 

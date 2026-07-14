@@ -9,7 +9,7 @@ pick an account from an arrow-key menu without spending a token, get a desktop
 toast when a session finishes, and see live rate-limit usage in your statusline.
 arc hosts ONE runtime — Claude Code. A GPT model is reachable two ways: as a
 **delegate** (`arc:delegate codex <task>` runs it headlessly via `codex exec` and drops the
-result on the fridge), or as an **account** (an Anthropic-compatible proxy serving a GPT
+result on the board), or as an **account** (an Anthropic-compatible proxy serving a GPT
 model, so `/model` swaps provider mid-conversation without the session moving).
 
 The Claude account config fits any of these setups:
@@ -37,7 +37,7 @@ The Claude account config fits any of these setups:
 - **Desktop toasts** labeled with the session's `/rename` name, with colored state icons; **click a toast to focus that terminal window**.
 - **Usage statusline** — subscription 5h/7d %, reset times, pace ETA, blink warnings near the limit; gateway cost/tokens for api accounts.
 - **Safety rails** — refuses to open one conversation in two processes (a crash cause), warns before removing an account live sessions are using, logs every launch/exit, and backs up config before every change.
-- **Headless delegation** — `arc:delegate codex <task>` runs a task on Codex (or a second Claude) while you keep working; the answer lands on the fridge and is fed to you at your next turn boundary.
+- **Headless delegation** — `arc:delegate codex <task>` runs a task on Codex (or a second Claude) while you keep working; the answer lands on the board and is fed to you at your next turn boundary.
 
 ---
 
@@ -98,7 +98,7 @@ The installer is re-runnable and idempotent: it deploys scripts + commands into
 server, generates toast icons, registers the `arc-focus:` click-to-focus protocol, and
 **merges** hooks + statusline into `settings.json` (backing it up first — never
 removing your existing entries). It also publishes the runtime-neutral
-`roommates` skill to `~/.agents/skills`; other bundled skills remain
+`peers` skill to `~/.agents/skills`; other bundled skills remain
 Claude-only.
 
 **Gateway keys:** by default `arc set-key` / the add-account wizard store the key as a
@@ -130,11 +130,11 @@ To update later: `git pull`, re-run the installer, and `arc:restart` any live se
 | `arc:trash restore <id>` (or `arc:restore <id>`) | restore a deleted conversation from trash | **0** |
 | `arc:trash empty` | **permanently** purge the trash (double-confirmed) | **0** |
 | `arc:restart` | reload the wrapper + relaunch this conversation | **0** |
-| `arc:role <name>` | claim a role in this repo's **fridge** (survives restart + switch) | **0** |
+| `arc:role <name>` | claim a role in this repo's **board** (survives restart + switch) | **0** |
 | `arc:role` | who am I, and who else is working in this repo? | **0** |
-| `arc:note <role\|all> <text>` | stick a note on the fridge for a roommate | **0** |
+| `arc:note <role\|all> <text>` | stick a note on the board for a peer | **0** |
 | `arc:notes` | read your unread notes (they also arrive automatically) | **0** |
-| `arc:notes all` | the whole fridge, nothing marked read | **0** |
+| `arc:notes all` | the whole board, nothing marked read | **0** |
 | `arc:anchors` | which doc claims about the code have gone **stale** | **0** |
 | `arc:anchors reseal` | after fixing the docs, make the current code the baseline | **0** |
 | `arc:help` (`arc:cl`) | print this cheat sheet | **0** |
@@ -148,11 +148,11 @@ runs on the exhausted account). That deadlock is exactly why `arc:switch` /
 commands — arc ships **no slash commands** now; everything is a zero-token
 `arc:` sentinel.
 
-### The fridge — two sessions, one repo
+### The board — two sessions, one repo
 
 Run a research session and a coding session on the same repo and they can't see each
-other's work. The fridge is a shared sticky-note board for exactly that: a **room** is
-the git repo root, so every `arc` session started anywhere inside it are roommates.
+other's work. The board is a shared sticky-note board for exactly that: a **board** is
+the git repo root, so every `arc` session started anywhere inside it are peers.
 
 ```
 # terminal 1                      # terminal 2
@@ -169,15 +169,15 @@ anything is waiting — counted from the files, so it can't be forgotten or wron
 
 **The agents can post too.** An agent can't *type* `arc:note` (the hook eats it before
 the model), but it can **run** the CLI form via its Bash tool — `arc note all "<line>"`,
-`arc note <role> "<line>"`, `arc role`, `arc notes`. The bundled `roommates` skill teaches
-the whole protocol: that it *has* a roommate, *when* a note is worth leaving (a shared
+`arc note <role> "<line>"`, `arc role`, `arc notes`. The bundled `peers` skill teaches
+the whole protocol: that it *has* a peer, *when* a note is worth leaving (a shared
 API/schema change, a decision, a blocker) — and, importantly, when NOT to (routine steps);
 the note **kinds** (`request` / `result` / `correction` / `blocker`); and, if the session's
-job is answering others, how to watch the fridge so a delegation wakes it. So the sessions
+job is answering others, how to watch the board so a delegation wakes it. So the sessions
 leave each other high-signal notes on their own judgment, the way agent-team teammates
 message each other. How much they may do *unprompted* is governed by `arc:mode`.
 
-Notes are never consumed. Reading one only advances *your* cursor; every other roommate
+Notes are never consumed. Reading one only advances *your* cursor; every other peer
 still sees it. The board lives in `.plan/`, which ignores itself, so it never enters the
 repo's history.
 
@@ -192,7 +192,7 @@ when the task was created and **posts the note itself**, carrying the commit sha
 changed files:
 
 ```
-#3  from coding  ✓ done: Document the fridge + done-gate in README
+#3  from coding  ✓ done: Document the board + done-gate in README
     refs: {"task":"3","sha":"a1b2c3d","files":["README.md"]}
 ```
 
@@ -221,7 +221,7 @@ printf '#!/bin/sh\nnode "$HOME/.claude/scripts/arc-postcommit.js" >/dev/null 2>&
   > .git/hooks/post-commit && chmod +x .git/hooks/post-commit
 ```
 
-It attributes the commit to the fridge role of whoever ran `git commit` (`CL_SESSION` →
+It attributes the commit to the board role of whoever ran `git commit` (`CL_SESSION` →
 role), broadcasts a note with the sha + changed files, and is a **no-op** for any commit
 made outside a arc session (so manual commits don't spam). It runs after the commit, so
 it can never block or fail it. Remove the hook file to disable.
@@ -238,7 +238,7 @@ P-014: handleLogin validates the nonce before issuing a session.
 
 arc seals the anchor the first time it sees it (hashing that symbol's block) and
 re-checks on every commit. Rewrite `handleLogin` and a **high-priority** note lands on
-the fridge — which the research session receives at the top of its next turn, ranked
+the board — which the research session receives at the top of its next turn, ranked
 above everything else, plus a desktop toast:
 
 ```
@@ -419,7 +419,7 @@ and never echoes secrets. Changes are `arc:switch`-able immediately, no restart.
   as designed. arc coordinates out-of-band via trigger files, never by intercepting
   keystrokes.
 - **One harness, not two.** arc hosts Claude Code only. Hosting a second agent meant a
-  second implementation of everything — the fridge needed a Codex-side hook, hooks needed a
+  second implementation of everything — the board needed a Codex-side hook, hooks needed a
   reverse-engineered TOML block, the statusline needed a second config format. A second
   *model* costs none of that: it arrives as an account (a proxy) or as a delegate
   (`codex exec`). The runtime adapters, the transcript transpiler and the cross-runtime
@@ -485,15 +485,15 @@ arc:delegate codex <task>      # runs headless via `codex exec`; you keep workin
 arc:delegate claude <task>     # same, on a second Claude
 ```
 
-The result lands on the fridge and is **handed to you automatically at the end of a turn** —
-you never have to go and fetch it (see *The fridge*). Requires the `codex` CLI on PATH.
+The result lands on the board and is **handed to you automatically at the end of a turn** —
+you never have to go and fetch it (see *The board*). Requires the `codex` CLI on PATH.
 Nothing is installed or configured on the Codex side: `codex exec` is a documented headless
 surface, task in, answer out.
 
 **As an account — a GPT model in Claude Code's own harness ("claudex").**
 
 Give arc a gateway that serves a GPT model on the OpenAI API (`/v1/chat/completions`), and arc
-runs Claude Code's harness on it: same session, same fridge, same hooks, same tools — only the
+runs Claude Code's harness on it: same session, same board, same hooks, same tools — only the
 model and the quota change. `arc:add-account` asks which provider first; pick **Codex / GPT**,
 give the gateway URL and key, and arc **discovers the GPT models the gateway serves** and maps
 them onto Claude Code's tiers, so `/model opus|sonnet|haiku` switches between them in-session
@@ -554,7 +554,7 @@ The repo has all the *code* but deliberately **not** your accounts or secrets
 ## Repo layout
 
 ```
-src/            wrapper + hooks, account switching, the fridge (rooms/notes/roles),
+src/            wrapper + hooks, account switching, the board (boards/notes/roles),
                 delegation, bundles, status/usage tools
 mcp/            arc MCP server (account management + pool metrics tools)
 pool/           optional pool-DB metrics tooling (pool-query, pool-neon-url)

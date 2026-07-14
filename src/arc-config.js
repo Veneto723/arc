@@ -199,7 +199,7 @@ const ENV_KEYS_VAR = 'ARC_ACCOUNT_ENV_KEYS';
 const ENV_KEY_RX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 // arc's OWN control plane is off-limits: a config that set ARC_SESSION would detach the
-// session from its fridge role and its runner. Routing/model vars are owned by the fields
+// session from its board role and its runner. Routing/model vars are owned by the fields
 // above (baseUrl / modelMap / headers) — an env map must not fight them.
 function envKeyAllowed(k) {
   return ENV_KEY_RX.test(k) && !/^ARC_/i.test(k) && !GATEWAY_VARS.includes(k);

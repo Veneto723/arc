@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// arc-stop-hook: the fridge's SECOND delivery point — the END of a turn.
+// arc-stop-hook: the board's SECOND delivery point — the END of a turn.
 //
 // UserPromptSubmit delivers notes at turn START, which means a note that arrives while
-// you are working sits on the fridge until a HUMAN types something. For a delegate you
+// you are working sits on the board until a HUMAN types something. For a delegate you
 // fired YOURSELF that is backwards: you asked for the work, so the answer should come
 // back to you — not wait for a nudge.
 //
@@ -43,8 +43,8 @@ function run(raw) {
   if (!session) return null;                       // not an arc session — stay out of the way
   const cwd = typeof hook.cwd === 'string' ? hook.cwd : process.cwd();
 
-  // 1. Anything on the fridge for me? Hand it over instead of going idle.
-  const inj = require('./arc-fridge').injection(session, cwd);
+  // 1. Anything on the board for me? Hand it over instead of going idle.
+  const inj = require('./arc-notes').injection(session, cwd);
   if (inj) {
     out({
       decision: 'block',
@@ -67,7 +67,7 @@ function run(raw) {
     reason: `[arc] ${pending.length} delegate(s) you fired are STILL RUNNING:\n  ${list}\n\n`
       + `Nothing can wake an idle session from the outside, so arm the waker before you stop:\n`
       + `  Bash tool, run_in_background: true  →  arc await${role ? ` ${role}` : ''}\n\n`
-      + `It exits the moment the result lands on the fridge, and that exit re-invokes YOU with it. `
+      + `It exits the moment the result lands on the board, and that exit re-invokes YOU with it. `
       + `Then tell the user the delegate is running and that you'll report back when it lands.`,
   });
   return 'arm';

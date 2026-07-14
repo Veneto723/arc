@@ -767,7 +767,7 @@ async function runAddWizard() {
 }
 
 // A "Codex account" in arc is NOT a second runtime (arc stopped peer-hosting the Codex TUI).
-// It is a GPT model driven inside Claude Code's OWN harness — same session, same fridge, same
+// It is a GPT model driven inside Claude Code's OWN harness — same session, same board, same
 // hooks — only the model and the quota change. You supply a GATEWAY that serves a GPT model on
 // the OpenAI API (/v1/chat/completions); arc runs a LOCAL translator (arc-claudex-proxy) that
 // turns Claude Code's Anthropic /v1/messages into that, and points this account at the
@@ -1247,13 +1247,13 @@ async function main() {
   if (userArgs[0] === 'set-key') return cmdSetKey(userArgs.slice(1));
   if (userArgs[0] === 'doctor') return cmdDoctor();
 
-  // Fridge CLI — the AGENT-facing way to leave a roommate a note. The `arc:note`
+  // Board CLI — the AGENT-facing way to leave a peer a note. The `arc:note`
   // sentinel is eaten by the UserPromptSubmit hook before the model, so an agent can
   // never TYPE it; but it can RUN `arc note ...` via its Bash tool, which lands here in a
-  // fresh process (no session restart needed). Reuses the same arc-fridge functions the
+  // fresh process (no session restart needed). Reuses the same arc-notes functions the
   // sentinels do. Output mirrors the CLI form (`arc note`, not `arc:note`).
   // `arc delegate <claude|codex> [--advisor] [--model <id>] <task>` — the terminal/AGENT form
-  // of arc:delegate. Fires a HEADLESS run in the background; the result/verdict lands on the fridge.
+  // of arc:delegate. Fires a HEADLESS run in the background; the result/verdict lands on the board.
   if (userArgs[0] === 'delegate') {
     const D = require('./arc-delegate');
     const spec = D.parseDelegateSpec(userArgs.slice(1).join(' '));
@@ -1264,14 +1264,14 @@ async function main() {
         + '  (a claude delegate runs on THIS session\'s account by default; --account offloads it elsewhere)\n');
       process.exit(1);
     }
-    const room = require('./arc-room').resolveRoom(process.cwd());
+    const board = require('./arc-board').resolveBoard(process.cwd());
     const session = process.env.ARC_SESSION || '';
-    const myRole = require('./arc-fridge').getRole(session, room);
+    const myRole = require('./arc-notes').getRole(session, board);
     const account = spec.account || process.env.ARC_RUNTIME_ACCOUNT || null;   // quota follows the caller
-    D.spawnDelegate(spec.runtime, room.root, spec.task, { toRole: myRole, session, advisor: spec.advisor, model: spec.model, account });
+    D.spawnDelegate(spec.runtime, board.root, spec.task, { toRole: myRole, session, advisor: spec.advisor, model: spec.model, account });
     const on = (spec.runtime === 'claude' && account) ? ` on "${account}"` : '';
     const what = spec.advisor ? `asked ${spec.runtime} to REVIEW` : `delegated to ${spec.runtime}`;
-    process.stdout.write(`[arc] ${what}${spec.model ? ` (${spec.model})` : ''}${on} (background) — the ${spec.advisor ? 'verdict' : 'result'} will land on the fridge`
+    process.stdout.write(`[arc] ${what}${spec.model ? ` (${spec.model})` : ''}${on} (background) — the ${spec.advisor ? 'verdict' : 'result'} will land on the board`
       + (myRole ? ` for "${myRole}"` : ' as a broadcast') + `. Read it with \`arc notes\`.\n`);
     return;
   }
@@ -1303,13 +1303,13 @@ async function main() {
     return;
   }
   if (userArgs[0] === 'role' || userArgs[0] === 'note' || userArgs[0] === 'notes') {
-    const fridge = require('./arc-fridge');
+    const board = require('./arc-notes');
     const session = process.env.ARC_SESSION || '';
     const arg = userArgs.slice(1).join(' ');
     const cwd = process.cwd();
-    const r = userArgs[0] === 'role' ? fridge.requestRole(session, arg, cwd)
-      : userArgs[0] === 'note' ? fridge.requestNote(session, arg, cwd)
-        : fridge.requestNotes(session, arg, cwd);
+    const r = userArgs[0] === 'role' ? board.requestRole(session, arg, cwd)
+      : userArgs[0] === 'note' ? board.requestNote(session, arg, cwd)
+        : board.requestNotes(session, arg, cwd);
     const msg = String(r.message)
       .replace(/arc:role/g, 'arc role').replace(/arc:notes/g, 'arc notes').replace(/arc:note/g, 'arc note');
     process.stdout.write(msg + '\n');
@@ -1490,14 +1490,14 @@ async function main() {
     }
 
     writeState({ account, switchCount, convId, pinnedEffort });
-    // The fridge role survives /restart and /switch the same way model + effort do.
-    // A restart re-execs this wrapper with a NEW pid, so the role's lease would point
+    // The board role survives /restart and /switch the same way model + effort do.
+    // A restart re-execs this wrapper with a NEW pid, so the role's claim would point
     // at a dead process and another session could steal it — re-assert it here.
     // Pass the CONVERSATION: a relaunch mints a new ARC_SESSION, so the role must be adopted
-    // from the conversation's vacant lease — otherwise this session silently receives nothing.
+    // from the conversation's vacant claim — otherwise this session silently receives nothing.
     try {
-      const rr = require('./arc-fridge').refreshRole(SESSION_ID, process.pid, process.cwd(), convId);
-      if (rr && rr.adopted) process.stdout.write(`\x1b[2m[arc] resumed as "${rr.role}" in room "${rr.room}" (role follows the conversation)\x1b[0m\n`);
+      const rr = require('./arc-notes').refreshRole(SESSION_ID, process.pid, process.cwd(), convId);
+      if (rr && rr.adopted) process.stdout.write(`\x1b[2m[arc] resumed as "${rr.role}" on the "${rr.board}" board (role follows the conversation)\x1b[0m\n`);
     } catch {}
     // Seed the sticky baseline with what we ACTUALLY applied, so the statusline
     // never claims an effort the session isn't really at.

@@ -1,29 +1,30 @@
-// arc-room: the "fridge" — a per-room, append-only sticky-note ledger shared by the
-// arc sessions working in the same place.
+// arc-board: the BOARD — an append-only sticky-note ledger shared by the arc sessions
+// working in the same place. Sessions that share a board are PEERS; each occupies a ROLE
+// by writing a CLAIM. Those four words are the whole vocabulary.
 //
-// ROOM = the git repo root of the session's cwd (canonicalised), else the literal
-// folder. Two sessions started anywhere inside E:\whalephone are roommates. Want a
+// A BOARD = the git repo root of the session's cwd (canonicalised), else the literal
+// folder. Two sessions started anywhere inside E:\whalephone are peers. Want a
 // second pair on one repo? Give it a git worktree — a different folder is a
-// different room, so the FILESYSTEM does the isolation, not a config field.
+// different board, so the FILESYSTEM does the isolation, not a config field.
 //
-// The room follows the session's CURRENT cwd, which Claude Code reports per prompt
+// The board follows the session's CURRENT cwd, which Claude Code reports per prompt
 // and which can DRIFT. Moving around inside a repo is harmless (we walk up to the
-// git root), but `cd`-ing into a DIFFERENT repo genuinely changes rooms — the role
-// claimed in the old room stops applying, and `arc:role` will say you have none.
+// git root), but `cd`-ing into a DIFFERENT repo genuinely changes boards — the role
+// claimed in the old board stops applying, and `arc:role` will say you have none.
 // That is intended ("you moved flats"), but it is surprising, so: documented.
 //
 // Design notes (each one earned; see docs/research/agent-handoff/SUMMARY.md):
 //  * APPEND-ONLY, never consumed. Linda tuple spaces distinguish rd() (read, tuple
 //    stays) from in() (take, tuple removed). This is rd()-only: a note is never
 //    removed, only a per-role CURSOR advances. "Done" facts stay auditable forever.
-//  * NO seq FIELD. A note's seq IS its 1-based line number. Two roommates appending
+//  * NO seq FIELD. A note's seq IS its 1-based line number. Two peers appending
 //    concurrently would both compute "last+1" and collide; a line's position cannot
 //    collide. Cursor = how many lines that role has read.
-//  * NO LOCKING, NO GIT CAS. Roommates share one working directory, so they share
+//  * NO LOCKING, NO GIT CAS. Peers share one working directory, so they share
 //    one file on one filesystem: single-line O_APPEND writes are atomic between
 //    processes. (git compare-and-swap only mattered for writers in different
-//    clones/worktrees — which are, by definition, different rooms.)
-//  * SELF-IGNORING. .plan/.gitignore is "*", so the fridge never enters the
+//    clones/worktrees — which are, by definition, different boards.)
+//  * SELF-IGNORING. .plan/.gitignore is "*", so the board never enters the
 //    project's history and the project's own .gitignore never learns it exists.
 'use strict';
 
@@ -34,18 +35,18 @@ const path = require('path');
 const PLAN_DIR = '.plan';
 const NOTES = 'notes.jsonl';
 const GITIGNORE_BODY =
-  '# The fridge: cross-session sticky notes. Coordination scratch, not a project\n' +
+  '# The board: cross-session sticky notes. Coordination scratch, not a project\n' +
   '# artifact — this ignores the whole .plan/ area (including this file), so the\n' +
   "# project's own .gitignore never needs to know it exists.\n" +
   '*\n';
 
-// ---- room resolution ---------------------------------------------------------
-// Canonicalise so E:\WhalePhone, e:\whalephone and a junction all name one room.
+// ---- board resolution ---------------------------------------------------------
+// Canonicalise so E:\WhalePhone, e:\whalephone and a junction all name one board.
 function canonical(p) {
   let out = p;
   try { out = fs.realpathSync.native(p); } catch { out = path.resolve(p); }
   out = path.resolve(out);
-  return out.toLowerCase();   // Windows FS is case-insensitive: one room per path, any case
+  return out.toLowerCase();   // Windows FS is case-insensitive: one board per path, any case
 }
 
 // Walk up for a .git (dir OR file — worktrees use a .git *file*). Fall back to cwd.
@@ -54,30 +55,43 @@ function repoRoot(startDir) {
   for (;;) {
     if (fs.existsSync(path.join(dir, '.git'))) return dir;
     const up = path.dirname(dir);
-    if (up === dir) return path.resolve(startDir); // no repo — the folder IS the room
+    if (up === dir) return path.resolve(startDir); // no repo — the folder IS the board
     dir = up;
   }
 }
 
-// The room a session started in `cwd` belongs to.
-function resolveRoom(cwd) {
+// The board a session started in `cwd` belongs to.
+function resolveBoard(cwd) {
   const root = canonical(repoRoot(cwd || process.cwd()));
-  // basename of a drive root ("e:\") is "" — fall back to the path so a room is
+  // basename of a drive root ("e:\") is "" — fall back to the path so a board is
   // never nameless. (Yes, people really do keep a git repo at a drive root.)
   return { root, planDir: path.join(root, PLAN_DIR), name: path.basename(root) || root };
 }
 
 // Create .plan/ + its self-ignore. Idempotent; cheap to call every time.
-function ensureRoom(room) {
-  fs.mkdirSync(room.planDir, { recursive: true });
-  const gi = path.join(room.planDir, '.gitignore');
+function ensureBoard(board) {
+  fs.mkdirSync(board.planDir, { recursive: true });
+  const gi = path.join(board.planDir, '.gitignore');
   if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE_BODY);
-  return room;
+  return board;
 }
 
-const notesPath = (room) => path.join(room.planDir, NOTES);
-const cursorPath = (room, role) => path.join(room.planDir, `cursor-${role}.json`);
-const leasePath = (room, role) => path.join(room.planDir, `lease-${role}.json`);
+const notesPath = (board) => path.join(board.planDir, NOTES);
+const cursorPath = (board, role) => path.join(board.planDir, `cursor-${role}.json`);
+const claimPath = (board, role) => path.join(board.planDir, `claim-${role}.json`);
+// LEGACY: a claim used to be called a "lease" (before the board/peer/claim rename). A session
+// that is LIVE RIGHT NOW may still be holding one — and an invisible claim is not a cosmetic
+// problem: a second session would see the role as vacant, take it, and the two would share a
+// cursor and eat each other's notes, which is the exact failure claims exist to prevent. So
+// every READ accepts both names, and a fresh claim migrates the old file away.
+const legacyClaimPath = (board, role) => path.join(board.planDir, `lease-${role}.json`);
+const CLAIM_FILE_RX = /^(?:claim|lease)-(.+)\.json$/;
+function readClaimFile(board, role) {
+  for (const p of [claimPath(board, role), legacyClaimPath(board, role)]) {
+    try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* try the next name */ }
+  }
+  return null;
+}
 
 // ---- notes -------------------------------------------------------------------
 // One line = one note. `seq` is the 1-based line number, assigned at READ time.
@@ -104,8 +118,8 @@ function normalizeKind(k) {
 }
 const asSeq = (v) => { const n = parseInt(v, 10); return Number.isInteger(n) && n > 0 ? n : undefined; };
 
-function appendNote(room, note) {
-  ensureRoom(room);
+function appendNote(board, note) {
+  ensureBoard(board);
   const rec = {
     ts: new Date().toISOString(),
     from: String(note.from || 'unknown'),
@@ -127,14 +141,14 @@ function appendNote(room, note) {
   if (rec.kind === 'blocker' || rec.kind === 'correction') rec.priority = 'high';
   for (const k of Object.keys(rec)) if (rec[k] === undefined) delete rec[k];
   // Single-line O_APPEND: atomic between processes on one filesystem.
-  fs.appendFileSync(notesPath(room), JSON.stringify(rec) + '\n');
+  fs.appendFileSync(notesPath(board), JSON.stringify(rec) + '\n');
   return rec;
 }
 
 // seq -> the note that RETRACTED it (or undefined). Derived from the ledger, so it cannot lie
 // and needs no back-writing: history stays append-only.
-function supersededMap(room, all) {
-  const notes = all || allNotes(room);
+function supersededMap(board, all) {
+  const notes = all || allNotes(board);
   const m = new Map();
   for (const n of notes) if (n.supersedes) m.set(n.supersedes, n);   // last writer wins
   return m;
@@ -142,20 +156,20 @@ function supersededMap(room, all) {
 
 // A `request` with no `result`/`correction` replying to it: asked, and never answered. This is
 // the thing that used to scroll silently away.
-function openRequests(room, role) {
-  const all = allNotes(room);
+function openRequests(board, role) {
+  const all = allNotes(board);
   const answered = new Set(all.filter((n) => n.replyTo).map((n) => n.replyTo));
   return all.filter((n) => n.kind === 'request' && !answered.has(n.seq)
     && (!role || n.from === role || n.to === role || n.to == null));
 }
 
 // Every note answering `seq`, oldest first — the thread under a request.
-function repliesTo(room, seq, all) {
-  return (all || allNotes(room)).filter((n) => n.replyTo === seq);
+function repliesTo(board, seq, all) {
+  return (all || allNotes(board)).filter((n) => n.replyTo === seq);
 }
 
-function allNotes(room) {
-  let raw; try { raw = fs.readFileSync(notesPath(room), 'utf8'); } catch { return []; }
+function allNotes(board) {
+  let raw; try { raw = fs.readFileSync(notesPath(board), 'utf8'); } catch { return []; }
   const out = [];
   raw.split('\n').forEach((line, i) => {
     if (!line.trim()) return;
@@ -164,12 +178,12 @@ function allNotes(room) {
   return out;
 }
 
-function noteCount(room) { return allNotes(room).length; }
+function noteCount(board) { return allNotes(board).length; }
 
 // Highest physical record position, including a torn line. Cursors are positions
 // in the append-only file, not counts of successfully parsed notes.
-function latestSeq(room) {
-  let raw; try { raw = fs.readFileSync(notesPath(room), 'utf8'); } catch { return 0; }
+function latestSeq(board) {
+  let raw; try { raw = fs.readFileSync(notesPath(board), 'utf8'); } catch { return 0; }
   let latest = 0;
   raw.split('\n').forEach((line, i) => { if (line.trim()) latest = i + 1; });
   return latest;
@@ -177,19 +191,19 @@ function latestSeq(room) {
 
 // ---- cursors (rd()-only: nothing is consumed, the cursor just advances) --------
 // Keyed by ROLE, not session id — a restarted terminal gets a new session id but is
-// still "coding in this room", and must resume where it left off, not re-read all.
-function readCursor(room, role) {
-  try { return JSON.parse(fs.readFileSync(cursorPath(room, role), 'utf8')).seq || 0; }
+// still "coding in this board", and must resume where it left off, not re-read all.
+function readCursor(board, role) {
+  try { return JSON.parse(fs.readFileSync(cursorPath(board, role), 'utf8')).seq || 0; }
   catch { return 0; }
 }
-function writeCursor(room, role, seq) {
-  ensureRoom(room);
-  atomicWriteJson(cursorPath(room, role), { seq, at: Date.now() });
+function writeCursor(board, role, seq) {
+  ensureBoard(board);
+  atomicWriteJson(cursorPath(board, role), { seq, at: Date.now() });
   return seq;
 }
 
 // ---- atomic state writes + a claim lock ---------------------------------------
-// A lease or cursor written with a bare writeFileSync can be TORN by a crash mid-write,
+// A claim or cursor written with a bare writeFileSync can be TORN by a crash mid-write,
 // and a check-then-write claim lets TWO sessions both "win" the same role — after which
 // they share a cursor and silently eat each other's notes (the exact failure this whole
 // design exists to prevent). So: every state write is tmp -> fsync -> rename, and the
@@ -207,10 +221,10 @@ function atomicWriteJson(file, obj) {
 }
 
 // mkdir is atomic on Windows AND POSIX — the portable lock. A crashed holder must never
-// wedge the room, so a lock older than LOCK_STALE_MS is broken rather than waited on.
+// wedge the board, so a lock older than LOCK_STALE_MS is broken rather than waited on.
 const LOCK_STALE_MS = 10_000;
-function withLock(room, name, fn) {
-  const lock = path.join(room.planDir, `.lock-${name}`);
+function withLock(board, name, fn) {
+  const lock = path.join(board.planDir, `.lock-${name}`);
   const deadline = Date.now() + 3000;
   for (;;) {
     try { fs.mkdirSync(lock); break; }
@@ -225,10 +239,10 @@ function withLock(room, name, fn) {
 }
 
 // What `role` hasn't seen: addressed to it, or broadcast; never its own notes.
-function unreadFor(room, role) {
-  const all = allNotes(room);
-  const latest = latestSeq(room);
-  let cursor = readCursor(room, role);
+function unreadFor(board, role) {
+  const all = allNotes(board);
+  const latest = latestSeq(board);
+  let cursor = readCursor(board, role);
   // FAIL-OPEN: a cursor past the end means the ledger was truncated or rewritten
   // (it is supposed to be append-only). Re-read from the start rather than silently
   // skipping notes — a duplicate note is noise; a missed one is the bug this whole
@@ -241,43 +255,42 @@ function unreadFor(room, role) {
 }
 
 // Advance past everything currently in the ledger (called after injection).
-function markRead(room, role) { return writeCursor(room, role, latestSeq(room)); }
+function markRead(board, role) { return writeCursor(board, role, latestSeq(board)); }
 
-// ---- role lease --------------------------------------------------------------
-// Cursors are keyed by role, so TWO live "coding" sessions in one room would share
-// a cursor and steal each other's notes. At most one live holder per (room, role).
+// ---- role claim --------------------------------------------------------------
+// Cursors are keyed by role, so TWO live "coding" sessions in one board would share
+// a cursor and steal each other's notes. At most one live holder per (board, role).
 function isAlive(pid) {
   if (!pid) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-function roleHolder(room, role) {
-  try {
-    const l = JSON.parse(fs.readFileSync(leasePath(room, role), 'utf8'));
-    return isAlive(l.pid) ? l : null;   // a dead holder's lease is vacant
-  } catch { return null; }
+function roleClaim(board, role) {
+  const l = readClaimFile(board, role);          // claim-*.json, or a legacy lease-*.json
+  return l && isAlive(l.pid) ? l : null;        // a dead holder's claim is vacant
 }
 
 // Returns {ok:true} if claimed, or {ok:false, holder} if a LIVE *other* session holds it.
 // IDENTITY IS THE SESSION, NOT THE PID: `arc:restart` re-execs arc-runner with a NEW pid
 // but the SAME ARC_SESSION, and must be able to reclaim its own role. The pid is only
-// a liveness probe. (Fall back to pid comparison for leases written without a session.)
+// a liveness probe. (Fall back to pid comparison for claims written without a session.)
 // The check and the write happen UNDER A LOCK: without it, two sessions claiming the same
 // role at once both read "vacant" and both write — both believe they hold it, then share a
 // cursor and eat each other's notes. `convId` records WHICH CONVERSATION took the role, so a
-// later session resuming that same conversation can pick it back up (see vacantLeaseForConv).
-function claimRole(room, role, pid, sessionId, convId) {
-  ensureRoom(room);
+// later session resuming that same conversation can pick it back up (see vacantClaimForConv).
+function claimRole(board, role, pid, sessionId, convId) {
+  ensureBoard(board);
   try {
-    return withLock(room, `role-${role}`, () => {
-      const held = roleHolder(room, role);
+    return withLock(board, `role-${role}`, () => {
+      const held = roleClaim(board, role);
       if (held) {
         const same = (sessionId && held.sessionId) ? held.sessionId === sessionId : held.pid === pid;
         if (!same) return { ok: false, holder: held };
       }
       // don't lose a previously-recorded conversation when this claim doesn't name one
       const conv = convId || (held && held.convId) || null;
-      atomicWriteJson(leasePath(room, role), { role, pid, sessionId: sessionId || null, convId: conv, at: Date.now() });
+      atomicWriteJson(claimPath(board, role), { role, pid, sessionId: sessionId || null, convId: conv, at: Date.now() });
+      try { fs.unlinkSync(legacyClaimPath(board, role)); } catch {}   // migrate off the old name
       return { ok: true };
     });
   } catch (e) {
@@ -285,46 +298,46 @@ function claimRole(room, role, pid, sessionId, convId) {
   }
 }
 
-// The lease this CONVERSATION was working under, now vacant (its session died). That is the
+// The claim this CONVERSATION was working under, now vacant (its session died). That is the
 // role a resumed conversation should pick back up: a relaunch mints a NEW ARC_SESSION, so the
 // role would otherwise be silently lost and the session would stop receiving notes entirely.
-function vacantLeaseForConv(room, convId) {
+function vacantClaimForConv(board, convId) {
   if (!convId) return null;
   let files = [];
-  try { files = fs.readdirSync(room.planDir); } catch { return null; }
+  try { files = fs.readdirSync(board.planDir); } catch { return null; }
   for (const f of files) {
-    if (!/^lease-.+\.json$/.test(f)) continue;
+    if (!CLAIM_FILE_RX.test(f)) continue;   // a legacy lease-*.json is still OUR claim
     try {
-      const l = JSON.parse(fs.readFileSync(path.join(room.planDir, f), 'utf8'));
+      const l = JSON.parse(fs.readFileSync(path.join(board.planDir, f), 'utf8'));
       if (l.convId && l.convId === convId && !isAlive(l.pid)) return l;   // ours, and vacant
-    } catch { /* torn lease = no lease */ }
+    } catch { /* torn claim = no claim */ }
   }
   return null;
 }
 
-// Who else is live in this flat right now (dead leases are ignored, not deleted —
-// a crashed session's lease just goes vacant).
-function liveRoles(room) {
-  let files = []; try { files = fs.readdirSync(room.planDir); } catch { return []; }
+// Who else is live in this flat right now (dead claims are ignored, not deleted —
+// a crashed session's claim just goes vacant).
+function liveRoles(board) {
+  let files = []; try { files = fs.readdirSync(board.planDir); } catch { return []; }
   return files
-    .filter((f) => /^lease-.+\.json$/.test(f))
-    .map((f) => roleHolder(room, f.slice(6, -5)))
+    .map((f) => (f.match(CLAIM_FILE_RX) || [])[1])
+    .filter((r, i, a) => r && a.indexOf(r) === i)   // one role may have BOTH names mid-migration
+    .map((r) => roleClaim(board, r))
     .filter(Boolean);
 }
 
-function releaseRole(room, role, pid) {
-  try {
-    const l = JSON.parse(fs.readFileSync(leasePath(room, role), 'utf8'));
-    if (l.pid === pid) fs.unlinkSync(leasePath(room, role));
-  } catch {}
+function releaseRole(board, role, pid) {
+  for (const p of [claimPath(board, role), legacyClaimPath(board, role)]) {
+    try { if (JSON.parse(fs.readFileSync(p, 'utf8')).pid === pid) fs.unlinkSync(p); } catch {}
+  }
 }
 
 module.exports = {
   PLAN_DIR, GITIGNORE_BODY,
-  canonical, repoRoot, resolveRoom, ensureRoom,
+  canonical, repoRoot, resolveBoard, ensureBoard,
   notesPath, appendNote, allNotes, noteCount, latestSeq,
   KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo,
   readCursor, writeCursor, unreadFor, markRead,
-  isAlive, roleHolder, claimRole, releaseRole, liveRoles,
-  atomicWriteJson, withLock, vacantLeaseForConv,
+  isAlive, roleClaim, claimRole, releaseRole, liveRoles,
+  atomicWriteJson, withLock, vacantClaimForConv,
 };

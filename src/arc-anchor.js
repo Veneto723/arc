@@ -15,7 +15,7 @@
 // The FIRST time arc sees an anchor it seals it: it resolves the symbol, hashes the
 // block, and remembers the hash in .plan/anchor-state.json. Afterwards, whenever the
 // repo moves, it re-resolves. If the block's hash changed, or the symbol vanished, or
-// the file is gone, a HIGH-PRIORITY note lands on the fridge — which the research
+// the file is gone, a HIGH-PRIORITY note lands on the board — which the research
 // session then receives at the top of its next turn, without asking.
 //
 // WHY NOT AN AST. fiberplane/drift resolves anchors with tree-sitter, which is the
@@ -41,7 +41,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
-const R = require('./arc-room');
+const R = require('./arc-board');
 
 const STATE = 'anchor-state.json';
 const MAX_ANCHORS = 200;      // an alarm, not an index
@@ -52,14 +52,14 @@ const GIT_TIMEOUT = 4000;
 // for the token. The path may not contain whitespace or '#'.
 const ANCHOR_RX = /arc:anchor\s+([^\s#]+)#([A-Za-z_$][\w$-]*)/g;
 
-const statePath = (room) => path.join(room.planDir, STATE);
+const statePath = (board) => path.join(board.planDir, STATE);
 const anchorKey = (a) => `${a.doc}|${a.file}#${a.symbol}`;
 
-function readState(room) {
-  try { return JSON.parse(fs.readFileSync(statePath(room), 'utf8')); } catch { return { lastHead: null, anchors: {} }; }
+function readState(board) {
+  try { return JSON.parse(fs.readFileSync(statePath(board), 'utf8')); } catch { return { lastHead: null, anchors: {} }; }
 }
-function writeState(room, st) {
-  try { R.ensureRoom(room); fs.writeFileSync(statePath(room), JSON.stringify(st, null, 2)); return true; } catch { return false; }
+function writeState(board, st) {
+  try { R.ensureBoard(board); fs.writeFileSync(statePath(board), JSON.stringify(st, null, 2)); return true; } catch { return false; }
 }
 
 // ---- parsing ------------------------------------------------------------------
@@ -159,11 +159,11 @@ function checkAnchor(root, a) {
   return { ...a, status: 'ok', hash: hashSlice(found.slice), startLine: found.startLine };
 }
 
-// Read every anchor in the room and classify it against the sealed state.
+// Read every anchor in the board and classify it against the sealed state.
 // Pure-ish: returns the report AND the next state; the caller decides to persist.
-function inspect(room) {
-  const root = room.root;
-  const st = readState(room);
+function inspect(board) {
+  const root = board.root;
+  const st = readState(board);
   const docs = anchorDocs(root);
   const anchors = [];
   for (const d of docs) {
@@ -231,18 +231,18 @@ function noteFor(r, role) {
 // Run the check and post a [!] note for each anchor that has JUST gone stale.
 // Only newly-stale ones: an anchor that was already stale stays quiet until it is fixed
 // or the code changes again, otherwise every completion would re-nag about the same doc.
-function checkAndNotify(room, role, opts = {}) {
-  const { results, next, headChanged } = inspect(room);
+function checkAndNotify(board, role, opts = {}) {
+  const { results, next, headChanged } = inspect(board);
   if (!opts.force && !headChanged) return { checked: 0, posted: 0, skipped: 'head-unchanged' };
 
   const newlyStale = results.filter((r) => STALE_STATUSES.has(r.status) && !r.wasStale);
   let posted = 0;
   if (role) {
     for (const r of newlyStale) {
-      try { R.appendNote(room, noteFor(r, role)); posted++; } catch {}
+      try { R.appendNote(board, noteFor(r, role)); posted++; } catch {}
     }
   }
-  writeState(room, next);
+  writeState(board, next);
 
   // A [!] note is the one kind that shouldn't wait for the recipient's next turn to be
   // noticed — the docs are wrong RIGHT NOW, and the other session may be mid-task on
@@ -266,22 +266,22 @@ const MARK = {
 };
 
 function requestAnchors(session, arg, cwd) {
-  const room = R.resolveRoom(cwd || process.cwd());
-  if (!gitHead(room.root)) {
-    return { ok: false, message: `room "${room.name}" is not a git repo — anchors need one.` };
+  const board = R.resolveBoard(cwd || process.cwd());
+  if (!gitHead(board.root)) {
+    return { ok: false, message: `board "${board.name}" is not a git repo — anchors need one.` };
   }
   const wantReseal = String(arg || '').trim().toLowerCase() === 'reseal';
-  const { results, next } = inspect(room);
+  const { results, next } = inspect(board);
   if (wantReseal) {
     for (const k of Object.keys(next.anchors)) next.anchors[k].stale = false;
-    writeState(room, next);
+    writeState(board, next);
     return { ok: true, plain: true, message:
-      `arc anchors — room "${room.name}"\n  resealed ${results.length} anchor(s): the current code is now the baseline.` };
+      `arc anchors — board "${board.name}"\n  resealed ${results.length} anchor(s): the current code is now the baseline.` };
   }
-  writeState(room, next);
+  writeState(board, next);
   if (!results.length) {
     return { ok: true, plain: true, message:
-      `arc anchors — room "${room.name}"\n  no anchors found.\n`
+      `arc anchors — board "${board.name}"\n  no anchors found.\n`
       + '  Put one next to a claim in a doc:  <!-- arc:anchor src/auth.ts#handleLogin -->' };
   }
   const rows = results.map((r) =>
@@ -289,7 +289,7 @@ function requestAnchors(session, arg, cwd) {
     + (r.status === 'ok' || r.status === 'sealed' ? `  (line ${r.startLine})` : `  — ${REASON[r.status]}`));
   const stale = results.filter((r) => STALE_STATUSES.has(r.status)).length;
   return { ok: true, plain: true, message:
-    `arc anchors — room "${room.name}"   ${results.length} anchor(s), ${stale} stale\n${rows.join('\n')}\n`
+    `arc anchors — board "${board.name}"   ${results.length} anchor(s), ${stale} stale\n${rows.join('\n')}\n`
     + (stale ? '  fix the docs, then:  arc:anchors reseal\n' : '') };
 }
 

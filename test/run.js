@@ -8,7 +8,7 @@
 //
 // Two sections:
 //   • CORE — asserts the engine (config, per-account credential isolation, trash,
-//     peek, gateway usage, the fridge). A failure here fails the build.
+//     peek, gateway usage, the board). A failure here fails the build.
 //   • PROBE — reports environment touchpoints (junction support, claude bin).
 //     Informational only — it never fails the build.
 'use strict';
@@ -205,9 +205,9 @@ try {
   ok('veneto exhausted via its own 5h (96 >= 92)', core.accountHeadroom(A, keyed, TH, cfg2) === -1);
   ok('whale exhausted via its own 7d (96 >= 95)', core.accountHeadroom(B, keyed, TH, cfg2) === -1);
 
-  // A healthy account must keep its headroom even when its roommate is exhausted.
+  // A healthy account must keep its headroom even when its peer is exhausted.
   const mixed = { usageByAccount: { veneto: slice(10, 10), whale: slice(99, 99) } };
-  ok('healthy account keeps headroom while roommate is exhausted',
+  ok('healthy account keeps headroom while peer is exhausted',
     core.accountHeadroom(A, mixed, {}, cfg2) === 90 && core.accountHeadroom(B, mixed, {}, cfg2) === -1);
   ok('auto-select picks the account that actually has headroom',
     (core.chooseLaunchAccount(cfg2, mixed) || {}).id === 'veneto');
@@ -569,11 +569,11 @@ try {
     return !new RegExp(`Ensure-Hook \\$settings '${ev}'[^\\n]*${sc.replace('.', '\\.')}`).test(ps);
   });
   ok(`install.ps1 wires every hook arc-wire-settings does (${events.length})`, missing.length === 0, `missing: ${missing.join(', ')}`);
-  ok('installer publishes the roommate skill at the shared agent path',
-    ps.includes("'.agents\\skills'") && ps.includes("'skills\\roommates\\*'"));
+  ok('installer publishes the peer skill at the shared agent path',
+    ps.includes("'.agents\\skills'") && ps.includes("'skills\\peers\\*'"));
   // the merged skill superseded two others — a stale copy would keep teaching the old split
   ok('installer sweeps the superseded skills it replaced',
-    ps.includes("'share-with-roommate', 'fridge-responder'") && /Remove-Item -Recurse -Force \$p/.test(ps));
+    ps.includes("'share-with-roommate', 'fridge-responder', 'roommates'") && /Remove-Item -Recurse -Force \$p/.test(ps));
   // idempotent: a second run must not duplicate hooks
   spawnSync(process.execPath, [wire, scriptsDir], { encoding: 'utf8' });
   const s2 = JSON.parse(fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8'));
@@ -592,7 +592,7 @@ try {
 section('arc-anchor (doc/code staleness)');
 try {
   const A = require(path.join(SRC, 'arc-anchor.js'));
-  const RM = require(path.join(SRC, 'arc-room.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
   const { execFileSync } = require('child_process');
 
   // --- parsing ---
@@ -639,72 +639,72 @@ try {
     '<!-- arc:anchor src/auth.js#handleLogin -->\nhandleLogin validates the request.\n');
   g('add', '-A'); g('commit', '-qm', 'seed');
 
-  const room = RM.resolveRoom(repo);
-  ok('git grep finds the anchored doc', A.anchorDocs(room.root).includes('docs/plan.md'));
+  const board = RM.resolveBoard(repo);
+  ok('git grep finds the anchored doc', A.anchorDocs(board.root).includes('docs/plan.md'));
   // an UNCOMMITTED doc still makes claims about the code — --untracked, not just tracked
   fs.writeFileSync(path.join(repo, 'docs', 'draft.md'), '<!-- arc:anchor src/auth.js#handleLogin -->\n');
-  ok('and finds an uncommitted one too', A.anchorDocs(room.root).includes('docs/draft.md'));
+  ok('and finds an uncommitted one too', A.anchorDocs(board.root).includes('docs/draft.md'));
   fs.rmSync(path.join(repo, 'docs', 'draft.md'));
   // …but never an ignored one
   fs.writeFileSync(path.join(repo, '.gitignore'), 'secret/\n');
   fs.mkdirSync(path.join(repo, 'secret'));
   fs.writeFileSync(path.join(repo, 'secret', 'x.md'), '<!-- arc:anchor src/auth.js#handleLogin -->\n');
-  ok('ignored paths are never scanned', !A.anchorDocs(room.root).some((d) => d.startsWith('secret/')));
+  ok('ignored paths are never scanned', !A.anchorDocs(board.root).some((d) => d.startsWith('secret/')));
   fs.rmSync(path.join(repo, 'secret'), { recursive: true, force: true });
   fs.rmSync(path.join(repo, '.gitignore'));
 
-  let rep = A.inspect(room);
+  let rep = A.inspect(board);
   ok('first sighting SEALS the anchor', rep.results.length === 1 && rep.results[0].status === 'sealed');
-  A.writeState(room, rep.next);
+  A.writeState(board, rep.next);
 
   // A doc EXAMPLE (`arc:anchor src/auth.ts#handleLogin` in a README) points at nothing
   // and never has. It must never nag — cl-kit's own README contains exactly this.
   fs.writeFileSync(path.join(repo, 'docs', 'readme.md'),
     'Put one next to a claim: <!-- arc:anchor src/nowhere.ts#imaginary -->\n');
   g('add', '-A'); g('commit', '-qm', 'add a doc with an example anchor');
-  const ex = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+  const ex = A.checkAndNotify(board, 'coding', { force: true, quiet: true });
   const exRes = ex.results.find((r) => r.symbol === 'imaginary');
   ok('a never-resolved anchor is "unresolved", not stale', exRes.status === 'unresolved');
   ok('and posts no note (a doc example must not nag)', ex.posted === 0);
   // Regression: the `unresolved` state entry must not count as "previously sealed",
   // or the example flips to stale on the SECOND run and nags forever.
-  const ex2 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+  const ex2 = A.checkAndNotify(board, 'coding', { force: true, quiet: true });
   ok('and it STAYS quiet on the second run', ex2.posted === 0
     && ex2.results.find((r) => r.symbol === 'imaginary').status === 'unresolved');
 
-  rep = A.inspect(room);
+  rep = A.inspect(board);
   ok('unchanged code -> ok', rep.results[0].status === 'ok');
   ok('and head is unchanged, so a check would be skipped', rep.headChanged === false);
-  A.writeState(room, rep.next);
+  A.writeState(board, rep.next);
 
   // change the code -> stale
   fs.writeFileSync(path.join(repo, 'src', 'auth.js'), src.replace('  check(req);', '  skipCheck(req);'));
   g('add', '-A'); g('commit', '-qm', 'weaken the check');
-  rep = A.inspect(room);
+  rep = A.inspect(board);
   ok('changed code -> changed', rep.results[0].status === 'changed');
   ok('and head moved, so the check runs', rep.headChanged === true);
 
   // notify: a [!] note, once
   const S = 'clanchortest';
-  const F = require(path.join(SRC, 'arc-fridge.js'));
+  const F = require(path.join(SRC, 'arc-notes.js'));
   const rf = F.roleFile(S);
   fs.mkdirSync(path.dirname(rf), { recursive: true });
-  fs.writeFileSync(rf, JSON.stringify({ room: room.root, role: 'coding' }));
+  fs.writeFileSync(rf, JSON.stringify({ board: board.root, role: 'coding' }));
   try {
-    const n1 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    const n1 = A.checkAndNotify(board, 'coding', { force: true, quiet: true });
     ok('a newly stale anchor posts exactly one note', n1.posted === 1);
-    const note = RM.allNotes(room).pop();
+    const note = RM.allNotes(board).pop();
     ok('the note is HIGH priority (jumps the queue)', note.priority === 'high');
     ok('the note names the doc AND the anchor', /docs\/plan\.md/.test(note.body) && /auth\.js#handleLogin/.test(note.body));
     ok('and carries machine-readable refs', note.refs.why === 'changed' && note.refs.doc === 'docs/plan.md');
 
-    const n2 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    const n2 = A.checkAndNotify(board, 'coding', { force: true, quiet: true });
     ok('an ALREADY-stale anchor does not nag again', n2.posted === 0);
 
     // delete the file -> a NEW kind of staleness, so it speaks again
     fs.rmSync(path.join(repo, 'src', 'auth.js'));
     g('add', '-A'); g('commit', '-qm', 'drop auth');
-    const n3 = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    const n3 = A.checkAndNotify(board, 'coding', { force: true, quiet: true });
     ok('a gone FILE is reported (status escalated)', n3.results[0].status === 'gone-file');
 
     // reseal: the current code becomes the baseline again
@@ -714,14 +714,14 @@ try {
     // whose target file is still gone is still a lie, so it speaks again on the next
     // check. Only fixing the doc (or deleting the anchor) actually silences it.
     ok('reseal does NOT silence an anchor that is still broken',
-      A.checkAndNotify(room, 'coding', { force: true, quiet: true }).posted === 1);
+      A.checkAndNotify(board, 'coding', { force: true, quiet: true }).posted === 1);
     // Deleting the anchor from the doc is what ends it.
     fs.writeFileSync(path.join(repo, 'docs', 'plan.md'), 'handleLogin used to validate the request.\n');
-    const after = A.checkAndNotify(room, 'coding', { force: true, quiet: true });
+    const after = A.checkAndNotify(board, 'coding', { force: true, quiet: true });
     ok('removing the anchor ends the alarm', after.posted === 0 && after.checked === 1);
 
     // head-unchanged short-circuit
-    const n4 = A.checkAndNotify(room, 'coding');
+    const n4 = A.checkAndNotify(board, 'coding');
     ok('no new commit -> the check is skipped entirely', n4.skipped === 'head-unchanged');
 
     // no repo -> no anchors, no crash
@@ -739,8 +739,8 @@ try {
 section('arc-done (git-derived completion)');
 try {
   const D = require(path.join(SRC, 'arc-done.js'));
-  const RM = require(path.join(SRC, 'arc-room.js'));
-  const F = require(path.join(SRC, 'arc-fridge.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
+  const F = require(path.join(SRC, 'arc-notes.js'));
   const { execFileSync } = require('child_process');
 
   // --- the judgement, pure (no repo needed) ---
@@ -756,7 +756,7 @@ try {
 
   // ---- WEIGHT, NOT SILENCE ------------------------------------------------------------
   // A tick with no commit is still DELIVERED (non-code work — a design doc, a sign-off — is
-  // real work a roommate wants to know about). It just must not arrive dressed like proof:
+  // real work a peer wants to know about). It just must not arrive dressed like proof:
   // proven -> <result> (ranks up, carries sha+files), unproven -> <info> (sinks in the digest).
   const provenNote = D.buildNote({ task_id: '1', task_subject: 'Ship P-014' },
     { commits: [{ sha: 'abc1234' }], files: ['src/a.js'] }, true, 'coding');
@@ -768,7 +768,7 @@ try {
     claimNote.kind === 'info' && !claimNote.refs.sha && RM.KIND_RANK.result < RM.KIND_RANK.info);
   ok('the uncommitted wording states the fact without the accusation',
     /no commit — not code-backed/.test(claimNote.body) && !/UNVERIFIED|taken on trust/.test(claimNote.body));
-  ok('a non-code tick still reaches roommates (weight, not silence)',
+  ok('a non-code tick still reaches peers (weight, not silence)',
     claimNote.to === null && /Present design for sign-off/.test(claimNote.body));
 
   // --- evidence, against a REAL git repo ---
@@ -791,24 +791,24 @@ try {
   ok('a bogus baseline yields null, never a false positive', D.evidenceSince(repo, 'deadbeef') === null);
 
   // --- baselines are keyed by SESSION, because task ids restart at 1 per session ---
-  const room = RM.resolveRoom(repo);
+  const board = RM.resolveBoard(repo);
   ok('two sessions\' task "1" do not collide',
-    D.baselineFile(room, 'sess-A', '1') !== D.baselineFile(room, 'sess-B', '1'));
+    D.baselineFile(board, 'sess-A', '1') !== D.baselineFile(board, 'sess-B', '1'));
 
   // --- end to end: a completion posts a note carrying the sha ---
   const S = 'cldonetest';
   const roleFile = F.roleFile(S);
   fs.mkdirSync(path.dirname(roleFile), { recursive: true });
-  fs.writeFileSync(roleFile, JSON.stringify({ room: room.root, role: 'coding' }));
+  fs.writeFileSync(roleFile, JSON.stringify({ board: board.root, role: 'coding' }));
   try {
-    D.recordBaseline(room, S, '7', base);
+    D.recordBaseline(board, S, '7', base);
     process.env.ARC_DONE_GATE = 'note';
     const r = D.onTaskCompleted({ task_id: '7', task_subject: 'Implement P-014', cwd: repo }, S);
     ok('a proven completion posts a note', r.posted === true && r.proven === true && r.block === false);
-    const notes = RM.allNotes(room);
+    const notes = RM.allNotes(board);
     const n = notes[notes.length - 1];
     ok('the note is FROM the completing role', n.from === 'coding');
-    ok('the note is a broadcast (any roommate sees it)', n.to === null);
+    ok('the note is a broadcast (any peer sees it)', n.to === null);
     ok('the note names the task', /Implement P-014/.test(n.body));
     // A commit-backed tick CARRIES EVIDENCE, so it is a <result> and ranks above routine news.
     ok('a PROVEN tick is kind:result (it proves itself, so it outranks info)', n.kind === 'result');
@@ -817,12 +817,12 @@ try {
 
     // strict mode, nothing committed since -> the tick is refused
     const base2 = D.head(repo);
-    D.recordBaseline(room, S, '8', base2);
+    D.recordBaseline(board, S, '8', base2);
     process.env.ARC_DONE_GATE = 'strict';
     const r2 = D.onTaskCompleted({ task_id: '8', task_subject: 'Claim without committing', cwd: repo }, S);
     ok('strict REFUSES a completion with no commit', r2.block === true);
     ok('and tells the agent why, on stderr', /no commit found/.test(r2.stderr));
-    ok('and posts NOTHING when it blocks', RM.allNotes(room).length === notes.length);
+    ok('and posts NOTHING when it blocks', RM.allNotes(board).length === notes.length);
 
     // a session with no role stays silent rather than inventing a sender
     process.env.ARC_DONE_GATE = 'note';
@@ -841,7 +841,7 @@ try {
     // not silently become "unknown" and block a legitimately committed task. The task
     // FILE is the fallback, so the fixture must actually have one — point CLAUDE_CONFIG_DIR
     // at a sandbox rather than fake it.
-    const bl = D.readBaseline(room, S, '7', path.join(repo, 'seed.txt'));
+    const bl = D.readBaseline(board, S, '7', path.join(repo, 'seed.txt'));
     ok('readBaseline returns BOTH a sha and a birth time', bl.sha === base && typeof bl.born === 'string');
 
     const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-'));
@@ -850,7 +850,7 @@ try {
     try {
       fs.mkdirSync(path.join(cfg, 'tasks', S), { recursive: true });
       fs.writeFileSync(path.join(cfg, 'tasks', S, '10.json'), '{"id":"10"}');   // born NOW
-      D.recordBaseline(room, S, '10', 'dead1234beefdead1234beefdead1234beefdead'); // never existed
+      D.recordBaseline(board, S, '10', 'dead1234beefdead1234beefdead1234beefdead'); // never existed
       fs.writeFileSync(path.join(repo, 'after.js'), 'work');
       g('add', '-A'); g('commit', '-qm', 'work done after the task was born');
 
@@ -869,27 +869,27 @@ try {
   }
 } catch (e) { ok('arc-done works', false, e.message); }
 
-// ---- arc-postcommit (every commit -> a fridge note, no task list needed) --------
-section('arc-postcommit (commit -> fridge note)');
+// ---- arc-postcommit (every commit -> a board note, no task list needed) --------
+section('arc-postcommit (commit -> board note)');
 try {
   const PC = require(path.join(SRC, 'arc-postcommit.js'));
-  const RM = require(path.join(SRC, 'arc-room.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
   const { execFileSync } = require('child_process');
 
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
   const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
   g('init', '-q'); g('config', 'user.email', 't@t.t'); g('config', 'user.name', 't');
-  const room = RM.resolveRoom(repo); RM.ensureRoom(room);
+  const board = RM.resolveBoard(repo); RM.ensureBoard(board);
   // arm a role for our session (cache is under the sandbox HOME)
   const cacheDir = path.join(os.homedir(), '.claude', 'cache');
   fs.mkdirSync(cacheDir, { recursive: true });
-  fs.writeFileSync(path.join(cacheDir, 'arc-role-pcsess.json'), JSON.stringify({ room: room.root, role: 'android' }));
+  fs.writeFileSync(path.join(cacheDir, 'arc-role-pcsess.json'), JSON.stringify({ board: board.root, role: 'android' }));
 
-  // no ARC_SESSION -> no note (a non-cl commit must not spam the fridge)
+  // no ARC_SESSION -> no note (a non-cl commit must not spam the board)
   fs.writeFileSync(path.join(repo, 'a.js'), 'x'); g('add', '-A'); g('commit', '-qm', 'first');
   delete process.env.ARC_SESSION;
   ok('a commit with no ARC_SESSION posts nothing', PC.run(repo).posted === false);
-  ok('  and the fridge is still empty', RM.allNotes(room).length === 0);
+  ok('  and the board is still empty', RM.allNotes(board).length === 0);
 
   // ARC_SESSION with a role -> a note attributed to that role
   fs.writeFileSync(path.join(repo, 'feature.js'), 'y'); g('add', '-A'); g('commit', '-qm', 'add the overlay fix');
@@ -897,16 +897,16 @@ try {
   try {
     const r = PC.run(repo);
     ok('a cl commit posts a note', r.posted === true && r.role === 'android');
-    const n = RM.allNotes(room).pop();
+    const n = RM.allNotes(board).pop();
     ok('  from the committing role, broadcast', n.from === 'android' && n.to === null);
     ok('  body names the commit subject', /committed: add the overlay fix/.test(n.body));
     ok('  refs carry the real sha + files', n.refs.sha === PC.git(repo, ['rev-parse', '--short', 'HEAD']) && n.refs.files.includes('feature.js'));
-    ok('  the roommate sees it, the committer does not',
-      RM.unreadFor(room, 'frontend').count === 1 && RM.unreadFor(room, 'android').count === 0);
+    ok('  the peer sees it, the committer does not',
+      RM.unreadFor(board, 'frontend').count === 1 && RM.unreadFor(board, 'android').count === 0);
 
-    // a role claimed in a DIFFERENT room does not attribute here
-    fs.writeFileSync(path.join(cacheDir, 'arc-role-elsewhere.json'), JSON.stringify({ room: 'z:\\other', role: 'x' }));
-    ok('roleFor ignores a role from another room', PC.roleFor('elsewhere', room) === null);
+    // a role claimed in a DIFFERENT board does not attribute here
+    fs.writeFileSync(path.join(cacheDir, 'arc-role-elsewhere.json'), JSON.stringify({ board: 'z:\\other', role: 'x' }));
+    ok('roleFor ignores a role from another board', PC.roleFor('elsewhere', board) === null);
   } finally {
     delete process.env.ARC_SESSION;
     try { fs.unlinkSync(path.join(cacheDir, 'arc-role-pcsess.json')); } catch {}
@@ -914,25 +914,25 @@ try {
   }
 } catch (e) { ok('arc-postcommit works', false, e.message); }
 
-// ---- arc-runner fridge CLI (arc note / arc role — the AGENT-facing surface) --------
+// ---- arc-runner board CLI (arc note / arc role — the AGENT-facing surface) --------
 // The agent can't TYPE arc:note (the hook eats it), but it can RUN `cl note ...` via
 // Bash. This exercises that dispatch end to end through the real arc-runner process.
-section('arc-runner fridge CLI (arc note / arc role)');
+section('arc-runner board CLI (arc note / arc role)');
 try {
   const runner = path.join(SRC, 'arc-runner.js');
-  const RM = require(path.join(SRC, 'arc-room.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clicli-'));
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
-  const room = RM.resolveRoom(repo); RM.ensureRoom(room);
+  const board = RM.resolveBoard(repo); RM.ensureBoard(board);
   const S = 'clicli-sess';
   fs.mkdirSync(path.join(CLAUDE, 'cache'), { recursive: true });
-  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-role-${S}.json`), JSON.stringify({ room: room.root, role: 'android' }));
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-role-${S}.json`), JSON.stringify({ board: board.root, role: 'android' }));
   const env = { ...process.env, ARC_SESSION: S };
 
   const post = spawnSync(process.execPath, [runner, 'note', 'all', 'shared: /login is 202 now'], { cwd: repo, env, encoding: 'utf8' });
   ok('`arc note` exits 0', post.status === 0, (post.stderr || '').split('\n')[0]);
-  ok('`arc note` posts to the fridge, attributed to the role',
-    RM.allNotes(room).some((n) => /login is 202/.test(n.body) && n.from === 'android'));
+  ok('`arc note` posts to the board, attributed to the role',
+    RM.allNotes(board).some((n) => /login is 202/.test(n.body) && n.from === 'android'));
   ok('`arc note` output leaks no arc: sentinel form', !/arc:(note|role|notes)/.test(post.stdout));
 
   const role = spawnSync(process.execPath, [runner, 'role'], { cwd: repo, env, encoding: 'utf8' });
@@ -946,7 +946,7 @@ try {
 
   fs.rmSync(repo, { recursive: true, force: true });
   try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-role-${S}.json`)); } catch {}
-} catch (e) { ok('arc-runner fridge CLI works', false, e.message); }
+} catch (e) { ok('arc-runner board CLI works', false, e.message); }
 
 // ---- arc-watch (wake a delegate session on an incoming delegation) ---------------
 // A delegate (e.g. research) can't be pushed to while idle; it runs `cl watch` in the
@@ -955,33 +955,33 @@ try {
 section('arc-watch (delegation waker)');
 try {
   const W = require(path.join(SRC, 'arc-watch.js'));
-  const RM = require(path.join(SRC, 'arc-room.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clwatch-'));
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
-  const room = RM.resolveRoom(repo); RM.ensureRoom(room);
+  const board = RM.resolveBoard(repo); RM.ensureBoard(board);
 
-  ok('resolveRole prefers an explicit arg', W.resolveRole('research', 'sess', room) === 'research');
-  ok('resolveRole with no arg + no session -> null', W.resolveRole('', '', room) === null);
+  ok('resolveRole prefers an explicit arg', W.resolveRole('research', 'sess', board) === 'research');
+  ok('resolveRole with no arg + no session -> null', W.resolveRole('', '', board) === null);
 
-  RM.appendNote(room, { from: 'android', to: 'research', body: 'investigate the tap drop' });
-  RM.appendNote(room, { from: 'android', to: null, body: 'broadcast: bumped node' });   // to:null = real broadcast
-  RM.appendNote(room, { from: 'research', to: 'android', body: 'my own note' });
+  RM.appendNote(board, { from: 'android', to: 'research', body: 'investigate the tap drop' });
+  RM.appendNote(board, { from: 'android', to: null, body: 'broadcast: bumped node' });   // to:null = real broadcast
+  RM.appendNote(board, { from: 'research', to: 'android', body: 'my own note' });
 
   const out = []; const emitted = new Set();
-  W.poll(room, 'research', emitted, (l) => out.push(l));
+  W.poll(board, 'research', emitted, (l) => out.push(l));
   ok('emits the addressed delegation', out.some((l) => /from android: investigate the tap drop/.test(l)));
   ok('emits a real broadcast (to:null)', out.some((l) => /broadcast: bumped node/.test(l)));
   ok('does NOT emit the watcher\'s own note', !out.some((l) => /my own note/.test(l)));
   ok('emits exactly the two for-me notes', out.length === 2);
 
-  const dup = []; W.poll(room, 'research', emitted, (l) => dup.push(l));
+  const dup = []; W.poll(board, 'research', emitted, (l) => dup.push(l));
   ok('a second poll re-emits nothing (each note once)', dup.length === 0);
   ok('watching never advances the read cursor (cl notes still delivers)',
-    RM.readCursor(room, 'research') === 0 && RM.unreadFor(room, 'research').count === 2);
+    RM.readCursor(board, 'research') === 0 && RM.unreadFor(board, 'research').count === 2);
 
   // a high-priority delegation is flagged
-  RM.appendNote(room, { from: 'android', to: 'research', priority: 'high', body: 'URGENT: prod is down' });
-  const hi = []; W.poll(room, 'research', emitted, (l) => hi.push(l));
+  RM.appendNote(board, { from: 'android', to: 'research', priority: 'high', body: 'URGENT: prod is down' });
+  const hi = []; W.poll(board, 'research', emitted, (l) => hi.push(l));
   ok('a [!] delegation is flagged in the emit', hi.length === 1 && /\[!\]/.test(hi[0]));
 
   fs.rmSync(repo, { recursive: true, force: true });
@@ -1088,24 +1088,24 @@ try {
   ok('non-sentinel prompt passes through (no block)', (pass.stdout || '').trim() === '');
 } catch (e) { ok('arc:help hook works', false, e.message); }
 
-// ---- arc-room (the "fridge": per-room append-only sticky-note ledger) ---------
-section('arc-room (sticky-note ledger)');
+// ---- arc-board (the "board": per-board append-only sticky-note ledger) ---------
+section('arc-board (sticky-note ledger)');
 try {
-  const R = require(path.join(SRC, 'arc-room.js'));
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'clroom-'));
+  const R = require(path.join(SRC, 'arc-board.js'));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'clboard-'));
   const repo = path.join(base, 'proj');
   fs.mkdirSync(path.join(repo, 'sub', 'deep'), { recursive: true });
   fs.mkdirSync(path.join(repo, '.git'));                       // fake repo root
 
-  // 1) room = git repo root, from anywhere inside it
-  const rTop = R.resolveRoom(repo), rDeep = R.resolveRoom(path.join(repo, 'sub', 'deep'));
-  ok('room resolves to the git repo root from a subdir', rTop.root === rDeep.root);
+  // 1) board = git repo root, from anywhere inside it
+  const rTop = R.resolveBoard(repo), rDeep = R.resolveBoard(path.join(repo, 'sub', 'deep'));
+  ok('board resolves to the git repo root from a subdir', rTop.root === rDeep.root);
   const outside = path.join(base, 'loose'); fs.mkdirSync(outside);
-  ok('no repo → the folder itself is the room', R.resolveRoom(outside).root === R.canonical(outside));
-  ok('a room is never nameless', !!R.resolveRoom(repo).name && !!R.resolveRoom('C:\\').name);
+  ok('no repo → the folder itself is the board', R.resolveBoard(outside).root === R.canonical(outside));
+  ok('a board is never nameless', !!R.resolveBoard(repo).name && !!R.resolveBoard('C:\\').name);
 
-  // 2) the fridge self-ignores
-  R.ensureRoom(rTop);
+  // 2) the board self-ignores
+  R.ensureBoard(rTop);
   const gi = fs.readFileSync(path.join(rTop.planDir, '.gitignore'), 'utf8');
   ok('.plan/.gitignore ignores everything (incl. itself)', /^\*$/m.test(gi));
 
@@ -1148,7 +1148,7 @@ try {
   R.markRead(rTop, 'coding');
   ok('a note after a torn line does not redeliver forever', R.unreadFor(rTop, 'coding').count === 0);
 
-  // 8) role lease. IDENTITY IS THE SESSION; the pid is only a liveness probe.
+  // 8) role claim. IDENTITY IS THE SESSION; the pid is only a liveness probe.
   ok('claim a free role', R.claimRole(rTop, 'coding', process.pid, 's1').ok === true);
   // A different LIVE session must be refused even if it reports the SAME pid.
   // (This is the bug the end-to-end test caught — pid alone is not identity.)
@@ -1156,18 +1156,18 @@ try {
   ok('a different live session is refused (even with same pid)', second.ok === false && second.holder.sessionId === 's1');
   // arc:restart re-execs arc-runner: SAME session, NEW pid → must reclaim its own role.
   ok('same session reclaims under a NEW pid (restart-safe)', R.claimRole(rTop, 'coding', process.pid + 1, 's1').ok === true);
-  fs.writeFileSync(path.join(rTop.planDir, 'lease-coding.json'), JSON.stringify({ role: 'coding', pid: 999999, sessionId: 's9', at: Date.now() }));
-  ok('a DEAD holder\'s lease is vacant', R.roleHolder(rTop, 'coding') === null);
+  fs.writeFileSync(path.join(rTop.planDir, 'claim-coding.json'), JSON.stringify({ role: 'coding', pid: 999999, sessionId: 's9', at: Date.now() }));
+  ok('a DEAD holder\'s claim is vacant', R.roleClaim(rTop, 'coding') === null);
   ok('a vacant role can be claimed by anyone', R.claimRole(rTop, 'coding', process.pid, 's3').ok === true);
   ok('liveRoles lists live holders only', R.liveRoles(rTop).map((l) => l.role).join(',') === 'coding');
-} catch (e) { ok('arc-room works', false, e.message); }
+} catch (e) { ok('arc-board works', false, e.message); }
 
-// ---- arc-fridge (the arc: sentinels over the ledger) ---------------------------
-section('arc-fridge (role / note / notes)');
+// ---- arc-notes (the arc: sentinels over the ledger) ---------------------------
+section('arc-notes (role / note / notes)');
 try {
-  const F = require(path.join(SRC, 'arc-fridge.js'));
-  const R2 = require(path.join(SRC, 'arc-room.js'));
-  const base2 = fs.mkdtempSync(path.join(os.tmpdir(), 'clfridge-'));
+  const F = require(path.join(SRC, 'arc-notes.js'));
+  const R2 = require(path.join(SRC, 'arc-board.js'));
+  const base2 = fs.mkdtempSync(path.join(os.tmpdir(), 'clboard-'));
   const repo2 = path.join(base2, 'proj');
   fs.mkdirSync(path.join(repo2, 'sub'), { recursive: true });
   fs.mkdirSync(path.join(repo2, '.git'));
@@ -1175,10 +1175,10 @@ try {
   const mkSession = (sid, pid) => writeJSON(path.join(cache, `arc-state-${sid}.json`), { pid, cwd: repo2 });
   mkSession('sa', process.pid); mkSession('sb', process.pid); mkSession('sc', process.pid);
 
-  // roles claimed from a SUBDIR still land in the repo-root room
+  // roles claimed from a SUBDIR still land in the repo-root board
   const ra = F.requestRole('sa', 'research', path.join(repo2, 'sub'));
-  ok('arc:role claims a role from a subdir (room = repo root)', ra.ok === true && /room "proj"/.test(ra.message));
-  ok('arc:role coding (second roommate)', F.requestRole('sb', 'coding', repo2).ok === true);
+  ok('arc:role claims a role from a subdir (board = repo root)', ra.ok === true && /the "proj" board/.test(ra.message));
+  ok('arc:role coding (second peer)', F.requestRole('sb', 'coding', repo2).ok === true);
   const rc = F.requestRole('sc', 'coding', repo2);
   ok('a third session is REFUSED a held role', rc.ok === false && /already held by a LIVE session/.test(rc.message));
 
@@ -1194,21 +1194,44 @@ try {
   ok('arc:notes shows both (addressed + broadcast)', /2 new from research/.test(n1.message));
   const n2 = F.requestNotes('sb', '', repo2);
   ok('arc:notes is empty after reading (cursor advanced)', /nothing new/.test(n2.message));
-  const room2 = R2.resolveRoom(repo2);
-  ok('notes were NOT consumed', R2.noteCount(room2) === 2);
+  const board2 = R2.resolveBoard(repo2);
+  ok('notes were NOT consumed', R2.noteCount(board2) === 2);
   // rd()-only, proved properly: coding just read everything, yet a DIFFERENT reader
-  // still finds the broadcast waiting. A note is never taken off the fridge.
-  ok('a fresh role still sees the broadcast after coding read it', R2.unreadFor(room2, 'qa').count === 1);
-  ok('research never sees its own two notes', R2.unreadFor(room2, 'research').count === 0);
+  // still finds the broadcast waiting. A note is never taken off the board.
+  ok('a fresh role still sees the broadcast after coding read it', R2.unreadFor(board2, 'qa').count === 1);
+  ok('research never sees its own two notes', R2.unreadFor(board2, 'research').count === 0);
   const nAll = F.requestNotes('sc', 'all', repo2);
   ok('arc:notes all = landlord view, no role needed', /ALL 2 note\(s\)/.test(nAll.message));
 
-  // restart: same session, NEW pid → role + lease survive
+  // restart: same session, NEW pid → role + claim survive
   mkSession('sb', process.pid + 1);                       // simulate arc-runner re-exec
   const rr = F.refreshRole('sb', process.pid + 1, repo2);
-  ok('refreshRole re-asserts the lease after restart', rr && rr.ok === true && rr.role === 'coding');
-  ok('and the role still resolves for that session', F.getRole('sb', room2) === 'coding');
+  ok('refreshRole re-asserts the claim after restart', rr && rr.ok === true && rr.role === 'coding');
+  ok('and the role still resolves for that session', F.getRole('sb', board2) === 'coding');
   ok('refreshRole is a no-op for a session with no role and no conversation', F.refreshRole('zz', 999, repo2) === null);
+
+  // ---- LEGACY SHIMS: the board/peer/claim rename must not orphan LIVE state -----------
+  // A board used to be a "room" and a claim used to be a "lease". Sessions were live when the
+  // rename landed, holding state written in the old shape. Reading only the new keys would
+  // silently drop their role — they'd receive nothing, with nothing to say why.
+  writeJSON(path.join(cache, 'arc-role-legacy1.json'), { room: board2.root, role: 'legacyrole', at: Date.now() });
+  ok('a LEGACY role file (room: key) still resolves — a live session keeps its role',
+    F.getRole('legacy1', board2) === 'legacyrole');
+  writeJSON(path.join(cache, 'arc-role-legacy2.json'), { board: board2.root, role: 'newrole', at: Date.now() });
+  ok('...and the new (board: key) shape resolves too', F.getRole('legacy2', board2) === 'newrole');
+  // a legacy lease-*.json IS a claim: if it went invisible, a second session would take the
+  // same role, share its cursor, and eat its notes — the exact failure claims prevent.
+  fs.writeFileSync(path.join(board2.planDir, 'lease-legacyclaim.json'),
+    JSON.stringify({ role: 'legacyclaim', pid: process.pid, sessionId: 'old-sess', at: Date.now() }));
+  ok('a LEGACY claim file (lease-*.json) is still seen as HELD, not vacant',
+    !!R2.roleClaim(board2, 'legacyclaim') && R2.liveRoles(board2).some((l) => l.role === 'legacyclaim'));
+  ok('...so another session is REFUSED that role (no shared cursor)',
+    R2.claimRole(board2, 'legacyclaim', process.pid, 'different-session').ok === false);
+  // claiming it as its OWN holder migrates it onto the new name
+  R2.claimRole(board2, 'legacyclaim', process.pid, 'old-sess');
+  ok('claiming migrates a legacy lease-*.json onto claim-*.json (one name from then on)',
+    fs.existsSync(path.join(board2.planDir, 'claim-legacyclaim.json'))
+    && !fs.existsSync(path.join(board2.planDir, 'lease-legacyclaim.json')));
 
   // ---- ROLE FOLLOWS THE CONVERSATION -------------------------------------------------
   // A relaunch mints a NEW ARC_SESSION. The role was keyed by session, so it was silently
@@ -1217,61 +1240,61 @@ try {
   const DEAD_PID = 999999;                                  // not a running process
   writeJSON(path.join(cache, 'arc-state-old.json'), { pid: process.pid, cwd: repo2, convId: CONV });
   F.requestRole('old', 'android', repo2);
-  ok('claiming a role records the CONVERSATION on the lease',
-    R2.roleHolder(room2, 'android').convId === CONV);
-  R2.writeCursor(room2, 'android', 1);                      // it had read up to note #1
+  ok('claiming a role records the CONVERSATION on the claim',
+    R2.roleClaim(board2, 'android').convId === CONV);
+  R2.writeCursor(board2, 'android', 1);                      // it had read up to note #1
 
-  // the holding session DIES (its own lease now names a dead pid)
-  R2.claimRole(room2, 'android', DEAD_PID, 'old', CONV);
-  ok('a vacant lease is findable by CONVERSATION', R2.vacantLeaseForConv(room2, CONV).role === 'android');
+  // the holding session DIES (its own claim now names a dead pid)
+  R2.claimRole(board2, 'android', DEAD_PID, 'old', CONV);
+  ok('a vacant claim is findable by CONVERSATION', R2.vacantClaimForConv(board2, CONV).role === 'android');
 
   // a NEW session id resumes the SAME conversation → it must get its role back
   writeJSON(path.join(cache, 'arc-state-new.json'), { pid: process.pid, cwd: repo2, convId: CONV });
   const adopted = F.refreshRole('new', process.pid, repo2, CONV);
   ok('a resumed conversation ADOPTS its old role (no more silent blackout)',
-    adopted && adopted.adopted === true && adopted.role === 'android' && F.getRole('new', room2) === 'android');
+    adopted && adopted.adopted === true && adopted.role === 'android' && F.getRole('new', board2) === 'android');
   ok('...and it resumes IN PLACE — the cursor is keyed by role, not session, so nothing is re-read',
-    R2.readCursor(room2, 'android') === 1);
-  ok('a LIVE holder is never adopted away (only a vacant lease is)',
-    R2.vacantLeaseForConv(room2, CONV) === null && R2.roleHolder(room2, 'android').sessionId === 'new');
+    R2.readCursor(board2, 'android') === 1);
+  ok('a LIVE holder is never adopted away (only a vacant claim is)',
+    R2.vacantClaimForConv(board2, CONV) === null && R2.roleClaim(board2, 'android').sessionId === 'new');
 
   // ---- the claim RACE: check-then-write let two sessions both "win" ------------------
   // claimRole now does check+write under an atomic lock, so a second live session is refused.
   mkSession('racer', process.pid);
-  const first = R2.claimRole(room2, 'painter', process.pid, 'racer');
-  const second = R2.claimRole(room2, 'painter', process.pid, 'other-session');
+  const first = R2.claimRole(board2, 'painter', process.pid, 'racer');
+  const second = R2.claimRole(board2, 'painter', process.pid, 'other-session');
   ok('two live sessions cannot BOTH claim one role (they would share a cursor and eat notes)',
     first.ok === true && second.ok === false && !!second.holder);
   ok('the same session re-claiming its own role still succeeds (restart keeps its seat)',
-    R2.claimRole(room2, 'painter', process.pid, 'racer').ok === true);
-  // atomic write: no torn lease/cursor left behind
-  ok('state writes are atomic (no .tmp files left in the room)',
-    !fs.readdirSync(room2.planDir).some((f) => f.includes('.tmp-')));
+    R2.claimRole(board2, 'painter', process.pid, 'racer').ok === true);
+  // atomic write: no torn claim/cursor left behind
+  ok('state writes are atomic (no .tmp files left in the board)',
+    !fs.readdirSync(board2.planDir).some((f) => f.includes('.tmp-')));
 
   // ---- the NOTE SCHEMA: kind · replyTo · supersedes ---------------------------------
   // Two real sessions invented this taxonomy BY HAND ("DELEGATION:", "Re your #8",
   // "CORRECTION to #13 — I was WRONG"). These fields make it machine-readable — and every
   // one is OPTIONAL, so a bare note and every pre-schema note stay valid.
-  const sroom = R2.resolveRoom(path.join(base2, 'schema')); fs.mkdirSync(path.join(base2, 'schema', '.git'), { recursive: true });
-  R2.ensureRoom(sroom);
-  const sn1 = R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'request', body: 'investigate X' });
-  const sn2 = R2.appendNote(sroom, { from: 'research', to: 'android', replyTo: 1, body: 'they are mutually exclusive' });
-  const sn3 = R2.appendNote(sroom, { from: 'research', to: 'android', supersedes: 2, body: 'CORRECTION: I was WRONG' });
-  R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'request', body: 'never answered' });
-  const plain = R2.appendNote(sroom, { from: 'android', to: 'research', body: 'just news' });
+  const sboard = R2.resolveBoard(path.join(base2, 'schema')); fs.mkdirSync(path.join(base2, 'schema', '.git'), { recursive: true });
+  R2.ensureBoard(sboard);
+  const sn1 = R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'request', body: 'investigate X' });
+  const sn2 = R2.appendNote(sboard, { from: 'research', to: 'android', replyTo: 1, body: 'they are mutually exclusive' });
+  const sn3 = R2.appendNote(sboard, { from: 'research', to: 'android', supersedes: 2, body: 'CORRECTION: I was WRONG' });
+  R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'request', body: 'never answered' });
+  const plain = R2.appendNote(sboard, { from: 'android', to: 'research', body: 'just news' });
   ok('a plain note still needs no flags and defaults to kind:info',
     plain.kind === 'info' && plain.replyTo === undefined && plain.supersedes === undefined);
   ok('an unknown kind degrades to info rather than throwing',
-    R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'nonsense', body: 'x' }).kind === 'info');
+    R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'nonsense', body: 'x' }).kind === 'info');
   ok('--reply-to INFERS kind:result; --supersedes INFERS kind:correction',
     sn2.kind === 'result' && sn2.replyTo === 1 && sn3.kind === 'correction' && sn3.supersedes === 2);
   ok('a correction (and a blocker) is auto-HIGH priority — a retraction is never routine',
-    sn3.priority === 'high' && R2.appendNote(sroom, { from: 'android', to: 'research', kind: 'blocker', body: 'db down' }).priority === 'high');
+    sn3.priority === 'high' && R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'blocker', body: 'db down' }).priority === 'high');
   ok('supersededMap derives which note was RETRACTED, and by whom',
-    R2.supersededMap(sroom).get(2).seq === 3 && !R2.supersededMap(sroom).has(1));
+    R2.supersededMap(sboard).get(2).seq === 3 && !R2.supersededMap(sboard).has(1));
   ok('openRequests finds a request with NO reply, and ignores an answered one',
-    (() => { const o = R2.openRequests(sroom).map((n) => n.seq); return o.includes(4) && !o.includes(1); })());
-  ok('repliesTo threads the answers under a request', R2.repliesTo(sroom, 1).length === 1);
+    (() => { const o = R2.openRequests(sboard).map((n) => n.seq); return o.includes(4) && !o.includes(1); })());
+  ok('repliesTo threads the answers under a request', R2.repliesTo(sboard, 1).length === 1);
   ok('KINDS/KIND_RANK rank a blocker + correction ABOVE routine info',
     R2.KIND_RANK.blocker < R2.KIND_RANK.info && R2.KIND_RANK.correction < R2.KIND_RANK.info && R2.KINDS.includes('decision'));
 
@@ -1296,62 +1319,62 @@ try {
 
   // the AMBIENT badge (what the statusline paints) — derived, self-clearing
   // NO-ROLE BLACKOUT: badge used to return null with no role, so a session that had fallen off
-  // the fridge received nothing AND was never told — notes piled up invisibly. It must WARN.
-  const emptyRepo = path.join(base2, 'emptyroom');
+  // the board received nothing AND was never told — notes piled up invisibly. It must WARN.
+  const emptyRepo = path.join(base2, 'emptyboard');
   fs.mkdirSync(path.join(emptyRepo, '.git'), { recursive: true });
   ok('badge stays null with no role AND no notes (nothing to say)', F.badge('zz', emptyRepo) === null);
-  R2.appendNote(room2, { from: 'research', to: 'coding', body: 'fresh' });
+  R2.appendNote(board2, { from: 'research', to: 'coding', body: 'fresh' });
   const noRoleBg = F.badge('zz', repo2);
-  ok('badge WARNS when you hold no role but the room HAS notes (never a silent blackout)',
-    noRoleBg && noRoleBg.noRole === true && noRoleBg.count === R2.noteCount(room2));
+  ok('badge WARNS when you hold no role but the board HAS notes (never a silent blackout)',
+    noRoleBg && noRoleBg.noRole === true && noRoleBg.count === R2.noteCount(board2));
   const bg = F.badge('sb', repo2);
   ok('badge counts unread + names the sender', bg && bg.count === 1 && bg.senders[0] === 'research');
-  R2.markRead(room2, 'coding');
+  R2.markRead(board2, 'coding');
   ok('badge clears itself once read', F.badge('sb', repo2) === null);
 
   // FAIL-OPEN: a truncated ledger must not silently swallow notes
-  R2.writeCursor(room2, 'coding', 999);                    // cursor past the end
-  ok('a cursor past the end re-reads rather than skipping', R2.unreadFor(room2, 'coding').count > 0);
+  R2.writeCursor(board2, 'coding', 999);                    // cursor past the end
+  ok('a cursor past the end re-reads rather than skipping', R2.unreadFor(board2, 'coding').count > 0);
 
-  // ---- turn-start injection (the "fridge at the door") ----
+  // ---- turn-start injection (the "board at the door") ----
   // Proven live: a hook's additionalContext really does reach the model.
-  R2.markRead(room2, 'coding');
+  R2.markRead(board2, 'coding');
   ok('injection is null when there is no delta (hook stays silent)', F.injection('sb', repo2) === null);
   ok('injection is null with no role', F.injection('zz', repo2) === null);
-  R2.appendNote(room2, { from: 'research', to: 'coding', body: 'ordinary note' });
-  R2.appendNote(room2, { from: 'research', to: 'coding', priority: 'high', body: 'URGENT anchor broke' });
-  const countBeforeInject = R2.noteCount(room2);
+  R2.appendNote(board2, { from: 'research', to: 'coding', body: 'ordinary note' });
+  R2.appendNote(board2, { from: 'research', to: 'coding', priority: 'high', body: 'URGENT anchor broke' });
+  const countBeforeInject = R2.noteCount(board2);
   const inj = F.injection('sb', repo2);
   ok('injection returns a digest for unread notes', inj && inj.count === 2);
-  ok('digest names the room + role', /room "proj"/.test(inj.text) && /for "coding"/.test(inj.text));
+  ok('digest names the board + role', /the "proj" board/.test(inj.text) && /for "coding"/.test(inj.text));
   ok('HIGH priority is ranked first', inj.text.indexOf('URGENT anchor broke') < inj.text.indexOf('ordinary note'));
   ok('digest stays far under the 10k hook cap', inj.text.length < 10000);
   ok('injection marks them read — delivered exactly once', F.injection('sb', repo2) === null);
-  ok('but the notes stay on the fridge (rd()-only)', R2.noteCount(room2) === countBeforeInject);
+  ok('but the notes stay on the board (rd()-only)', R2.noteCount(board2) === countBeforeInject);
 
   // a burst must be ranked + summarised, never dumped (the 10k cap is a hard limit)
-  for (let i = 0; i < 80; i++) R2.appendNote(room2, { from: 'research', to: 'coding', body: 'filler '.repeat(40) + i });
+  for (let i = 0; i < 80; i++) R2.appendNote(board2, { from: 'research', to: 'coding', body: 'filler '.repeat(40) + i });
   const big = F.injection('sb', repo2);
   ok('a burst is capped, not dumped', big && big.text.length < 10000);
   ok('and the overflow is summarised', /…and \d+ more/.test(big.text));
   ok('while still reporting the true total', big.count === 80);
 
-  // CATCH-UP after an absence: a roommate back from a long trip must lose NOTHING.
+  // CATCH-UP after an absence: a peer back from a long trip must lose NOTHING.
   // The capped burst above must NOT have consumed the overflow — the cursor advances
   // only over what was actually delivered, so the rest stay unread. (Regression for the
   // bug where injection showed ~30 but marked ALL 80 read, silently dropping the tail.)
-  ok('the capped burst did NOT consume the overflow', R2.unreadFor(room2, 'coding').count === 80 - big.shown && big.shown < 80);
+  ok('the capped burst did NOT consume the overflow', R2.unreadFor(board2, 'coding').count === 80 - big.shown && big.shown < 80);
   let drained = big.shown, guard = 0;
-  while (R2.unreadFor(room2, 'coding').count && guard++ < 30) drained += F.injection('sb', repo2).shown;
+  while (R2.unreadFor(board2, 'coding').count && guard++ < 30) drained += F.injection('sb', repo2).shown;
   ok('the whole backlog drains over turns — every note once, none skipped',
-    drained === 80 && R2.unreadFor(room2, 'coding').count === 0);
+    drained === 80 && R2.unreadFor(board2, 'coding').count === 0);
   // and a returning session catches up in ONE uncapped `arc:notes`
-  R2.writeCursor(room2, 'coding', 0);
-  const expected = R2.unreadFor(room2, 'coding').count;
+  R2.writeCursor(board2, 'coding', 0);
+  const expected = R2.unreadFor(board2, 'coding').count;
   const catchUp = F.requestNotes('sb', '', repo2);
-  ok('arc:notes catches a returning roommate up in one uncapped call',
-    (catchUp.message.match(/#\s*\d+/g) || []).length === expected && expected > 40 && R2.unreadFor(room2, 'coding').count === 0);
-} catch (e) { ok('arc-fridge works', false, e.message); }
+  ok('arc:notes catches a returning peer up in one uncapped call',
+    (catchUp.message.match(/#\s*\d+/g) || []).length === expected && expected > 40 && R2.unreadFor(board2, 'coding').count === 0);
+} catch (e) { ok('arc-notes works', false, e.message); }
 
 // ---- claudex (run a GPT model inside Claude Code via a translator) -----------
 section('claudex (Anthropic<->OpenAI translator + sidecar lifecycle)');
@@ -1468,13 +1491,13 @@ try {
     aj.hookSpecificOutput && /arc stance: ACTIVE/.test(aj.hookSpecificOutput.additionalContext));
 } catch (e) { ok('arc-stance works', false, e.message + '\n' + (e.stack || '')); }
 
-// ---- arc-delegate (fire a headless task on a chosen runtime -> fridge) --------
-section('arc-delegate (headless task -> fridge note)');
+// ---- arc-delegate (fire a headless task on a chosen runtime -> board) --------
+section('arc-delegate (headless task -> board note)');
 try {
   const D = require(path.join(SRC, 'arc-delegate.js'));
-  const RM = require(path.join(SRC, 'arc-room.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
 
-  // THE safety property: a delegate must NOT inherit the requester's fridge identity,
+  // THE safety property: a delegate must NOT inherit the requester's board identity,
   // or its own hook would inject their unread notes and ADVANCE THEIR CURSOR.
   const before = { ...process.env };
   process.env.ARC_SESSION = 'victim-1'; process.env.ARC_LOGICAL_SESSION = 'lg-1'; process.env.ARC_RUNTIME = 'claude';
@@ -1483,56 +1506,56 @@ try {
     !ce.ARC_SESSION && !ce.ARC_LOGICAL_SESSION && !ce.ARC_RUNTIME && ce.PATH === process.env.PATH);
   process.env = before;
 
-  const droom = fs.mkdtempSync(path.join(os.tmpdir(), 'deleg-'));
-  spawnSync('git', ['init', '-q'], { cwd: droom });
+  const dboard = fs.mkdtempSync(path.join(os.tmpdir(), 'deleg-'));
+  spawnSync('git', ['init', '-q'], { cwd: dboard });
 
   // success path: posts a note addressed to the requester, from delegate:<runtime>
   // argv: <runtime> <cwd> <toRole|-> <session|-> <task|advisor> <model|-> <task…>
-  const code = D.run(['codex', droom, JSON.stringify({toRole:'code',session:'sess-1'}), 'find', 'the', 'flake'],
+  const code = D.run(['codex', dboard, JSON.stringify({toRole:'code',session:'sess-1'}), 'find', 'the', 'flake'],
     { codex: () => ({ ok: true, out: 'ANSWER: it is a tar --force-local bug', err: '', status: 0 }) });
-  const room = RM.resolveRoom(droom);
-  let notes = RM.allNotes(room);
-  ok('delegate posts the RESULT to the fridge, addressed to the requesting role',
+  const board = RM.resolveBoard(dboard);
+  let notes = RM.allNotes(board);
+  ok('delegate posts the RESULT to the board, addressed to the requesting role',
     code === 0 && notes.length === 1 && notes[0].from === 'delegate:codex' && notes[0].to === 'code'
     && /ANSWER: it is a tar/.test(notes[0].body) && /find the flake/.test(notes[0].body));
-  ok('delegate writes the FULL output beside the room state and points the note at it',
+  ok('delegate writes the FULL output beside the board state and points the note at it',
     /full: .*delegate-codex-.*\.md/.test(notes[0].body)
-    && fs.readdirSync(room.planDir).some((f) => /^delegate-codex-.*\.md$/.test(f)));
+    && fs.readdirSync(board.planDir).some((f) => /^delegate-codex-.*\.md$/.test(f)));
 
   // failure path: HIGH priority so it can't be missed
-  D.run(['claude', droom, JSON.stringify({toRole:'code'}), 'do', 'x'], { claude: () => ({ ok: false, out: '', err: 'boom', status: 3 }) });
-  notes = RM.allNotes(room);
+  D.run(['claude', dboard, JSON.stringify({toRole:'code'}), 'do', 'x'], { claude: () => ({ ok: false, out: '', err: 'boom', status: 3 }) });
+  notes = RM.allNotes(board);
   const fail = notes[notes.length - 1];
   ok('a FAILED delegate still reports back, at HIGH priority',
     fail.from === 'delegate:claude' && fail.priority === 'high' && /FAILED/.test(fail.body) && /boom/.test(fail.body));
 
-  // no role -> broadcast (to: null) so it is still delivered to the room
-  D.run(['codex', droom, '{}', 'anon', 'task'], { codex: () => ({ ok: true, out: 'ok', err: '', status: 0 }) });
-  ok('with no role, the result is BROADCAST rather than dropped', RM.allNotes(room).slice(-1)[0].to === null);
+  // no role -> broadcast (to: null) so it is still delivered to the board
+  D.run(['codex', dboard, '{}', 'anon', 'task'], { codex: () => ({ ok: true, out: 'ok', err: '', status: 0 }) });
+  ok('with no role, the result is BROADCAST rather than dropped', RM.allNotes(board).slice(-1)[0].to === null);
 
-  ok('delegate refuses an unknown runtime / empty task', D.run(['gpt', droom, '{}', 'x'], {}) === 2 && D.run(['codex', droom, '{}'], {}) === 2);
+  ok('delegate refuses an unknown runtime / empty task', D.run(['gpt', dboard, '{}', 'x'], {}) === 2 && D.run(['codex', dboard, '{}'], {}) === 2);
 
   // ---- ADVISOR mode: read-only review with a verdict contract (a "gate", not a note) ------
   // The injected runner receives (cwd, task, opts) so we can assert advisor/model are threaded.
   let advisorOpts = null;
-  D.run(['codex', droom, JSON.stringify({toRole:'code',session:'sess-1',advisor:true,model:'gpt-5.6-luna'}), 'review', 'my', 'plan'], {
+  D.run(['codex', dboard, JSON.stringify({toRole:'code',session:'sess-1',advisor:true,model:'gpt-5.6-luna'}), 'review', 'my', 'plan'], {
     codex: (cwd, task, opts) => { advisorOpts = opts; return { ok: true, out: 'VERDICT: REVISE\n1. missing rollback — add a backup step', err: '', status: 0 }; },
   });
   ok('advisor mode threads {advisor:true, model} into the runner',
     advisorOpts && advisorOpts.advisor === true && advisorOpts.model === 'gpt-5.6-luna');
-  const rev = RM.allNotes(room).slice(-1)[0];
+  const rev = RM.allNotes(board).slice(-1)[0];
   ok('a REVISE verdict posts from advisor:<runtime> at HIGH priority (a gate)',
     rev.from === 'advisor:codex' && rev.priority === 'high' && /VERDICT: REVISE/.test(rev.body) && /gpt-5\.6-luna/.test(rev.body));
   ok('advisor writes an advisor-<runtime> transcript (not delegate-)',
-    /full: .*advisor-codex-.*\.md/.test(rev.body) && fs.readdirSync(room.planDir).some((f) => /^advisor-codex-.*\.md$/.test(f)));
+    /full: .*advisor-codex-.*\.md/.test(rev.body) && fs.readdirSync(board.planDir).some((f) => /^advisor-codex-.*\.md$/.test(f)));
   // an APPROVE verdict is normal priority (nothing to act on)
-  D.run(['claude', droom, JSON.stringify({toRole:'code',session:'sess-1',advisor:true}), 'review'], { claude: () => ({ ok: true, out: 'VERDICT: APPROVE\nlooks correct', err: '', status: 0 }) });
-  const appr = RM.allNotes(room).slice(-1)[0];
+  D.run(['claude', dboard, JSON.stringify({toRole:'code',session:'sess-1',advisor:true}), 'review'], { claude: () => ({ ok: true, out: 'VERDICT: APPROVE\nlooks correct', err: '', status: 0 }) });
+  const appr = RM.allNotes(board).slice(-1)[0];
   ok('an APPROVE verdict is NORMAL priority (no gate tripped)',
     appr.from === 'advisor:claude' && appr.priority === 'normal' && /VERDICT: APPROVE/.test(appr.body));
   // a model that ignores the contract → UNCLEAR, treated as a tripped gate (HIGH)
-  D.run(['codex', droom, JSON.stringify({toRole:'code',session:'sess-1',advisor:true}), 'review'], { codex: () => ({ ok: true, out: 'sure, looks fine to me', err: '', status: 0 }) });
-  const unclear = RM.allNotes(room).slice(-1)[0];
+  D.run(['codex', dboard, JSON.stringify({toRole:'code',session:'sess-1',advisor:true}), 'review'], { codex: () => ({ ok: true, out: 'sure, looks fine to me', err: '', status: 0 }) });
+  const unclear = RM.allNotes(board).slice(-1)[0];
   ok('an ignored verdict contract → UNCLEAR at HIGH priority (fail-loud)',
     /VERDICT: UNCLEAR/.test(unclear.body) && unclear.priority === 'high');
 
@@ -1549,12 +1572,12 @@ try {
   // A claude delegate must run on the CALLER's account, not the config default — otherwise
   // delegating to your own agent silently bills a different quota than the one you're on.
   let sawAccount;
-  D.run(['claude', droom, JSON.stringify({ toRole: 'code', session: 'sess-1', account: 'max' }), 'do', 'it'],
+  D.run(['claude', dboard, JSON.stringify({ toRole: 'code', session: 'sess-1', account: 'max' }), 'do', 'it'],
     { claude: (cwd, task, opts) => { sawAccount = opts.account; return { ok: true, out: 'done', err: '', status: 0 }; } });
   ok('a claude delegate runs on the CALLER\'s account (quota does not jump silently)', sawAccount === 'max');
   ok('the note NAMES the quota it ran on (@account), so it can never bill you invisibly',
-    /@max/.test(RM.allNotes(room).slice(-1)[0].body));
-  D.run(['claude', droom, JSON.stringify({ toRole: 'code', session: 'sess-1' }), 'do', 'it'],
+    /@max/.test(RM.allNotes(board).slice(-1)[0].body));
+  D.run(['claude', dboard, JSON.stringify({ toRole: 'code', session: 'sess-1' }), 'do', 'it'],
     { claude: (cwd, task, opts) => { sawAccount = opts.account; return { ok: true, out: 'x', err: '', status: 0 }; } });
   ok('with no caller account it falls back to the default (runClaude resolves it)', sawAccount === null);
   ok('parseDelegateSpec: plain task has advisor=false, model=null; bad runtime -> null',
@@ -1577,18 +1600,18 @@ try {
   // ---- in-flight markers: how the Stop hook knows a result is still coming ----------
   // A finished delegate must leave NOTHING behind (else the Stop hook would nag forever).
   ok('a FINISHED delegate leaves no in-flight marker',
-    D.pendingFor('sess-1', droom).length === 0);
+    D.pendingFor('sess-1', dboard).length === 0);
 
   // A delegate that is mid-run has a marker naming the session that fired it.
   let seen = null;
-  D.run(['codex', droom, JSON.stringify({toRole:'code',session:'sess-1'}), 'slow', 'one'], {
-    codex: () => { seen = D.pendingFor('sess-1', droom); return { ok: true, out: 'done', err: '', status: 0 }; },
+  D.run(['codex', dboard, JSON.stringify({toRole:'code',session:'sess-1'}), 'slow', 'one'], {
+    codex: () => { seen = D.pendingFor('sess-1', dboard); return { ok: true, out: 'done', err: '', status: 0 }; },
   });
   ok('a RUNNING delegate is visible to the session that fired it',
     seen && seen.length === 1 && seen[0].runtime === 'codex' && seen[0].role === 'code' && /slow one/.test(seen[0].task));
   ok('a delegate is INVISIBLE to a session that did not fire it (no cross-session nagging)',
     (() => { let other = null;
-      D.run(['codex', droom, JSON.stringify({toRole:'code',session:'sess-1'}), 'x'], { codex: () => { other = D.pendingFor('sess-OTHER', droom); return { ok: true, out: 'y', err: '', status: 0 }; } });
+      D.run(['codex', dboard, JSON.stringify({toRole:'code',session:'sess-1'}), 'x'], { codex: () => { other = D.pendingFor('sess-OTHER', dboard); return { ok: true, out: 'y', err: '', status: 0 }; } });
       return other && other.length === 0; })());
 
   // ---- PHANTOM MARKERS: reconcile against the ledger, don't wait out a timeout ----------
@@ -1596,38 +1619,38 @@ try {
   // "still running" for ELEVEN MINUTES, with the Stop hook nagging you to arm a waker for
   // work that was already done. The note carries the delegate id, so "finished" is provable.
   ok('every delegate result stamps its id into the note refs',
-    RM.allNotes(room).some((n) => n.refs && n.refs.delegateId));
-  fs.mkdirSync(D.markerDir(room), { recursive: true });
+    RM.allNotes(board).some((n) => n.refs && n.refs.delegateId));
+  fs.mkdirSync(D.markerDir(board), { recursive: true });
   const ghostId = 'codex-ghost-1';
-  fs.writeFileSync(path.join(D.markerDir(room), `${ghostId}.json`),
+  fs.writeFileSync(path.join(D.markerDir(board), `${ghostId}.json`),
     JSON.stringify({ id: ghostId, session: 'sess-1', role: 'code', runtime: 'codex', task: 'ghost', started: Date.now() }));
-  ok('a stranded marker with NO result on the fridge still reports as pending (correctly)',
-    D.pendingFor('sess-1', droom).some((p) => p.id === ghostId));
-  RM.appendNote(room, { from: 'delegate:codex', to: 'code', body: 'ghost finished', refs: { delegateId: ghostId } });
-  ok('once its result IS on the fridge, the phantom marker is reconciled away (no 11-minute nag)',
-    !D.pendingFor('sess-1', droom).some((p) => p.id === ghostId));
+  ok('a stranded marker with NO result on the board still reports as pending (correctly)',
+    D.pendingFor('sess-1', dboard).some((p) => p.id === ghostId));
+  RM.appendNote(board, { from: 'delegate:codex', to: 'code', body: 'ghost finished', refs: { delegateId: ghostId } });
+  ok('once its result IS on the board, the phantom marker is reconciled away (no 11-minute nag)',
+    !D.pendingFor('sess-1', dboard).some((p) => p.id === ghostId));
 
-  fs.rmSync(droom, { recursive: true, force: true });
+  fs.rmSync(dboard, { recursive: true, force: true });
 } catch (e) { ok('arc-delegate works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- arc-stop-hook (auto-feed at TURN END, no human keystroke) ---------------
-section('arc-stop-hook (a note is never left sitting on the fridge)');
+section('arc-stop-hook (a note is never left sitting on the board)');
 try {
-  const RM = require(path.join(SRC, 'arc-room.js'));
-  const F = require(path.join(SRC, 'arc-fridge.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
+  const F = require(path.join(SRC, 'arc-notes.js'));
   const HOOK = path.join(SRC, 'arc-stop-hook.js');
 
-  const sroom = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-'));
-  spawnSync('git', ['init', '-q'], { cwd: sroom });
-  const room = RM.resolveRoom(sroom);
-  RM.ensureRoom(room);
+  const sboard = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-'));
+  spawnSync('git', ['init', '-q'], { cwd: sboard });
+  const board = RM.resolveBoard(sboard);
+  RM.ensureBoard(board);
 
   // A real session that has claimed a role (that is what makes notes addressable). A role
-  // lease requires a LIVE arc-runner behind the session, so stand in its state file first.
+  // claim requires a LIVE arc-runner behind the session, so stand in its state file first.
   const SESSION = 'stop-sess-1';
   const scache = path.join(CLAUDE, 'cache'); fs.mkdirSync(scache, { recursive: true });
-  fs.writeFileSync(path.join(scache, `arc-state-${SESSION}.json`), JSON.stringify({ pid: process.pid, cwd: sroom }));
-  const claimed = F.requestRole(SESSION, 'code', sroom);
+  fs.writeFileSync(path.join(scache, `arc-state-${SESSION}.json`), JSON.stringify({ pid: process.pid, cwd: sboard }));
+  const claimed = F.requestRole(SESSION, 'code', sboard);
   ok('(setup) the stop-hook session holds a role', claimed.ok === true);
 
   const fire = (payload, env) => {
@@ -1638,69 +1661,69 @@ try {
     try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
   };
 
-  // nothing on the fridge, nothing in flight -> the session is allowed to go idle
+  // nothing on the board, nothing in flight -> the session is allowed to go idle
   ok('Stop hook stays SILENT when there is nothing to deliver',
-    !fire({ hook_event_name: 'Stop', cwd: sroom }).decision);
+    !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
 
   // a note lands mid-turn (e.g. a delegate finishing) -> handed over at turn END
-  RM.appendNote(room, { from: 'delegate:codex', to: 'code', body: 'ANSWER: the flake is a tar bug', priority: 'normal' });
-  const fed = fire({ hook_event_name: 'Stop', cwd: sroom });
+  RM.appendNote(board, { from: 'delegate:codex', to: 'code', body: 'ANSWER: the flake is a tar bug', priority: 'normal' });
+  const fed = fire({ hook_event_name: 'Stop', cwd: sboard });
   ok('a note that lands MID-TURN is fed to the model at turn end — no human keystroke',
     fed.decision === 'block' && /ANSWER: the flake is a tar bug/.test(fed.reason) && /END of your turn/.test(fed.reason));
 
   // idempotent: injection() advanced the cursor, so the SAME note cannot block twice
   ok('the same note can never block twice (cursor advanced -> no Stop loop)',
-    !fire({ hook_event_name: 'Stop', cwd: sroom }).decision);
+    !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
 
   // the loop guard: we NEVER chain a block onto our own block
-  RM.appendNote(room, { from: 'delegate:codex', to: 'code', body: 'second answer', priority: 'normal' });
+  RM.appendNote(board, { from: 'delegate:codex', to: 'code', body: 'second answer', priority: 'normal' });
   ok('stop_hook_active is honoured (never chains a block onto its own block)',
-    !fire({ hook_event_name: 'Stop', cwd: sroom, stop_hook_active: true }).decision);
+    !fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }).decision);
   ok('...and the note it held back is still delivered on the NEXT stop (nothing is lost)',
-    /second answer/.test(fire({ hook_event_name: 'Stop', cwd: sroom }).reason || ''));
+    /second answer/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
 
   // a non-arc session (no ARC_SESSION) must be left completely alone
   const bare = spawnSync(process.execPath, [HOOK], {
-    input: JSON.stringify({ hook_event_name: 'Stop', cwd: sroom }), encoding: 'utf8',
+    input: JSON.stringify({ hook_event_name: 'Stop', cwd: sboard }), encoding: 'utf8',
     env: { ...process.env, ARC_SESSION: '' },
   });
   ok('a session with no ARC_SESSION is never touched', bare.stdout.trim() === '');
 
   // ---- the IDLE gap: arm a waker before stopping, exactly once --------------------
   const D = require(path.join(SRC, 'arc-delegate.js'));
-  fs.mkdirSync(D.markerDir(room), { recursive: true });
-  fs.writeFileSync(path.join(D.markerDir(room), 'codex-1.json'),
+  fs.mkdirSync(D.markerDir(board), { recursive: true });
+  fs.writeFileSync(path.join(D.markerDir(board), 'codex-1.json'),
     JSON.stringify({ id: 'codex-1', session: SESSION, role: 'code', runtime: 'codex', task: 'a long job', started: Date.now() }));
 
-  const armed = fire({ hook_event_name: 'Stop', cwd: sroom });
+  const armed = fire({ hook_event_name: 'Stop', cwd: sboard });
   ok('with a delegate STILL RUNNING, the hook blocks to arm the waker before going idle',
     armed.decision === 'block' && /still running/i.test(armed.reason) && /arc await code/.test(armed.reason)
     && /run_in_background/.test(armed.reason));
   ok('the waker is armed ONCE — it does not nag on every later turn',
-    !fire({ hook_event_name: 'Stop', cwd: sroom }).decision);
+    !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
 
   // an EXPIRED marker (delegate died) must not strand the session in "still running"
-  fs.writeFileSync(path.join(D.markerDir(room), 'codex-2.json'),
+  fs.writeFileSync(path.join(D.markerDir(board), 'codex-2.json'),
     JSON.stringify({ id: 'codex-2', session: SESSION, role: 'code', runtime: 'codex', task: 'zombie', started: Date.now() - (60 * 60 * 1000) }));
   ok('a dead delegate\'s marker EXPIRES rather than nagging forever',
-    D.pendingFor(SESSION, sroom).length === 0);
+    D.pendingFor(SESSION, sboard).length === 0);
 
   // ---- arc await: the EXIT is the wake --------------------------------------------
   // Run it as a real subprocess, because "it exits" IS the property under test — in Claude
   // Code a background command's exit re-invokes the agent, and a command that merely prints
   // does not. If this ever stops exiting, an idle session silently never wakes.
-  RM.appendNote(room, { from: 'delegate:codex', to: 'code', body: 'the delegate landed', priority: 'normal' });
+  RM.appendNote(board, { from: 'delegate:codex', to: 'code', body: 'the delegate landed', priority: 'normal' });
   const aw = spawnSync(process.execPath, ['-e',
-    `require(${JSON.stringify(path.join(SRC, 'arc-watch.js'))}).awaitOnce('code', ${JSON.stringify(sroom)}, { pollMs: 20 }).then((c) => process.exit(c));`,
+    `require(${JSON.stringify(path.join(SRC, 'arc-watch.js'))}).awaitOnce('code', ${JSON.stringify(sboard)}, { pollMs: 20 }).then((c) => process.exit(c));`,
   ], { encoding: 'utf8', timeout: 8000, env: { ...process.env, ARC_SESSION: SESSION } });
   ok('`arc await` EXITS the moment a note lands (that exit is what wakes an idle session)',
     aw.status === 0 && !aw.error && /the delegate landed/.test(aw.stdout) && /arc notes/.test(aw.stdout));
 
-  // and it does NOT consume the note — the fridge still delivers it on the waking turn
+  // and it does NOT consume the note — the board still delivers it on the waking turn
   ok('`arc await` only OBSERVES — it never advances the read cursor',
-    RM.unreadFor(room, 'code').count === 1);
+    RM.unreadFor(board, 'code').count === 1);
 
-  fs.rmSync(sroom, { recursive: true, force: true });
+  fs.rmSync(sboard, { recursive: true, force: true });
 } catch (e) { ok('arc-stop-hook works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- arc-bundle (first-party bundle installer) -------------------------------

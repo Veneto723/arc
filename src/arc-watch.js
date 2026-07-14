@@ -2,13 +2,13 @@
 // arc-watch: emit one line per NEW unread note for a role, so a session can WAKE on a
 // delegation instead of waiting for a human to prompt it.
 //
-// The fridge delivers notes at TURN boundaries (a human prompt), so an idle session
+// The board delivers notes at TURN boundaries (a human prompt), so an idle session
 // never sees a delegation until someone nudges it. A DELEGATE (e.g. a `research`
 // session) fixes that by running this as a BACKGROUND task / Monitor:
 //
 //     Monitor / background:  arc watch research
 //
-// Each delegation a roommate posts (`arc note research "investigate X"`) then prints a
+// Each delegation a peer posts (`arc note research "investigate X"`) then prints a
 // line here → that line is an event that re-invokes the (otherwise idle) session, which
 // runs `arc notes` to read it and acts. This only OBSERVES — it never advances the read
 // cursor; `arc notes` does the actual read. Each unread note is emitted once per process.
@@ -17,24 +17,24 @@
 // waker can pull back an idle session, but nothing can wake a closed one.
 'use strict';
 
-const R = require('./arc-room');
-const F = require('./arc-fridge');
+const R = require('./arc-board');
+const F = require('./arc-notes');
 
 const POLL_MS = 2500;
 
 // Resolve the role to watch: an explicit arg, else this session's own claimed role.
-function resolveRole(roleArg, session, room) {
+function resolveRole(roleArg, session, board) {
   const r = String(roleArg || '').trim().toLowerCase();
   if (r) return r;
-  return session ? F.getRole(session, room) : null;
+  return session ? F.getRole(session, board) : null;
 }
 
 // One poll: emit any unread note for `role` we haven't emitted yet (never touches the
 // cursor). Returns the updated `emitted` set. Pure-ish (takes/returns state) so it's
 // testable without a running loop.
-function poll(room, role, emitted, write) {
+function poll(board, role, emitted, write) {
   let u;
-  try { u = R.unreadFor(room, role); } catch { return emitted; }
+  try { u = R.unreadFor(board, role); } catch { return emitted; }
   for (const n of u.notes) {
     if (emitted.has(n.seq)) continue;
     emitted.add(n.seq);
@@ -46,17 +46,17 @@ function poll(room, role, emitted, write) {
 
 function run(roleArg, cwd) {
   const session = (process.env.ARC_SESSION || '').trim();
-  const room = R.resolveRoom(cwd || process.cwd());
-  const role = resolveRole(roleArg, session, room);
+  const board = R.resolveBoard(cwd || process.cwd());
+  const role = resolveRole(roleArg, session, board);
   if (!role) {
     process.stderr.write('[arc watch] no role to watch — pass one (`arc watch research`) or claim one first (`arc role research`).\n');
     process.exit(1);
   }
-  process.stderr.write(`[arc watch] watching room "${room.name}" for delegations to "${role}" (Ctrl+C / stop to end)\n`);
+  process.stderr.write(`[arc watch] watching board "${board.name}" for delegations to "${role}" (Ctrl+C / stop to end)\n`);
   const emitted = new Set();
   const write = (line) => process.stdout.write(line + '\n');
-  poll(room, role, emitted, write);              // fire any PENDING delegation immediately
-  setInterval(() => poll(room, role, emitted, write), POLL_MS);
+  poll(board, role, emitted, write);              // fire any PENDING delegation immediately
+  setInterval(() => poll(board, role, emitted, write), POLL_MS);
 }
 
 // ---- arc await ----------------------------------------------------------------------
@@ -67,7 +67,7 @@ function run(roleArg, cwd) {
 // that matters: it stops. That exit IS the wake.
 //
 // Armed by the Stop hook when a delegate is in flight (see arc-stop-hook.js). It does NOT
-// mark anything read — it only observes; the fridge delivers on the turn it wakes.
+// mark anything read — it only observes; the board delivers on the turn it wakes.
 const AWAIT_TIMEOUT_MS = 20 * 60 * 1000;   // outlives a delegate (10m cap), then gives up
 
 function awaitOnce(roleArg, cwd, opts) {
@@ -77,8 +77,8 @@ function awaitOnce(roleArg, cwd, opts) {
   const write = o.write || ((l) => process.stdout.write(l + '\n'));
   const now = o.now || (() => Date.now());
   const session = (process.env.ARC_SESSION || '').trim();
-  const room = R.resolveRoom(cwd || process.cwd());
-  const role = resolveRole(roleArg, session, room);
+  const board = R.resolveBoard(cwd || process.cwd());
+  const role = resolveRole(roleArg, session, board);
   if (!role) {
     process.stderr.write('[arc await] no role — pass one (`arc await research`) or claim one first (`arc:role research`).\n');
     return 1;
@@ -87,9 +87,9 @@ function awaitOnce(roleArg, cwd, opts) {
 
   const check = () => {
     let u;
-    try { u = R.unreadFor(room, role); } catch { return false; }
+    try { u = R.unreadFor(board, role); } catch { return false; }
     if (!u.count) return false;
-    write(`[arc await] ${u.count} note(s) landed for "${role}" in room "${room.name}" — this exit is your wake-up:`);
+    write(`[arc await] ${u.count} note(s) landed for "${role}" on the "${board.name}" board — this exit is your wake-up:`);
     for (const n of u.notes) {
       write(`  #${n.seq} from ${n.from}${n.priority === 'high' ? ' [!]' : ''}: ${String(n.body).replace(/\s+/g, ' ').slice(0, 300)}`);
     }

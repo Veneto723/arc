@@ -51,11 +51,11 @@ Move chats between PCs (discrete export/import — no realtime sync):
   arc:import <archive> <dest>   re-root them under <dest> so they resume at a LOCAL path
                          (e.g. home's E:\whaletech\proj → E:\proj.  --dest <d> is the same)
 
-The fridge — sticky notes between sessions working in the same folder:
-  arc:role <name>         claim a role in this room (research | coding | …) — survives
+The board — sticky notes between sessions working in the same folder:
+  arc:role <name>         claim a role in this board (research | coding | …) — survives
                          restart + switch, like your model and effort
   arc:role                who am I, who else is here?
-  arc:note <role> <text>  leave a note for a roommate  ·  arc:note all <text> broadcasts
+  arc:note <role> <text>  leave a note for a peer  ·  arc:note all <text> broadcasts
   arc:note <role> --kind request <text>      ASK — tracked until answered (⧗ shown to you)
   arc:note <role> --reply-to #N <text>       ANSWER #N (threads it; kind: result)
   arc:note <role> --supersedes #N <text>     RETRACT #N — every future reader of #N is warned
@@ -63,19 +63,19 @@ The fridge — sticky notes between sessions working in the same folder:
                          (blocker + correction are auto-HIGH; plain notes need no flags)
   arc:notes               read YOUR unread notes now (they also arrive AUTOMATICALLY
                          at the start of your next turn) — ZERO tokens
-  arc:notes all           the whole fridge, nothing marked read
-                         (a room = the git repo root you started in. The statusline
+  arc:notes all           the whole board, nothing marked read
+                         (a board = the git repo root you started in. The statusline
                           shows "📌 N from research" when notes are waiting.)
 
   arc:anchors             which doc claims about the code have gone STALE — ZERO tokens
   arc:anchors reseal      after fixing the docs: the current code becomes the baseline
                          (put <!-- arc:anchor src/auth.ts#handleLogin --> next to a claim
                           in a doc. When a commit rewrites that symbol, a [!] note lands
-                          on the fridge and the other session sees it on its next turn.)
+                          on the board and the other session sees it on its next turn.)
 
   Completing a task POSTS ITSELF. When an agent marks a task done, arc diffs the repo
   against the HEAD sha it recorded when the task was created, and sticks a note on the
-  fridge carrying the commit sha and the changed files. Nobody has to remember to say
+  board carrying the commit sha and the changed files. Nobody has to remember to say
   "P-014 is done" — the tick IS the message, and it comes with evidence.
   A commit-backed tick is a <result> and ranks above routine news; an uncommitted one is plain
   <info> and sinks — still delivered (non-code work is real work), just not dressed as proof.
@@ -87,8 +87,8 @@ The fridge — sticky notes between sessions working in the same folder:
 
 Agent initiative — how proactive your agent is with arc's tools (delegate/note/watch):
   arc:mode                open the ← / → dial:  passive · balanced · active — ZERO tokens
-  arc:mode active         self-initiate when it helps (note roommates, delegate, watch)
-  arc:mode balanced       may note roommates on real changes; no delegate/fan-out unasked
+  arc:mode active         self-initiate when it helps (note peers, delegate, watch)
+  arc:mode balanced       may note peers on real changes; no delegate/fan-out unasked
   arc:mode passive        (default) act only on your order — no self-initiated anything
                          (shows in the statusline: ○ passive · ◐ balanced · ● active)
 
@@ -113,8 +113,8 @@ Why the arc: forms?
           are no arc slash commands anymore.
 
 Delegate a task to the OTHER model — it runs HEADLESS and you keep working:
-  arc:delegate codex <task>       fire it on Codex; result lands on the fridge
-  arc:delegate claude <task>      fire it on Claude; result lands on the fridge
+  arc:delegate codex <task>       fire it on Codex; result lands on the board
+  arc:delegate claude <task>      fire it on Claude; result lands on the board
   arc:delegate <rt> --advisor <task>   READ-ONLY review — returns an APPROVE/REVISE VERDICT
                                   (a REVISE lands at HIGH priority: a gate, not just a note)
   arc:delegate <rt> --model <id> <task>   target a specific model (e.g. --model claude-fable-5
@@ -136,21 +136,21 @@ In your terminal (not inside a session):
   arc trash [restore <id>|empty]   manage the deleted-conversation trash
   arc doctor              health check    ·    arc setup    reconfigure
 
-Fridge from a terminal (also how an AGENT posts — it can RUN these, though it can't
+Board from a terminal (also how an AGENT posts — it can RUN these, though it can't
 TYPE the arc: form, which the hook eats before the model):
-  arc role                who's in this repo's room, and what's my role?
-  arc note all "<text>"   broadcast a note to every roommate
-  arc note <role> "<text>" leave a note for one roommate
+  arc role                who's in this repo's board, and what's my role?
+  arc note all "<text>"   broadcast a note to every peer
+  arc note <role> "<text>" leave a note for one peer
   arc notes               read your unread notes
-  arc delegate <claude|codex> "<task>"   fire a headless task; result -> the fridge
+  arc delegate <claude|codex> "<task>"   fire a headless task; result -> the board
   arc await [role]        block until a note lands, then EXIT. Run it as a BACKGROUND
                          task before you go idle: that EXIT re-invokes you with the
                          result (arc arms this for you when a delegate is still out)
   arc watch [role]        (long-running) print a line per incoming delegation, so a
                          BACKGROUND task / Monitor can WAKE an idle delegate session
   arc claudex [stop]      show (or stop) the auto-managed GPT-in-Claude translator sidecars
-  (skill: roommates = the whole protocol — WHEN a note is worth leaving, the note kinds,
-   and how a delegate session watches the fridge to stay responsive)
+  (skill: peers = the whole protocol — WHEN a note is worth leaving, the note kinds,
+   and how a delegate session watches the board to stay responsive)
 
 Configured accounts: ${accounts.join(', ') || '(none — run `arc setup`)'}
 `;

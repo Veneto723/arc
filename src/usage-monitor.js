@@ -640,13 +640,13 @@ function renderFull(data, sessionEta, weekEta, poolRows, acc, model, effort) {
   return lines.join('\n');
 }
 
-// The AMBIENT fridge surface: "📌 2 from research". Derived arithmetic (ledger
+// The AMBIENT board surface: "📌 2 from research". Derived arithmetic (ledger
 // length − this role's cursor), so it cannot lie and clears itself the moment the
 // notes are read. Nothing has to remember to tell you.
-function fridgeSeg(f) {
+function boardSeg(f) {
   if (!f || !f.count) return '';
   // Holding NO role means you receive nothing — so say it loudly rather than showing an
-  // empty statusline while notes quietly pile up in the room.
+  // empty statusline while notes quietly pile up in the board.
   if (f.noRole) return `\x1b[1;91m⚠ ${f.count} notes · no role — arc:role <name>\x1b[0m`;
   return `\x1b[1;93m📌 ${f.count} from ${f.senders.join(', ')}\x1b[0m`;
 }
@@ -660,10 +660,10 @@ function stanceSeg(stance) {
   return '\x1b[2m○ passive\x1b[0m';
 }
 
-function renderCompact(data, sessionEta, poolRows, acc, model, effort, fridge, stance) {
+function renderCompact(data, sessionEta, poolRows, acc, model, effort, board, stance) {
   // Two-row layout: line 1 = accounts/usage (switching-critical), line 2 = this
   // session's stats (model/effort · stance · unread notes). Loading/alert states stay single line.
-  const line2 = [formatModel(model, effort), stanceSeg(stance), fridgeSeg(fridge)].filter(Boolean).join(' | ');
+  const line2 = [formatModel(model, effort), stanceSeg(stance), boardSeg(board)].filter(Boolean).join(' | ');
   const withL2 = (line1) => (line2 ? `${line1}\n${line2}` : line1);
 
   if (!acc) return 'arc: run `arc setup`';
@@ -798,11 +798,11 @@ async function main() {
   const sessionEta = usageData ? computeEtaMinutes(history, 'session', usageData.five_hour.utilization) : null;
   const weekEta = usageData ? computeEtaMinutes(history, 'week', usageData.seven_day.utilization) : null;
 
-  // Unread sticky notes from this session's roommates. Cheap (one stat when there's
-  // no role) and best-effort — the statusline must never fail because of the fridge.
-  let fridge = null;
+  // Unread sticky notes from this session's peers. Cheap (one stat when there's
+  // no role) and best-effort — the statusline must never fail because of the board.
+  let board = null;
   try {
-    fridge = require('./arc-fridge').badge(
+    board = require('./arc-notes').badge(
       process.env.ARC_SESSION, sl && sl.workspace ? sl.workspace.current_dir : null);
   } catch {}
   let stance = 'passive';
@@ -810,7 +810,7 @@ async function main() {
 
   process.stdout.write(
     compact
-      ? renderCompact(usageData, sessionEta, pool.rows, acc, model, effort, fridge, stance)
+      ? renderCompact(usageData, sessionEta, pool.rows, acc, model, effort, board, stance)
       : renderFull(usageData, sessionEta, weekEta, pool.rows, acc, model, effort)
   );
 }

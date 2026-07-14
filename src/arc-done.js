@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // arc-done: derive "done" from GIT, not from the agent's word.
 //
-// The fridge (arc-room) let roommates leave each other notes. But a note is still
+// The board (arc-board) let peers leave each other notes. But a note is still
 // something an agent has to REMEMBER to write, and bookkeeping is the first thing
 // dropped when context runs short or the code gets interesting. Anthropic hit the
 // same wall in their own agent-teams feature; their docs admit it:
@@ -26,7 +26,7 @@
 // team. `team_name` is even marked "@deprecated: sessions have a single implicit team".
 //
 // So: ticking a task IS the handoff. The coding agent completes P-014, and the
-// research agent finds a note on the fridge carrying the sha, the files, and the
+// research agent finds a note on the board carrying the sha, the files, and the
 // commit subjects — whether or not anybody remembered to say anything.
 //
 // Two modes (features.doneGate in arc-config.json, or ARC_DONE_GATE):
@@ -42,7 +42,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const R = require('./arc-room');
+const R = require('./arc-board');
 
 const MAX_FILES = 12;        // a note is a sticky note, not a diff
 const MAX_COMMITS = 5;
@@ -90,15 +90,15 @@ function evidenceSince(cwd, baseline) {
 }
 
 // ---- baselines ---------------------------------------------------------------
-// Task ids restart at 1 per session, so two roommates both have a task "1". Key the
+// Task ids restart at 1 per session, so two peers both have a task "1". Key the
 // baseline by SESSION + task, never by task alone.
-const baselineFile = (room, session, taskId) =>
-  path.join(room.planDir, `base-${session || 'nosession'}-${taskId}.json`);
+const baselineFile = (board, session, taskId) =>
+  path.join(board.planDir, `base-${session || 'nosession'}-${taskId}.json`);
 
-function recordBaseline(room, session, taskId, sha) {
+function recordBaseline(board, session, taskId, sha) {
   try {
-    R.ensureRoom(room);
-    fs.writeFileSync(baselineFile(room, session, taskId), JSON.stringify({ sha, at: new Date().toISOString() }));
+    R.ensureBoard(board);
+    fs.writeFileSync(baselineFile(board, session, taskId), JSON.stringify({ sha, at: new Date().toISOString() }));
     return true;
   } catch { return false; }
 }
@@ -109,10 +109,10 @@ function recordBaseline(room, session, taskId, sha) {
 //   born — when the task FILE was created. Always available, and it works for tasks
 //          that predate the hook ever being installed. Coarser (clock, not graph).
 // The caller tries the sha first and falls back to the timestamp.
-function readBaseline(room, session, taskId, taskFile) {
+function readBaseline(board, session, taskId, taskFile) {
   const out = { sha: null, born: null };
   try {
-    const b = JSON.parse(fs.readFileSync(baselineFile(room, session, taskId), 'utf8'));
+    const b = JSON.parse(fs.readFileSync(baselineFile(board, session, taskId), 'utf8'));
     if (b && b.sha) out.sha = b.sha;
   } catch {}
   try {
@@ -164,7 +164,7 @@ function buildNote(payload, evidence, proven, role) {
   const subject = payload.task_subject || `task ${payload.task_id}`;
   // A proven tick CARRIES EVIDENCE (sha + files), so it is a `result` and ranks above routine
   // news. An unverified tick is a CLAIM, so it is plain `info` and sinks in the digest — the
-  // note is still delivered (a roommate genuinely wants to know the design spec is done), it
+  // note is still delivered (a peer genuinely wants to know the design spec is done), it
   // just doesn't arrive dressed like proof. That is the whole difference: weight, not silence.
   //
   // The old wording — "UNVERIFIED — taken on trust" — read like an accusation. Most uncommitted
@@ -185,9 +185,9 @@ function buildNote(payload, evidence, proven, role) {
 
 // ---- hook entry points -------------------------------------------------------
 function onTaskCreated(payload, session) {
-  const room = R.resolveRoom(payload.cwd || process.cwd());
-  const sha = head(room.root);
-  if (sha) recordBaseline(room, session, payload.task_id, sha);
+  const board = R.resolveBoard(payload.cwd || process.cwd());
+  const sha = head(board.root);
+  if (sha) recordBaseline(board, session, payload.task_id, sha);
   return { ok: true };
 }
 
@@ -196,36 +196,36 @@ function onTaskCompleted(payload, session) {
   const g = mode();
   if (g === 'off') return { block: false };
 
-  const room = R.resolveRoom(payload.cwd || process.cwd());
+  const board = R.resolveBoard(payload.cwd || process.cwd());
 
   // NO REPO, NO GATE. "There is no git here" and "git says you committed nothing" are
   // completely different facts, and conflating them is a trap: a session whose cwd has
   // drifted outside a repo (or a project simply not under git) would have EVERY task
   // completion refused, with a bewildering "no commit found". A gate that fires where
   // it cannot possibly gather evidence is not strict, it is broken.
-  if (!head(room.root)) return { block: false };
+  if (!head(board.root)) return { block: false };
 
-  const base = readBaseline(room, session, payload.task_id, taskFilePath(session, payload.task_id));
+  const base = readBaseline(board, session, payload.task_id, taskFilePath(session, payload.task_id));
   // Prefer the exact sha; fall back to the task's birth time when that sha is unknown
   // to git (an amend or rebase orphaned it) or was never recorded.
-  let evidence = base.sha ? evidenceSince(room.root, base.sha) : null;
-  if (evidence === null && base.born) evidence = evidenceSince(room.root, base.born);
+  let evidence = base.sha ? evidenceSince(board.root, base.sha) : null;
+  if (evidence === null && base.born) evidence = evidenceSince(board.root, base.born);
   const v = verdict(evidence, g);
 
   if (v.block) return { block: true, stderr: `[arc] ${v.reason}` };
 
-  // Post only if this session has a role — the fridge is opt-in, and a note needs a
+  // Post only if this session has a role — the board is opt-in, and a note needs a
   // sender. No role means nobody is listening; stay silent rather than invent one.
-  const F = require('./arc-fridge');
-  const role = F.getRole(session, room);
+  const F = require('./arc-notes');
+  const role = F.getRole(session, board);
   if (!v.post || !role) return { block: false };
-  try { R.appendNote(room, buildNote(payload, evidence, v.proven, role)); } catch {}
+  try { R.appendNote(board, buildNote(payload, evidence, v.proven, role)); } catch {}
 
   // A completion is the moment the code most recently moved, so it is also the moment
   // to ask whether the DOCS still describe it. Any anchor that just went stale becomes
   // a [!] note, which the research session receives at the top of its next turn.
   let stale = 0;
-  try { stale = require('./arc-anchor').checkAndNotify(room, role).posted || 0; } catch {}
+  try { stale = require('./arc-anchor').checkAndNotify(board, role).posted || 0; } catch {}
   return { block: false, posted: true, proven: v.proven, stale };
 }
 
