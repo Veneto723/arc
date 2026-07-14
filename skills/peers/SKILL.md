@@ -1,6 +1,6 @@
 ---
 name: peers
-description: You may be sharing this repo with ANOTHER arc session — a "peer" (e.g. a read-only `research` session while you write code, or an `android` session while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel. Use this skill for BOTH halves of that protocol. SPEAKING — when you finish something that changes their world (a shared API/contract/schema change, a decision that constrains their side, a blocker they'll hit, a feature they now build on), leave ONE concise note: `arc note all "<one line>"` or `arc note <role> "<one line>"`; run `arc role` first to see who is actually there, and never narrate routine progress. LISTENING — notes arrive automatically at the start of your next turn, so normally you do nothing; but if your job is ANSWERING others (a delegate/responder session), watch the board with `arc watch <your-role>` so a delegation wakes you while idle. Also covers note kinds (request/result/correction/blocker) and retracting a note you got wrong with `--supersedes`.
+description: You may be sharing this repo with ANOTHER arc session — a "peer" (e.g. a read-only `research` session while you write code, or an `android` session while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel. Use this skill for BOTH halves of that protocol. SPEAKING — when you finish something that changes their world (a shared API/contract/schema change, a decision that constrains their side, a blocker they'll hit, a feature they now build on), leave ONE concise note: `arc note all "<one line>"` or `arc note <role> "<one line>"`; run `arc role` first to see who is actually there, and never narrate routine progress. LISTENING — notes arrive automatically at the start of your next turn, so normally you do nothing; but if your job is ANSWERING others (a responder session), watch the board with `arc watch <your-role>` so an incoming request wakes you while idle. Also covers note kinds (request/result/correction/blocker) and retracting a note you got wrong with `--supersedes`.
 ---
 
 # Peers & the board
@@ -30,7 +30,7 @@ deviation announces itself:
 |---|---|---|
 | **balanced** *(the default)* | leave a note when you change a peer's world (SPEAK) | *nothing — silence means this* |
 | **passive** | **nothing here.** Act only on the user's explicit order. | `[arc stance: PASSIVE]` |
-| **active** | balanced, **plus** arm a watch / delegate / answer delegations (SPEAK **and** LISTEN) | `[arc stance: ACTIVE]` |
+| **active** | balanced, **plus** ask a peer when you're stuck, arm a watch, answer requests (SPEAK **and** LISTEN) | `[arc stance: ACTIVE]` |
 
 So: **SPEAK by default; stay silent if you see PASSIVE; only LISTEN (arm a watch) under ACTIVE
 or when the user asks.** And when you're solo — `arc role` shows no peer — do nothing regardless.
@@ -72,14 +72,40 @@ arc role                                   # is there a peer whose job this is?
 arc note research --kind request "<packet>"
 ```
 
+## A peer vs. a subagent — pick by whether context is worth keeping
+
+You have two ways to hand work off, and only one of them is arc's:
+
+| | **subagent** (Claude Code's own Task tool) | **peer** (`arc note <role> --kind request`) |
+|---|---|---|
+| who does it | a fresh one-shot you spawn | a **live session** already working here |
+| context | **none** — reads what it needs, from scratch | **has it, and keeps accumulating** |
+| after | returns its answer, then **perishes** | **still there** for the follow-up |
+| good for | a bounded question; a parallel sweep | an ongoing thread someone owns |
+
+**Reach for a subagent** when the work is self-contained and nobody needs to remember it
+afterwards. It's in-session, on your own quota, and it can run another model. arc adds nothing
+here — just ask for one.
+
+**Reach for a peer** when the context is the point. If `arc role` shows a session whose job this
+is, note them: they already know the history, so the third ask costs what the first did. A
+subagent would re-derive that history every single time, and confidently get it slightly wrong.
+
+> There used to be an `arc delegate` that fired a headless one-shot. It was removed — worse than
+> a subagent (heavier, no context, dies anyway) and worse than a peer (no memory). If you were
+> reaching for it: pick a row above. To run work on GPT, `arc:switch` to a codex account.
+
 **Write it as a bounded packet, not a shout.** A good request states the objective, hands over
 the evidence you already have, says what is ALREADY SETTLED so they don't re-derive it, and asks
 specific questions. That shape is proven — it's what real peers on real boards actually write:
 
-> `DELEGATION: settle-gate inquiry -> docs/inquiry/settle-gate/GOAL.md (full brief,`
-> `device-evidence, established constraints, 5 open questions). ONE-LINE: the agent is handed`
-> `TRANSIENT screens and treats them as the destination -> confident wrong answers. Settled`
-> `already (do not re-derive): …`
+> `settle-gate inquiry -> docs/inquiry/settle-gate/GOAL.md (full brief, device-evidence,`
+> `established constraints, 5 open questions). ONE-LINE: the agent is handed TRANSIENT screens`
+> `and treats them as the destination -> confident wrong answers. Settled already (do not`
+> `re-derive): …`
+
+(That real note opens with the word *"DELEGATION:"* — written before the vocabulary settled. It
+was posted with `arc note`, to a live peer. Read it as a **request**; the shape is what matters.)
 
 A long packet belongs in a file — put it in `docs/` and let the note carry the one-line summary
 plus the path. The note is a pointer, not the document.
@@ -123,18 +149,18 @@ peer can act on a claim you have already publicly withdrawn. If you say *"I was 
 
 # LISTEN — you usually do nothing
 
-Notes are delivered to you **automatically at the start of your next turn**, and a delegate's
-result is handed to you at the **end** of a turn. Claude sessions also show a waiting-note mark
-in the statusline. So for ordinary work: no watch, no polling, nothing to arm.
+Notes are delivered to you **automatically at the start of your next turn**, and a reply to
+something you asked is handed to you at the **end** of a turn. Claude sessions also show a
+waiting-note mark in the statusline. So for ordinary work: no watch, no polling, nothing to arm.
 
 ## …unless your job is ANSWERING others
 
-Only if this session exists to service delegations (a `research` session investigating what an
-`android` or `frontend` session hands over):
+Only if this session exists to service other peers' requests (a `research` session investigating
+what an `android` or `frontend` session asks):
 
 An **idle** session can't be pushed to — the board delivers on a turn, and a turn only starts
-on a human prompt. So a delegation sits unread until someone nudges you. A background watch
-removes that nudge: an incoming delegation *wakes you*.
+on a human prompt. So a request sits unread until someone nudges you. A background watch
+removes that nudge: an incoming note *wakes you*.
 
 ```sh
 arc watch <your-role>     # e.g. arc watch research
@@ -144,7 +170,7 @@ Run it as a **Monitor** (preferred — a persistent event stream) or a **backgro
 only *observes*; it never marks notes read. It fires immediately for anything already waiting,
 then for each new note.
 
-**When a delegation wakes you:**
+**When a request wakes you:**
 
 1. **Read it** — `arc notes` (this delivers it *and* marks it read; a wake is not a human turn,
    so the automatic turn-start injection does **not** fire).

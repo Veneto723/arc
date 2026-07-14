@@ -85,10 +85,10 @@ The board — sticky notes between sessions working in the same folder:
       strict  REFUSES to mark a task done when no commit backs it (the agent is told why)
       off     no notes, no gate
 
-Agent initiative — how proactive your agent is with arc's tools (delegate/note/watch):
+Agent initiative — how proactive your agent is with arc's tools (note/watch/await):
   arc:mode                open the ← / → dial:  passive · balanced · active — ZERO tokens
-  arc:mode balanced       (DEFAULT) note peers on real changes; no delegate/fan-out unasked
-  arc:mode active         also delegate + watch on its own judgment (the heavier tools)
+  arc:mode balanced       (DEFAULT) note peers on real changes; won't ask/watch unasked
+  arc:mode active         also ASK a peer when stuck + watch for the reply, on its own judgment
   arc:mode passive        silent — act only on your order, no self-initiated notes at all
                          (shows in the statusline: ○ passive · ◐ balanced · ● active)
                          Only a DEVIATION costs tokens: balanced injects nothing.
@@ -113,21 +113,20 @@ Why the arc: forms?
           exhausted account). That's why everything here is an arc: sentinel — there
           are no arc slash commands anymore.
 
-Delegate a task to the OTHER model — it runs HEADLESS and you keep working:
-  arc:delegate codex <task>       fire it on Codex; result lands on the board
-  arc:delegate claude <task>      fire it on Claude; result lands on the board
-  arc:delegate <rt> --advisor <task>   READ-ONLY review — returns an APPROVE/REVISE VERDICT
-                                  (a REVISE lands at HIGH priority: a gate, not just a note)
-  arc:delegate <rt> --model <id> <task>   target a specific model (e.g. --model claude-fable-5
-                                  to consult Fable, or a cheap model to review)
-  arc:delegate claude --account <id> <task>   run it on ANOTHER account (deliberate offload).
-                                  By DEFAULT a claude delegate runs on THIS session's account —
-                                  your quota never jumps behind your back.
-  (for in-session work on the SAME model + quota, prefer Claude's own subagent/Task tool;
-   arc:delegate is for CROSSING a boundary — another runtime, another quota, another session)
-                                  The result/verdict is handed to this session AUTOMATICALLY at
-                                  the end of a turn — you never have to go and ask for it. (Claim
-                                  a role with arc:role to have it addressed to you by name.)
+Handing work off — there are exactly two ways, and arc only owns one:
+  a SUBAGENT      one-shot, no context needed (research a question, sweep some files).
+                  Just ask your agent for one — Claude Code runs it natively, in-session,
+                  on your own quota, and it can target another model (even Fable).
+                  NOT an arc feature. arc has nothing to add here.
+  a PEER          stateful, context worth keeping (an ongoing frontend / android / research
+                  thread). A second arc session on the same board:
+                    arc:role                     who's here?
+                    arc:note <role> --kind request <packet>    ask them; keep working
+                  They keep their context across turns, so the 3rd ask costs what the 1st
+                  did — and arc WAKES you when they reply (it arms "arc await" for you).
+  (arc:delegate was removed: it fired a headless one-shot that re-read the repo from scratch
+   and then died — worse than a subagent, worse than a peer. To run a task on GPT, arc:switch
+   to your codex account. Old muscle memory still gets a pointer, at zero tokens.)
 
 In your terminal (not inside a session):
   arc                     launch
@@ -143,15 +142,15 @@ TYPE the arc: form, which the hook eats before the model):
   arc note all "<text>"   broadcast a note to every peer
   arc note <role> "<text>" leave a note for one peer
   arc notes               read your unread notes
-  arc delegate <claude|codex> "<task>"   fire a headless task; result -> the board
+  arc note <role> --kind request "<packet>"   ASK a peer — tracked until they answer
   arc await [role]        block until a note lands, then EXIT. Run it as a BACKGROUND
                          task before you go idle: that EXIT re-invokes you with the
-                         result (arc arms this for you when a delegate is still out)
-  arc watch [role]        (long-running) print a line per incoming delegation, so a
-                         BACKGROUND task / Monitor can WAKE an idle delegate session
+                         reply (arc arms this for you when a request is unanswered)
+  arc watch [role]        (long-running) print a line per incoming note, so a BACKGROUND
+                         task / Monitor can WAKE an idle RESPONDER peer
   arc claudex [stop]      show (or stop) the auto-managed GPT-in-Claude translator sidecars
-  (skill: peers = the whole protocol — WHEN a note is worth leaving, the note kinds,
-   and how a delegate session watches the board to stay responsive)
+  (skill: peers = the whole protocol — WHEN a note is worth leaving, how to ask when
+   you're stuck, the note kinds, and how a responder peer watches the board)
 
 Configured accounts: ${accounts.join(', ') || '(none — run `arc setup`)'}
 `;

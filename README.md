@@ -7,10 +7,9 @@ slash menus and rendering are pixel-perfect — no PTY/ConPTY garble) and layers
 everything the built-in CLI can't do: switch between accounts mid-conversation,
 pick an account from an arrow-key menu without spending a token, get a desktop
 toast when a session finishes, and see live rate-limit usage in your statusline.
-arc hosts ONE runtime — Claude Code. A GPT model is reachable two ways: as a
-**delegate** (`arc:delegate codex <task>` runs it headlessly via `codex exec` and drops the
-result on the board), or as an **account** (an Anthropic-compatible proxy serving a GPT
-model, so `/model` swaps provider mid-conversation without the session moving).
+arc hosts ONE runtime — Claude Code. A GPT model arrives as an **account** (an
+Anthropic-compatible proxy serving a GPT model, so `/model` swaps provider mid-conversation
+without the session moving).
 
 The Claude account config fits any of these setups:
 
@@ -37,7 +36,7 @@ The Claude account config fits any of these setups:
 - **Desktop toasts** labeled with the session's `/rename` name, with colored state icons; **click a toast to focus that terminal window**.
 - **Usage statusline** — subscription 5h/7d %, reset times, pace ETA, blink warnings near the limit; gateway cost/tokens for api accounts.
 - **Safety rails** — refuses to open one conversation in two processes (a crash cause), warns before removing an account live sessions are using, logs every launch/exit, and backs up config before every change.
-- **Headless delegation** — `arc:delegate codex <task>` runs a task on Codex (or a second Claude) while you keep working; the answer lands on the board and is fed to you at your next turn boundary.
+- **Ask a peer, get woken** — when a session is stuck, it can ask another session that owns that area (`arc note research --kind request "<packet>"`) and keep working; arc arms a waker, so the reply re-invokes it with nobody typing a thing.
 
 ---
 
@@ -79,7 +78,7 @@ arc usage — peek
   lean on Windows. (It used to be cross-platform; that was dropped as untested weight.)
 - **Node.js**
 - **Claude Code** — the `claude` CLI on your PATH
-- **Codex CLI** *(optional)* — required only for `arc delegate codex` / `arc:delegate codex`
+- **Codex CLI** — not required. arc reaches a GPT model as an *account*, not a second CLI.
 
 ## Install
 
@@ -173,7 +172,7 @@ the model), but it can **run** the CLI form via its Bash tool — `arc note all 
 the whole protocol: that it *has* a peer, *when* a note is worth leaving (a shared
 API/schema change, a decision, a blocker) — and, importantly, when NOT to (routine steps);
 the note **kinds** (`request` / `result` / `correction` / `blocker`); and, if the session's
-job is answering others, how to watch the board so a delegation wakes it. So the sessions
+job is answering others, how to watch the board so an incoming request wakes it. So the sessions
 leave each other high-signal notes on their own judgment, the way agent-team teammates
 message each other. How much they may do *unprompted* is governed by `arc:mode`.
 
@@ -421,9 +420,9 @@ and never echoes secrets. Changes are `arc:switch`-able immediately, no restart.
 - **One harness, not two.** arc hosts Claude Code only. Hosting a second agent meant a
   second implementation of everything — the board needed a Codex-side hook, hooks needed a
   reverse-engineered TOML block, the statusline needed a second config format. A second
-  *model* costs none of that: it arrives as an account (a proxy) or as a delegate
-  (`codex exec`). The runtime adapters, the transcript transpiler and the cross-runtime
-  session registry were deleted; they are recoverable from git history if that changes.
+  *model* costs none of that: it arrives as an account (a proxy). The runtime adapters, the
+  transcript transpiler and the cross-runtime session registry were deleted; they are
+  recoverable from git history if that changes.
 - **Switching is manual, via triggers.** The `arc:switch` hook drops a per-session
   trigger file; the wrapper polls for it, kills claude, and relaunches the *same
   conversation* (`--resume <uuid>`) on the other account, re-applying model /
@@ -475,20 +474,9 @@ both) for the imported chat to resume cleanly.
 
 ## Reaching a GPT model
 
-arc no longer hosts the Codex TUI as a second runtime. A GPT model is reachable two ways,
-and neither one costs a second implementation of arc's features.
-
-**As a delegate — it does the work, you keep yours.**
-
-```
-arc:delegate codex <task>      # runs headless via `codex exec`; you keep working
-arc:delegate claude <task>     # same, on a second Claude
-```
-
-The result lands on the board and is **handed to you automatically at the end of a turn** —
-you never have to go and fetch it (see *The board*). Requires the `codex` CLI on PATH.
-Nothing is installed or configured on the Codex side: `codex exec` is a documented headless
-surface, task in, answer out.
+arc no longer hosts the Codex TUI as a second runtime, and there is no longer a `codex exec`
+delegate either. A GPT model arrives **as an account** — which costs no second implementation
+of arc's features, because to arc it is just another account to switch to.
 
 **As an account — a GPT model in Claude Code's own harness ("claudex").**
 
@@ -555,7 +543,7 @@ The repo has all the *code* but deliberately **not** your accounts or secrets
 
 ```
 src/            wrapper + hooks, account switching, the board (boards/notes/roles),
-                delegation, bundles, status/usage tools
+                bundles, status/usage tools
 mcp/            arc MCP server (account management + pool metrics tools)
 pool/           optional pool-DB metrics tooling (pool-query, pool-neon-url)
 test/           test suite (run.js; `npm test`) — Windows, incl. a real DPAPI round-trip

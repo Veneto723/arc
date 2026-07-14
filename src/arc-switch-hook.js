@@ -151,31 +151,21 @@ function run(raw) {
     const r = core.requestRestart(session);
     return clBlock(r.message);
   }
+  // arc:delegate is GONE. It stays matched here on purpose: unmatched, it would fall through
+  // to the model as an ordinary prompt, and the agent would just DO the task inline — the one
+  // outcome nobody typing "delegate" wants. So we intercept and point at the two things that
+  // replaced it, at zero tokens.
   if (action === 'delegate') {
-    // Fire a HEADLESS run on the chosen runtime; the result comes back as a board note.
-    // The delegate runs ALONGSIDE you — you keep the session and keep working.
-    //   arc:delegate <claude|codex> [--advisor] [--model <id>] <task>
-    const D = require('./arc-delegate');
-    const spec = D.parseDelegateSpec(arg || '');
-    if (!spec) {
-      return clBlock('usage: arc:delegate <claude|codex> [--advisor] [--model <id>] <task>\n'
-        + '  do it:     arc:delegate codex "find why the import test is flaky"\n'
-        + '  review it:  arc:delegate claude --advisor --model claude-fable-5 "review my migration plan: …"\n'
-        + '  --advisor = READ-ONLY review with an APPROVE/REVISE verdict. It runs in the BACKGROUND;\n'
-        + '  the result lands on the board — you keep working.');
-    }
-    const board = require('./arc-board').resolveBoard(typeof hook.cwd === 'string' ? hook.cwd : process.cwd());
-    const myRole = require('./arc-notes').getRole(session, board);
-    // QUOTA FOLLOWS THE CALLER: a claude delegate inherits THIS session's account unless
-    // --account says otherwise. Delegating to your own agent must not jump quotas silently.
-    const account = spec.account || process.env.ARC_RUNTIME_ACCOUNT || null;
-    D.spawnDelegate(spec.runtime, board.root, spec.task, { toRole: myRole, session, advisor: spec.advisor, model: spec.model, account });
-    const on = (spec.runtime === 'claude' && account) ? ` on "${account}"` : '';
-    const what = spec.advisor ? `asked ${spec.runtime}${spec.model ? ` (${spec.model})` : ''}${on} to REVIEW` : `delegated to ${spec.runtime}${spec.model ? ` (${spec.model})` : ''}${on}`;
-    return clBlock(`✓ ${what} — "${spec.task.slice(0, 56)}${spec.task.length > 56 ? '…' : ''}"\n`
-      + `  running in the BACKGROUND; you keep working. ${spec.advisor ? 'The verdict' : 'The result'} lands on the board`
-      + (myRole ? ` for "${myRole}"` : ' as a broadcast (claim a role with arc:role to have it addressed to you)') + '.\n'
-      + `  arc hands it to this session automatically at the end of a turn — you do not have to ask for it.`);
+    return clBlock('arc:delegate has been removed — it fired a headless one-shot that re-read the\n'
+      + 'repo from scratch and then died. Two better tools already cover it:\n\n'
+      + '  ONE-SHOT, no context needed (research a question, sweep some files)\n'
+      + '    → ask your agent for a SUBAGENT. Claude Code runs it natively, in-session,\n'
+      + '      on your own quota, and it can target another model (even Fable).\n\n'
+      + '  STATEFUL, context worth keeping (an ongoing frontend/android/research thread)\n'
+      + '    → a PEER on the board: `arc:role` to see who is here, then\n'
+      + '      `arc note <role> --kind request "<packet>"`. They keep their context across\n'
+      + '      turns, so the 3rd ask is as cheap as the 1st — and arc wakes you on the reply.\n\n'
+      + 'To run a task on GPT: `arc:switch` to your codex account (that is claudex).');
   }
   if (action === 'mode' || action === 'stance') {
     // The initiative dial: passive · balanced · active. `arc:mode <value>` sets it directly

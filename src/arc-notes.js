@@ -38,7 +38,7 @@ function resolveCwd(session, cwd) {
 }
 
 // ---- armed requests -----------------------------------------------------------
-// A request YOU sent that a peer hasn't answered is the same shape as an in-flight delegate:
+// A request YOU sent that a peer hasn't answered is something you are OWED an answer on:
 // if you go idle, nothing wakes you when the answer lands (see arc-stop-hook). So the Stop hook
 // offers to arm `arc await` — ONCE per request, or it would nag every single turn until answered.
 const armedFile = (session) => path.join(CACHE_DIR, `arc-armed-${session}.json`);

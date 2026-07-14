@@ -129,7 +129,7 @@ function appendNote(board, note) {
     body: String(note.body || ''),
     replyTo: asSeq(note.replyTo),              // this note ANSWERS that note (a thread)
     supersedes: asSeq(note.supersedes),        // this note RETRACTS/replaces that note
-    refs: note.refs && typeof note.refs === 'object' ? note.refs : undefined, // {sha, files, tests, delegateId}
+    refs: note.refs && typeof note.refs === 'object' ? note.refs : undefined, // {sha, files, tests}
   };
   // A correction/result almost always names its target; if the caller gave one but no kind,
   // infer the obvious one rather than filing a retraction as routine news.

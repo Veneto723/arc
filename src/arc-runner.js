@@ -1252,29 +1252,10 @@ async function main() {
   // never TYPE it; but it can RUN `arc note ...` via its Bash tool, which lands here in a
   // fresh process (no session restart needed). Reuses the same arc-notes functions the
   // sentinels do. Output mirrors the CLI form (`arc note`, not `arc:note`).
-  // `arc delegate <claude|codex> [--advisor] [--model <id>] <task>` — the terminal/AGENT form
-  // of arc:delegate. Fires a HEADLESS run in the background; the result/verdict lands on the board.
-  if (userArgs[0] === 'delegate') {
-    const D = require('./arc-delegate');
-    const spec = D.parseDelegateSpec(userArgs.slice(1).join(' '));
-    if (!spec) {
-      process.stderr.write('usage: arc delegate <claude|codex> [--advisor] [--model <id>] [--account <id>] <task>\n'
-        + '  do it:      arc delegate codex "find why the import test is flaky"\n'
-        + '  review it:  arc delegate claude --advisor --model claude-fable-5 "review my plan: …"\n'
-        + '  (a claude delegate runs on THIS session\'s account by default; --account offloads it elsewhere)\n');
-      process.exit(1);
-    }
-    const board = require('./arc-board').resolveBoard(process.cwd());
-    const session = process.env.ARC_SESSION || '';
-    const myRole = require('./arc-notes').getRole(session, board);
-    const account = spec.account || process.env.ARC_RUNTIME_ACCOUNT || null;   // quota follows the caller
-    D.spawnDelegate(spec.runtime, board.root, spec.task, { toRole: myRole, session, advisor: spec.advisor, model: spec.model, account });
-    const on = (spec.runtime === 'claude' && account) ? ` on "${account}"` : '';
-    const what = spec.advisor ? `asked ${spec.runtime} to REVIEW` : `delegated to ${spec.runtime}`;
-    process.stdout.write(`[arc] ${what}${spec.model ? ` (${spec.model})` : ''}${on} (background) — the ${spec.advisor ? 'verdict' : 'result'} will land on the board`
-      + (myRole ? ` for "${myRole}"` : ' as a broadcast') + `. Read it with \`arc notes\`.\n`);
-    return;
-  }
+  // (`arc delegate` lived here. REMOVED — it fired a headless one-shot that re-read the repo
+  //  from scratch and then died: strictly worse than Claude Code's own subagent, which the
+  //  agent can call natively, and strictly worse than a live PEER, which keeps its context.
+  //  Squeezed from both sides, so it went. `git log -- src/arc-delegate.js` has it.)
   // `arc claudex [status|stop]` — inspect / stop the auto-managed translator sidecars.
   if (userArgs[0] === 'claudex') {
     const CX = require('./arc-claudex');
@@ -1296,8 +1277,8 @@ async function main() {
   }
   // `arc await [role]` — block until a note lands, then EXIT. Meant to be run by an agent
   // as a BACKGROUND task before it goes idle: in Claude Code a background command's EXIT
-  // re-invokes the agent, so this exit is what hands an idle session its delegate result
-  // with nobody typing anything. arc-stop-hook arms it automatically.
+  // re-invokes the agent, so this exit is what hands an idle session the answer to a request
+  // it asked a peer, with nobody typing anything. arc-stop-hook arms it automatically.
   if (userArgs[0] === 'await') {
     require('./arc-watch').awaitOnce(userArgs[1], process.cwd()).then((code) => process.exit(code));
     return;
@@ -1315,9 +1296,9 @@ async function main() {
     process.stdout.write(msg + '\n');
     process.exit(r.ok ? 0 : 1);
   }
-  // `arc watch [role]` — a LONG-RUNNING watcher: prints a line per new delegation so a
-  // background task / Monitor can wake an idle DELEGATE session. Never returns on its
-  // own (loops until killed), so it must come after the quick subcommands.
+  // `arc watch [role]` — a LONG-RUNNING watcher: prints a line per new note so a background
+  // task / Monitor can wake an idle RESPONDER peer (a session whose job is answering others).
+  // Never returns on its own (loops until killed), so it must come after the quick subcommands.
   if (userArgs[0] === 'watch') {
     require('./arc-watch').run(userArgs[1], process.cwd());
     return; // the interval keeps the process alive

@@ -69,7 +69,7 @@ function coreHookEntries(scriptsDir) {
     ['UserPromptSubmit', 'arc-switch-hook.js', ''],
     ['UserPromptSubmit', 'arc-notify.js', 'start'],
     // arc-stop-hook BEFORE arc-notify on Stop: the board's second delivery point. It can
-    // block the stop to hand over a note that landed MID-TURN (e.g. a delegate's result),
+    // block the stop to hand over a note that landed MID-TURN (e.g. a peer's reply),
     // so the session never goes idle on top of an unread answer it asked for.
     ['Stop', 'arc-stop-hook.js', ''],
     ['Stop', 'arc-notify.js', 'done'],

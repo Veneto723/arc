@@ -2,9 +2,9 @@
 // arc-stop-hook: the board's SECOND delivery point — the END of a turn.
 //
 // UserPromptSubmit delivers notes at turn START, which means a note that arrives while
-// you are working sits on the board until a HUMAN types something. For a delegate you
-// fired YOURSELF that is backwards: you asked for the work, so the answer should come
-// back to you — not wait for a nudge.
+// you are working sits on the board until a HUMAN types something. For an answer you
+// ASKED FOR that is backwards: you posed the question, so the reply should come back to
+// you — not wait for a nudge.
 //
 // Stop fires as the agent is about to go idle. `{decision:'block', reason}` keeps the
 // turn alive and feeds `reason` to the model, so an arrived note is handed over with
@@ -14,18 +14,28 @@
 //      cursor over exactly what it delivered, so the same note can never block twice —
 //      delivery is idempotent, and that is what makes this loop-safe.
 //
-//   2. No notes, but a delegate I fired is STILL RUNNING → this is the last moment we
-//      can do anything. Nothing outside can wake an idle session: arc runs claude on the
-//      real TTY (stdio:'inherit'), so it holds no handle to type into, and Claude Code
-//      exposes no timer hook and no external prompt injection. The ONLY wake channel is
-//      a background command the session itself started, which re-invokes the agent WHEN
-//      IT EXITS. So we block once and ask the agent to arm `arc await <role>` before it
-//      stops. That command exits the moment the result lands → the session wakes itself.
+//   2. No notes, but a request I asked a PEER is STILL UNANSWERED → this is the last
+//      moment we can do anything. Nothing outside can wake an idle session: arc runs
+//      claude on the real TTY (stdio:'inherit'), so it holds no handle to type into, and
+//      Claude Code exposes no timer hook and no external prompt injection. The ONLY wake
+//      channel is a background command the session itself started, which re-invokes the
+//      agent WHEN IT EXITS. So we block once and ask the agent to arm `arc await <role>`
+//      before it stops. That exits the moment the reply lands → the session wakes itself.
+//
+// STANCE (arc:mode) does NOT gate any of this, on purpose. Every case here is conditioned on
+// something YOU ALREADY STARTED — an unread note addressed to you, a request you sent. That is
+// FOLLOW-THROUGH, not initiative. The stance gates the ASK, upstream:
+// under PASSIVE you'd only have asked because the user told you to, so muting the wake would
+// eat an answer the user explicitly wanted. (Contrast `arc watch`, which volunteers you for work
+// nobody has asked for yet — speculative, so the skill gates THAT on ACTIVE.)
+// And we only ever OFFER: the block goes to the model, which is already carrying its stance
+// directive, so a passive agent can just decline. Whether the user ordered the ask is a judgment
+// only the model can make — a hook can't see it.
 //
 // Safety (a Stop hook that misfires wedges a session, so all three are load-bearing):
 //   • stop_hook_active → return immediately. We NEVER chain a block onto our own block.
 //   • We only ever block when there is genuinely something to say (a note, or an
-//     un-armed in-flight delegate) — never speculatively.
+//     un-armed unanswered request) — never speculatively.
 //   • Any throw exits 0 silently. A coordination nicety must never trap a session.
 // Claude Code independently caps consecutive Stop blocks at 8, which is the backstop.
 'use strict';
@@ -54,29 +64,11 @@ function run(raw) {
     return 'notes';
   }
 
-  // 2. Nothing yet — but if a delegate is still out, arm the waker BEFORE going idle.
-  const D = require('./arc-delegate');
-  const pending = D.pendingFor(session, cwd);
-  if (pending.length) {
-    D.markArmed(pending);                          // tell the agent once, never every turn
-    const role = pending[0].role;
-    const list = pending.map((p) => `${p.runtime}: "${String(p.task).slice(0, 60)}"`).join('\n  ');
-    out({
-      decision: 'block',
-      reason: `[arc] ${pending.length} delegate(s) you fired are STILL RUNNING:\n  ${list}\n\n`
-        + `Nothing can wake an idle session from the outside, so arm the waker before you stop:\n`
-        + `  Bash tool, run_in_background: true  →  arc await${role ? ` ${role}` : ''}\n\n`
-        + `It exits the moment the result lands on the board, and that exit re-invokes YOU with it. `
-        + `Then tell the user the delegate is running and that you'll report back when it lands.`,
-    });
-    return 'arm';
-  }
-
-  // 3. A QUESTION you asked a PEER that nobody has answered yet is the same shape as an
-  //    in-flight delegate — you asked, so you want the answer. But a peer replies on THEIR
-  //    schedule, and if you go idle first, nothing wakes you: the reply just sits on the board
-  //    until a human happens to type something. Same fix, same channel: arm `arc await`, whose
-  //    EXIT re-invokes you. Offered ONCE per request (markRequestsArmed), never every turn.
+  // 2. A QUESTION you asked a PEER that nobody has answered yet. You asked, so you want the
+  //    answer — but a peer replies on THEIR schedule, and if you go idle first, nothing wakes
+  //    you: the reply just sits on the board until a human happens to type something. So arm
+  //    `arc await`, whose EXIT re-invokes you. Offered ONCE per request (markRequestsArmed),
+  //    never every turn.
   const N = require('./arc-notes');
   const open = N.unarmedRequests(session, cwd);
   if (!open.notes.length) return null;

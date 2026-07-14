@@ -1,15 +1,22 @@
 #!/usr/bin/env node
-// arc-watch: emit one line per NEW unread note for a role, so a session can WAKE on a
-// delegation instead of waiting for a human to prompt it.
+// arc-watch: emit one line per NEW unread note for a role, so a session can WAKE on an
+// incoming request instead of waiting for a human to prompt it.
+//
+// (Vocabulary: this is the PEER channel — one live session asking another, via notes on the
+// board. Notes are how work is handed to a peer; there is no separate "delegate" tool, and
+// calling a request a "delegation" only ever confused things. `arc delegate` USED to fire a
+// headless one-shot here; it was removed because a peer keeps its context and a native
+// subagent covers the stateless case.)
 //
 // The board delivers notes at TURN boundaries (a human prompt), so an idle session
-// never sees a delegation until someone nudges it. A DELEGATE (e.g. a `research`
-// session) fixes that by running this as a BACKGROUND task / Monitor:
+// never sees a request until someone nudges it. A RESPONDER peer (e.g. a `research`
+// session whose job is answering others) fixes that by running this as a Monitor /
+// BACKGROUND task:
 //
 //     Monitor / background:  arc watch research
 //
-// Each delegation a peer posts (`arc note research "investigate X"`) then prints a
-// line here → that line is an event that re-invokes the (otherwise idle) session, which
+// Each note a peer posts (`arc note research --kind request "investigate X"`) then prints
+// a line here → that line is an event that re-invokes the (otherwise idle) session, which
 // runs `arc notes` to read it and acts. This only OBSERVES — it never advances the read
 // cursor; `arc notes` does the actual read. Each unread note is emitted once per process.
 //
@@ -39,7 +46,7 @@ function poll(board, role, emitted, write) {
     if (emitted.has(n.seq)) continue;
     emitted.add(n.seq);
     const body = String(n.body).replace(/\s+/g, ' ').slice(0, 140);
-    write(`delegation for ${role} from ${n.from}${n.priority === 'high' ? ' [!]' : ''}: ${body}`);
+    write(`${n.kind === 'request' ? 'request' : 'note'} for ${role} from ${n.from}${n.priority === 'high' ? ' [!]' : ''}: ${body}`);
   }
   return emitted;
 }
@@ -52,10 +59,10 @@ function run(roleArg, cwd) {
     process.stderr.write('[arc watch] no role to watch — pass one (`arc watch research`) or claim one first (`arc role research`).\n');
     process.exit(1);
   }
-  process.stderr.write(`[arc watch] watching board "${board.name}" for delegations to "${role}" (Ctrl+C / stop to end)\n`);
+  process.stderr.write(`[arc watch] watching board "${board.name}" for notes to "${role}" (Ctrl+C / stop to end)\n`);
   const emitted = new Set();
   const write = (line) => process.stdout.write(line + '\n');
-  poll(board, role, emitted, write);              // fire any PENDING delegation immediately
+  poll(board, role, emitted, write);              // fire anything ALREADY waiting immediately
   setInterval(() => poll(board, role, emitted, write), POLL_MS);
 }
 
@@ -66,9 +73,10 @@ function run(roleArg, cwd) {
 // still-running command that merely prints does not. So this is `watch` with one change
 // that matters: it stops. That exit IS the wake.
 //
-// Armed by the Stop hook when a delegate is in flight (see arc-stop-hook.js). It does NOT
-// mark anything read — it only observes; the board delivers on the turn it wakes.
-const AWAIT_TIMEOUT_MS = 20 * 60 * 1000;   // outlives a delegate (10m cap), then gives up
+// Armed by the Stop hook when a request you asked a PEER is still unanswered (see
+// arc-stop-hook.js). It does NOT mark anything read — it only observes; the board delivers
+// on the turn it wakes.
+const AWAIT_TIMEOUT_MS = 20 * 60 * 1000;   // a peer may be mid-task; then we stop waiting
 
 function awaitOnce(roleArg, cwd, opts) {
   const o = opts || {};
@@ -103,7 +111,7 @@ function awaitOnce(roleArg, cwd, opts) {
       if (check()) { clearInterval(t); return resolve(0); }
       if (now() - started > timeoutMs) {
         clearInterval(t);
-        write(`[arc await] nothing landed for "${role}" within ${Math.round(timeoutMs / 60000)}m — giving up (the delegate may have died).`);
+        write(`[arc await] nothing landed for "${role}" within ${Math.round(timeoutMs / 60000)}m — giving up. Your peer may be mid-task or gone; the board keeps the request either way, and their reply will reach you at a later turn.`);
         return resolve(0);          // exit 0: a quiet wake, not a failure
       }
     }, pollMs);
