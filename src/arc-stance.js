@@ -7,8 +7,19 @@
 // distinction only the model can make — when you say "delegate this", the agent runs `arc
 // delegate`, and that IS on your order. A CLI gate can't tell that from self-initiation. So the
 // stance is INJECTED into the agent's context each turn (see arc-switch-hook.deliverBoard) and
-// the agent self-governs. PASSIVE injects nothing — the baseline is the model's natural reactive
-// default (no grant), so it costs zero tokens; BALANCED/ACTIVE inject an explicit GRANT.
+// the agent self-governs.
+//
+// THE DEFAULT IS `balanced`, AND IT INJECTS NOTHING. Two facts drove that:
+//   * A default of `passive` silently BROKE a real workflow: two live sessions on the whalephone
+//     board had built 37 notes of genuine collaboration, and a passive default would have told
+//     them "do not self-initiate a note" — they'd have just stopped talking, with nothing to say
+//     why. Noting a peer is cheap, reversible, and the entire point of the board. The expensive,
+//     hard-to-undo initiative (delegating, fanning out background work) is what stays opt-in.
+//   * Those same 37 notes were written with NO stance system at all — the `peers` skill alone
+//     already produces balanced behaviour. So the default needs no injection; only a DEVIATION
+//     from it does. `passive` injects a RESTRICTION, `active` injects a GRANT, `balanced` is
+//     silent — the common case costs zero tokens.
+// And when you are solo, balanced changes nothing: the skill says "no peer → do nothing".
 'use strict';
 
 const fs = require('fs');
@@ -17,7 +28,7 @@ const path = require('path');
 
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'cache');
 const STANCES = ['passive', 'balanced', 'active'];
-const DEFAULT = 'passive';
+const DEFAULT = 'balanced';   // see the header: a passive default silently broke a real workflow
 
 function stanceFile(session) { return path.join(CACHE_DIR, `arc-stance-${session}.json`); }
 
@@ -41,21 +52,22 @@ function setStance(session, stance) {
 }
 
 // The per-turn directive injected into the agent's context. null = inject nothing.
+// Only a DEVIATION from the default speaks: passive restricts, active grants, balanced is silent.
 function directive(stance) {
+  if (stance === 'passive') {
+    return "[arc stance: PASSIVE] Do NOT self-initiate anything with arc's tools this turn — no notes to peers, no delegating, no background work. Act only on the user's explicit order. (They can lift this with `arc:mode balanced`.)";
+  }
   if (stance === 'active') {
-    return "[arc stance: ACTIVE] You MAY use arc's agent tools on your own judgment when they clearly help — leave a peer a note (`arc note`) when you change something that affects them, delegate heavy sub-tasks (`arc delegate`), watch for results (`arc await`). Still confirm anything irreversible or outward-facing before doing it.";
+    return "[arc stance: ACTIVE] Beyond noting peers, you MAY also self-initiate the heavier tools when they clearly help — delegate sub-tasks (`arc delegate`), watch for results (`arc await`). Still confirm anything irreversible or outward-facing before doing it.";
   }
-  if (stance === 'balanced') {
-    return "[arc stance: BALANCED] You MAY leave a peer a note (`arc note`) when you change something that affects their work — but do NOT delegate, fan out background work, or broadcast unless the user asks.";
-  }
-  return null; // passive: no proactivity granted (the reactive baseline)
+  return null; // balanced (the default): the `peers` skill already teaches it — say nothing, cost nothing
 }
 
 // One-line description, for the picker help + the set confirmation.
 function summary(stance) {
-  return stance === 'active' ? 'self-initiate arc tools when they clearly help (note · delegate · watch)'
-    : stance === 'balanced' ? 'may note peers on real changes; no delegate / fan-out unless asked'
-      : 'act only on your order — no self-initiated notes, delegates, or fan-out';
+  return stance === 'active' ? 'also delegate + watch on your own judgment (the heavier tools)'
+    : stance === 'balanced' ? 'the default — note peers on real changes; no delegate / fan-out unless asked'
+      : 'silent — act only on your order, no self-initiated notes at all';
 }
 
 // A plain-text spectrum bar with the selection marked, reused by the set-confirmation and

@@ -1456,13 +1456,21 @@ section('arc-stance (agent initiative dial)');
 try {
   const St = require(path.join(SRC, 'arc-stance.js'));
   const S = 'stance-sess-1';
-  ok('default stance is passive', St.getStance(S) === 'passive' && St.getStance('never-set') === 'passive');
+  // The default is BALANCED, not passive: a passive default silently told two live, productive
+  // sessions "do not self-initiate a note" — they'd have stopped talking with nothing to say why.
+  // Noting a peer is cheap and reversible; only the heavy initiative (delegate/fan-out) is opt-in.
+  ok('default stance is BALANCED (a passive default broke a real workflow)',
+    St.getStance(S) === 'balanced' && St.getStance('never-set') === 'balanced' && St.DEFAULT === 'balanced');
   ok('setStance persists a valid value, rejects an invalid one (leaves it unchanged)',
     St.setStance(S, 'active') === 'active' && St.getStance(S) === 'active'
     && St.setStance(S, 'zoom') === null && St.getStance(S) === 'active');
-  ok('directive: passive injects NOTHING; balanced/active inject a grant',
-    St.directive('passive') === null
-    && /BALANCED/.test(St.directive('balanced')) && /arc note/.test(St.directive('balanced'))
+  // Only a DEVIATION from the default speaks. The `peers` skill alone already produces balanced
+  // behaviour (37 real notes were written before the stance system existed), so the common case
+  // needs no injection at all — passive RESTRICTS, active GRANTS, balanced is silent + free.
+  ok('directive: balanced (the default) injects NOTHING — the common case is free',
+    St.directive('balanced') === null);
+  ok('directive: passive injects a RESTRICTION; active injects a GRANT',
+    /PASSIVE/.test(St.directive('passive')) && /Do NOT self-initiate/.test(St.directive('passive'))
     && /ACTIVE/.test(St.directive('active')) && /arc delegate/.test(St.directive('active')));
   ok('renderBar marks only the selected notch',
     St.renderBar('balanced').includes('[ balanced ]') && !St.renderBar('balanced').includes('[ active ]'));
@@ -1480,14 +1488,18 @@ try {
     /stance picker/.test(hookAsk('arc:mode', S2).reason || '')
     && fs.existsSync(path.join(CLAUDE, 'cache', `arc-mode-${S2}.trigger`)));
 
-  // injection: passive is silent, active injects the grant on EVERY normal prompt
+  // injection through the REAL hook: the default is free; both deviations announce themselves.
   const S3 = 'stance-inj-1';
-  St.setStance(S3, 'passive');
-  ok('passive stance injects NOTHING on a normal prompt (zero-token baseline)',
+  St.setStance(S3, 'balanced');
+  ok('the DEFAULT (balanced) injects NOTHING on a normal prompt — zero tokens for the common case',
     !hookAsk('what is 2+2', S3).hookSpecificOutput);
+  St.setStance(S3, 'passive');
+  const pj = hookAsk('what is 2+2', S3);
+  ok('passive injects the RESTRICTION on a normal prompt (a deviation must announce itself)',
+    pj.hookSpecificOutput && /arc stance: PASSIVE/.test(pj.hookSpecificOutput.additionalContext));
   St.setStance(S3, 'active');
   const aj = hookAsk('what is 2+2', S3);
-  ok('active stance injects the grant directive on a normal prompt',
+  ok('active injects the GRANT on a normal prompt',
     aj.hookSpecificOutput && /arc stance: ACTIVE/.test(aj.hookSpecificOutput.additionalContext));
 } catch (e) { ok('arc-stance works', false, e.message + '\n' + (e.stack || '')); }
 

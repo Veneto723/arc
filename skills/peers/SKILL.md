@@ -22,14 +22,18 @@ If `arc role` reports no peer (*"nobody else here yet"*), you're solo — **do n
 
 ## Your stance governs both halves
 
-Everything below is *proactive* behaviour, so it is governed by the arc **stance** (`arc:mode`).
-You'll see the grant injected at the start of your turn:
+How much you may do *unprompted* is the arc **stance** (`arc:mode`). The default is **balanced**
+and says nothing — so **no stance line at the start of your turn means balanced**. Only a
+deviation announces itself:
 
-| stance | what you may do unprompted |
-|---|---|
-| **passive** *(default — no stance line)* | **nothing here.** Only act if the user explicitly asks. |
-| **balanced** | leave a note when you change a peer's world (SPEAK) |
-| **active** | that, plus arm a watch / answer delegations (SPEAK **and** LISTEN) |
+| stance | what you may do unprompted | you'll see |
+|---|---|---|
+| **balanced** *(the default)* | leave a note when you change a peer's world (SPEAK) | *nothing — silence means this* |
+| **passive** | **nothing here.** Act only on the user's explicit order. | `[arc stance: PASSIVE]` |
+| **active** | balanced, **plus** arm a watch / delegate / answer delegations (SPEAK **and** LISTEN) | `[arc stance: ACTIVE]` |
+
+So: **SPEAK by default; stay silent if you see PASSIVE; only LISTEN (arm a watch) under ACTIVE
+or when the user asks.** And when you're solo — `arc role` shows no peer — do nothing regardless.
 
 ---
 

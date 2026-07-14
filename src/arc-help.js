@@ -87,10 +87,11 @@ The board — sticky notes between sessions working in the same folder:
 
 Agent initiative — how proactive your agent is with arc's tools (delegate/note/watch):
   arc:mode                open the ← / → dial:  passive · balanced · active — ZERO tokens
-  arc:mode active         self-initiate when it helps (note peers, delegate, watch)
-  arc:mode balanced       may note peers on real changes; no delegate/fan-out unasked
-  arc:mode passive        (default) act only on your order — no self-initiated anything
+  arc:mode balanced       (DEFAULT) note peers on real changes; no delegate/fan-out unasked
+  arc:mode active         also delegate + watch on its own judgment (the heavier tools)
+  arc:mode passive        silent — act only on your order, no self-initiated notes at all
                          (shows in the statusline: ○ passive · ◐ balanced · ● active)
+                         Only a DEVIATION costs tokens: balanced injects nothing.
 
 See usage:
   arc:peek                usage of ALL accounts + where a launch would land — ZERO tokens
