@@ -179,10 +179,39 @@ const GATEWAY_VARS = [
   'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL',
+  // ANTHROPIC_MODEL pins the PRIMARY model outright. A proxy serving a foreign model needs it
+  // (that is the documented lever); every other account must NOT inherit it, or switching away
+  // from such an account would leave a subscription asking Anthropic for a model it has never
+  // heard of. It belongs in this list precisely BECAUSE it is sticky and account-specific.
+  'ANTHROPIC_MODEL',
 ];
+// A gateway can also need HARNESS accommodations, not just routing: a foreign model behind
+// an Anthropic-shaped API may not support tool search, high tool concurrency, etc. Those are
+// per-ACCOUNT facts, so an account may carry `env: { KEY: "value" }`.
+//
+// The subtle part is UNSETTING them. arc switches accounts by re-launching with a new env
+// derived from the CURRENT one, so anything a previous account injected would silently
+// persist onto the next (switch to a gateway that sets ENABLE_TOOL_SEARCH=false, switch back
+// to your subscription, and tool search stays dead — with nothing in the config to explain
+// it). So we record which keys we injected, in the env itself, and strip exactly those on the
+// next launch. Self-describing: it survives a /restart re-exec, which inherits the env.
+const ENV_KEYS_VAR = 'ARC_ACCOUNT_ENV_KEYS';
+const ENV_KEY_RX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// arc's OWN control plane is off-limits: a config that set ARC_SESSION would detach the
+// session from its fridge role and its runner. Routing/model vars are owned by the fields
+// above (baseUrl / modelMap / headers) — an env map must not fight them.
+function envKeyAllowed(k) {
+  return ENV_KEY_RX.test(k) && !/^ARC_/i.test(k) && !GATEWAY_VARS.includes(k);
+}
+
 function accountEnv(acc, base) {
   const env = { ...(base || process.env) };
   for (const k of GATEWAY_VARS) delete env[k];
+  // strip whatever the PREVIOUS account injected (see above) before applying this one's
+  for (const k of String(env[ENV_KEYS_VAR] || '').split(',').filter(Boolean)) delete env[k];
+  delete env[ENV_KEYS_VAR];
+
   if (acc.type === 'api') {
     const key = resolveApiKey(acc); // throws if unresolvable
     env.ANTHROPIC_BASE_URL = acc.baseUrl;
@@ -194,12 +223,25 @@ function accountEnv(acc, base) {
     for (const [alias, model] of Object.entries(acc.modelMap || {})) {
       env[`ANTHROPIC_DEFAULT_${alias.toUpperCase()}_MODEL`] = model;
     }
+    // `model` pins the PRIMARY model outright (ANTHROPIC_MODEL). Only a proxy serving a
+    // FOREIGN model needs this — a Claude gateway maps families instead (modelMap) and
+    // leaves /model free to pick among them. Set only when the account asks for it.
+    if (acc.model) env.ANTHROPIC_MODEL = acc.model;
   }
+
+  // Applies to ANY account type — an oauth account can want a harness tweak too.
+  const applied = [];
+  for (const [k, v] of Object.entries((acc && acc.env) || {})) {
+    if (!envKeyAllowed(k) || v === null || v === undefined) continue;
+    env[k] = String(v);
+    applied.push(k);
+  }
+  if (applied.length) env[ENV_KEYS_VAR] = applied.join(',');
   return env;
 }
 
 module.exports = {
   CLAUDE_DIR, CONFIG_PATH, CACHE_DIR, CRED_PATH, SCRIPTS_DIR,
   loadConfig, findAccount, nextAccount, resolveApiKey, claudeBin, accountEnv, expandHome,
-  dpapiEncrypt, dpapiDecrypt, storeApiKey,
+  dpapiEncrypt, dpapiDecrypt, storeApiKey, envKeyAllowed,
 };

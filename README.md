@@ -1,15 +1,16 @@
 # arc
 
-**A Claude-first native-stdio wrapper that adds account switching, session tools, and a small orchestration layer for hosting [Claude Code](https://claude.com/claude-code) and Codex under one `arc` command.** Windows 11.
+**A Claude-first native-stdio wrapper that adds account switching, session tools, and a coordination layer for [Claude Code](https://claude.com/claude-code) sessions working in the same repo.** Windows 11.
 
 `arc` launches Claude Code with `stdio: inherit` (claude owns the TTY, so its own
 slash menus and rendering are pixel-perfect — no PTY/ConPTY garble) and layers on
 everything the built-in CLI can't do: switch between accounts mid-conversation,
 pick an account from an arrow-key menu without spending a token, get a desktop
 toast when a session finishes, and see live rate-limit usage in your statusline.
-`arc codex` is an explicit second runtime: it launches the native Codex CLI, keeps
-Codex authentication in isolated `CODEX_HOME` directories, and records Claude/Codex
-bindings under one runtime-neutral logical session. Plain `arc` remains unchanged.
+arc hosts ONE runtime — Claude Code. A GPT model is reachable two ways: as a
+**delegate** (`arc:delegate codex <task>` runs it headlessly via `codex exec` and drops the
+result on the fridge), or as an **account** (an Anthropic-compatible proxy serving a GPT
+model, so `/model` swaps provider mid-conversation without the session moving).
 
 The Claude account config fits any of these setups:
 
@@ -36,8 +37,7 @@ The Claude account config fits any of these setups:
 - **Desktop toasts** labeled with the session's `/rename` name, with colored state icons; **click a toast to focus that terminal window**.
 - **Usage statusline** — subscription 5h/7d %, reset times, pace ETA, blink warnings near the limit; gateway cost/tokens for api accounts.
 - **Safety rails** — refuses to open one conversation in two processes (a crash cause), warns before removing an account live sessions are using, logs every launch/exit, and backs up config before every change.
-- **Opt-in Codex host** — `arc codex` preserves the native Codex terminal, supports isolated Codex logins, and shares the fridge skill/protocol with Claude.
-- **Supervised Claude → Codex handoff** — `arc:handoff codex` captures the hook-authoritative Claude transcript, converts it, and continues in Codex in the same terminal while retaining logical session lineage.
+- **Headless delegation** — `arc:delegate codex <task>` runs a task on Codex (or a second Claude) while you keep working; the answer lands on the fridge and is fed to you at your next turn boundary.
 
 ---
 
@@ -79,7 +79,7 @@ arc usage — peek
   lean on Windows. (It used to be cross-platform; that was dropped as untested weight.)
 - **Node.js**
 - **Claude Code** — the `claude` CLI on your PATH
-- **Codex CLI** *(optional)* — required only for `arc codex` and `arc:handoff codex`
+- **Codex CLI** *(optional)* — required only for `arc delegate codex` / `arc:delegate codex`
 
 ## Install
 
@@ -99,8 +99,7 @@ server, generates toast icons, registers the `arc-focus:` click-to-focus protoco
 **merges** hooks + statusline into `settings.json` (backing it up first — never
 removing your existing entries). It also publishes the runtime-neutral
 `share-with-roommate` skill to `~/.agents/skills`; other bundled skills remain
-Claude-only. Codex lifecycle hooks are merged into the selected `CODEX_HOME` on the
-first `arc codex` launch.
+Claude-only.
 
 **Gateway keys:** by default `arc set-key` / the add-account wizard store the key as a
 DPAPI-encrypted `apiKeyEnc` blob in the config, bound to this Windows user+machine (a
@@ -138,12 +137,8 @@ To update later: `git pull`, re-run the installer, and `arc:restart` any live se
 | `arc:notes all` | the whole fridge, nothing marked read | **0** |
 | `arc:anchors` | which doc claims about the code have gone **stale** | **0** |
 | `arc:anchors reseal` | after fixing the docs, make the current code the baseline | **0** |
-| `arc:handoff codex [--account <id>] [--keep-last N]` | continue this conversation in Codex | **0** |
 | `arc:help` (`arc:cl`) | print this cheat sheet | **0** |
 
-In a cl-managed Codex session, the currently supported sentinels are `arc:help`,
-`arc:role`, `arc:note`, and `arc:notes`. Account switching, reverse handoff, and
-delegation are not presented as available until their Codex paths are implemented.
 
 The `arc:` forms are plain messages caught by a hook **before** the model runs —
 that's why they cost nothing and keep working when the account is rate-limited (a
@@ -283,11 +278,6 @@ decision. An anchor that never resolved (a doc *example*, or a typo) is reported
 | `arc capture <id>` | adopt the currently-active login into an account's profile |
 | `arc setup` | (re)configure accounts |
 | `arc doctor` | print resolved config + health checks |
-| `arc codex [native args]` | launch Codex; arguments pass through to the native CLI |
-| `arc codex --account <id> [args]` | launch with an isolated Codex account |
-| `arc codex accounts` | show Codex aliases, native login status, and homes |
-| `arc codex add-account <id> [--home <dir>]` | create an alias/home and run native `codex login` |
-| `arc sessions` | list logical arc sessions and their active native binding |
 
 ---
 
@@ -426,13 +416,12 @@ and never echoes secrets. Changes are `arc:switch`-able immediately, no restart.
   owns the real terminal — its slash menus and differential renderer work exactly
   as designed. arc coordinates out-of-band via trigger files, never by intercepting
   keystrokes.
-- **Runtime adapters, not a synthetic terminal.** `arc codex` also gives the native
-  CLI the terminal. Runtime-specific launch, auth, hooks, and transcript handling stay
-  behind adapters; the shared registry stores only orchestration metadata.
-- **Logical identity above native identity.** A arc session can bind a Claude
-  conversation and a Codex rollout without pretending their formats are the same.
-  Handoff appends lineage and changes the active binding; native transcripts remain
-  owned by their respective products.
+- **One harness, not two.** arc hosts Claude Code only. Hosting a second agent meant a
+  second implementation of everything — the fridge needed a Codex-side hook, hooks needed a
+  reverse-engineered TOML block, the statusline needed a second config format. A second
+  *model* costs none of that: it arrives as an account (a proxy) or as a delegate
+  (`codex exec`). The runtime adapters, the transcript transpiler and the cross-runtime
+  session registry were deleted; they are recoverable from git history if that changes.
 - **Switching is manual, via triggers.** The `arc:switch` hook drops a per-session
   trigger file; the wrapper polls for it, kills claude, and relaunches the *same
   conversation* (`--resume <uuid>`) on the other account, re-applying model /
@@ -482,56 +471,41 @@ open in a live arc session**. Also available as terminal `arc export` / `arc imp
 both machines must use the **same project paths** (e.g. work in `E:\proj` on
 both) for the imported chat to resume cleanly.
 
-## Take a conversation into Codex
+## Reaching a GPT model
 
-Different products, one disk. In a cl-managed Claude session, the prompt hook can
-identify the authoritative transcript and ask the supervising wrapper to **transpile**
-it into a Codex session. The wrapper stops Claude, seeds a native Codex rollout, binds
-both native sessions to one logical arc session, and resumes Codex in the same terminal:
+arc no longer hosts the Codex TUI as a second runtime. A GPT model is reachable two ways,
+and neither one costs a second implementation of arc's features.
 
-```
-arc:handoff codex                         # use the default Codex account
-arc:handoff codex --account work          # choose an isolated CODEX_HOME
-arc:handoff codex --keep-last 80          # cap a huge transcript
-```
-
-**Text-first, by design.** Humans re-read the *words*, so text messages convert at
-full fidelity; tool calls degrade to a short marker (`[ran Bash: …]`). The repo files
-are already shared, so the *code* state transfers losslessly — only the conversation
-is re-homed. Codex mints the current session skeleton; arc then preserves its
-scaffolding and replaces the conversational records.
-
-**Honest limits.** This is currently Claude → Codex only, not a lossless round-trip.
-Claude's tool history becomes inert text, and long context may still be compacted by
-the destination runtime. The seed-and-splice step necessarily touches Codex's
-undocumented rollout format; preserving native scaffolding reduces version coupling
-but does not eliminate it. The suite tests conversion and supervision with a fake
-Codex launcher, while a real account/model call remains an integration boundary.
-
-## Codex accounts and session registry
-
-`arc codex` uses Codex's native authentication rather than translating Claude
-credentials. The implicit `default` alias points at the current `CODEX_HOME` (or
-`~/.codex`). Additional aliases default to `~/.arc/accounts/codex/<id>` and are
-logged in independently:
+**As a delegate — it does the work, you keep yours.**
 
 ```
-arc codex add-account work
-arc codex accounts
-arc codex --account work
-arc codex --account work resume <codex-session-id>
+arc:delegate codex <task>      # runs headless via `codex exec`; you keep working
+arc:delegate claude <task>     # same, on a second Claude
 ```
 
-The alias registry at `~/.arc/accounts.json` stores only ids, labels, and home paths;
-tokens remain owned by Codex inside each home. Removing an alias does not delete that
-home. Logical session metadata lives in `~/.arc/sessions/<id>.json` and records native
-ids, runtime/account bindings, cwd, state, and handoff lineage, but no credentials.
+The result lands on the fridge and is **handed to you automatically at the end of a turn** —
+you never have to go and fetch it (see *The fridge*). Requires the `codex` CLI on PATH.
+Nothing is installed or configured on the Codex side: `codex exec` is a documented headless
+surface, task in, answer out.
 
-Codex may ask you to trust newly installed hooks on first use; inspect them with
-`/hooks`. arc merges `SessionStart` and `UserPromptSubmit` entries into
-`<CODEX_HOME>/hooks.json` without replacing unrelated hooks. Codex's native status
-line remains native for now; use `arc codex accounts` and `arc sessions` for cl-owned
-account/session state.
+**As an account — the model changes, the conversation does not.**
+
+Point Claude Code at an Anthropic-compatible proxy that serves a GPT model, and the *harness*
+never changes: same session, same fridge, same hooks, same scrollback — only the model and the
+quota. `arc:add-account` asks which provider you want; pick **Codex / GPT** and it will ask
+for the proxy URL, the model id, and the key. Because such a proxy serves no Claude models,
+arc skips its gateway probe and pins the model ids instead (`ANTHROPIC_MODEL` + the family
+map), and the account can carry an `env` map for any harness accommodation it needs.
+
+Then `arc:switch <id>` — or just `/model` mid-conversation — moves you onto it. That is what
+replaced the old `arc:handoff`: the conversation never has to move at all.
+
+**You must already have such a proxy.** arc points Claude Code at one; it does not install or
+run one. And note that routing subscription credentials through a third-party proxy may breach
+the provider's terms of service — that is a deliberate choice for you to make, not arc's.
+
+**Honest limits.** arc's usage statusline reads Anthropic's OAuth usage endpoint, so its
+numbers are meaningless on such an account.
 
 ## Setting up a second machine
 
@@ -572,8 +546,8 @@ The repo has all the *code* but deliberately **not** your accounts or secrets
 ## Repo layout
 
 ```
-src/            wrapper + hooks, runtime adapters, Codex account isolation,
-                logical session registry, transcript conversion, status/usage tools
+src/            wrapper + hooks, account switching, the fridge (rooms/notes/roles),
+                delegation, bundles, status/usage tools
 mcp/            arc MCP server (account management + pool metrics tools)
 pool/           optional pool-DB metrics tooling (pool-query, pool-neon-url)
 test/           test suite (run.js; `npm test`) — Windows, incl. a real DPAPI round-trip

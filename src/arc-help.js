@@ -20,7 +20,12 @@ Switch account (keeps your conversation, preserves model/effort/mode):
   arc:switch ${example.padEnd(12)} switch straight to an account (by name or number)
 
 Add / manage accounts:
-  arc:add-account                   open the WIZARD — pick Subscription or Gateway, then guided prompts
+  arc:add-account                   open the WIZARD — it asks WHICH PROVIDER first:
+                                     Claude (Anthropic)  → Subscription, or Gateway/pool
+                                     Codex / GPT         → a GPT model INSIDE Claude Code, via an
+                                                           Anthropic-compatible proxy. Same session,
+                                                           same fridge — only the model + quota change,
+                                                           and /model swaps it mid-conversation.
   arc:add-account <id>              add a SUBSCRIPTION via guided browser login (in-session);
                                    the login is saved to the account's OWN private profile
                                    (~/.claude/arc-profiles/<id>) — accounts never share a login
@@ -28,7 +33,9 @@ Add / manage accounts:
                                    add a GATEWAY/POOL (like mate): verifies it, auto-detects
                                    models, DPAPI-encrypts the key (from clipboard, or --file/--key)
                                    advanced: --header Key:Value (repeat) · --model opus=<name> (pin,
-                                   repeat) · --no-verify (skip /v1/models probe for odd gateways)
+                                   repeat) · --env KEY=VALUE (repeat; harness tweaks this gateway
+                                   needs) · --no-verify (skip /v1/models probe — REQUIRED for a proxy
+                                   serving a non-Claude model, since the probe would reject it)
   arc:rename [<old>] <new>          rename an account (its login + chats are kept);
                                    one arg renames THIS session's account (relaunches)
   arc:remove-account <id>           remove an account (alias arc:delete-account) — asks, then 'confirm'
@@ -110,6 +117,10 @@ TYPE the arc: form, which the hook eats before the model):
   arc note all "<text>"   broadcast a note to every roommate
   arc note <role> "<text>" leave a note for one roommate
   arc notes               read your unread notes
+  arc delegate <claude|codex> "<task>"   fire a headless task; result -> the fridge
+  arc await [role]        block until a note lands, then EXIT. Run it as a BACKGROUND
+                         task before you go idle: that EXIT re-invokes you with the
+                         result (arc arms this for you when a delegate is still out)
   arc watch [role]        (long-running) print a line per incoming delegation, so a
                          BACKGROUND task / Monitor can WAKE an idle delegate session
   (skills: share-with-roommate = WHEN to broadcast · fridge-responder = how a

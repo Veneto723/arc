@@ -509,10 +509,18 @@ function addApiAccount(tokens, id) {
     if (eq <= 0) return { ok: false, message: `--model must be "alias=model" with no spaces (e.g. opus=claude-opus-4-6), got "${m}".` };
     modelOverrides[m.slice(0, eq).trim().toLowerCase()] = m.slice(eq + 1).trim();
   }
+  // --env KEY=VALUE (repeatable) → harness accommodations this gateway needs (a foreign
+  // model behind an Anthropic-shaped API may not support tool search, high concurrency, …).
+  const envMap = {};
+  for (const e of flagVals(tokens, 'env')) {
+    const eq = e.indexOf('=');
+    if (eq <= 0) return { ok: false, message: `--env must be "KEY=VALUE" with no spaces (e.g. ENABLE_TOOL_SEARCH=false), got "${e}".` };
+    envMap[e.slice(0, eq).trim()] = e.slice(eq + 1).trim();
+  }
   return addApiAccountResolved({
     id, baseUrl: flagVal(tokens, 'url'), key, keySrc: src, keyErr: error,
     label: flagVal(tokens, 'label'), color: flagVal(tokens, 'color'), makeDefault: hasFlag(tokens, 'default'),
-    headers, modelOverrides, noVerify: hasFlag(tokens, 'no-verify'),
+    headers, modelOverrides, envMap, noVerify: hasFlag(tokens, 'no-verify'),
   });
 }
 
@@ -521,10 +529,10 @@ function addApiAccount(tokens, id) {
 // (alias→model, wins over auto-detected), `noVerify` (skip the /v1/models probe for
 // gateways that don't expose it / use non-standard model names). DPAPI-encrypts the
 // key, writes the account (backup + validate, restore on failure). Never throws.
-function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color, makeDefault, headers, modelOverrides, noVerify }) {
+function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color, makeDefault, headers, modelOverrides, envMap, model, noVerify }) {
   const C = require('./arc-config');
   keySrc = keySrc || 'clipboard';
-  headers = headers || {}; modelOverrides = modelOverrides || {};
+  headers = headers || {}; modelOverrides = modelOverrides || {}; envMap = envMap || {};
   if (!/^[a-z][a-z0-9_-]*$/i.test(id || '')) return { ok: false, message: `invalid id "${id || ''}" — letters/digits/dash/underscore, start with a letter.` };
   try { if (C.findAccount(C.loadConfig(), id)) return { ok: false, message: `account "${id}" already exists — pick a different id.` }; } catch {}
   if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) return { ok: false, message: 'a gateway/pool account needs a full http(s):// URL.' };
@@ -536,6 +544,17 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
   if (emptyModel) return { ok: false, message: `--model ${emptyModel[0]} needs a non-empty model id (e.g. ${emptyModel[0]}=claude-${emptyModel[0]}-…).` };
   const emptyHdr = Object.entries(headers).find(([, v]) => !v);
   if (emptyHdr) return { ok: false, message: `--header "${emptyHdr[0]}" needs a non-empty value.` };
+  // An env map must not fight the fields that OWN routing (baseUrl/modelMap/headers), and
+  // must never touch arc's control plane (ARC_SESSION etc. — that would detach the session
+  // from its runner and its fridge role). Reject loudly rather than silently dropping.
+  const badEnv = Object.keys(envMap).find((k) => !C.envKeyAllowed(k));
+  if (badEnv) {
+    return { ok: false, message: /^ARC_/i.test(badEnv)
+      ? `--env cannot set "${badEnv}" — ARC_* is arc's own control plane.`
+      : `--env cannot set "${badEnv}" — it is owned by --url / --model / --header (or is not a valid env name).` };
+  }
+  const emptyEnv = Object.entries(envMap).find(([, v]) => v === '');
+  if (emptyEnv) return { ok: false, message: `--env "${emptyEnv[0]}" needs a non-empty value.` };
   if (!key) return { ok: false, message: `no key found in ${keySrc}${keyErr ? ` (${keyErr})` : ''} — copy the key to the clipboard, or pass --file <path> / --key <sk-…>.` };
 
   // Build the modelMap: auto-detect from /v1/models (default), or trust overrides
@@ -565,6 +584,8 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
     headers: mergedHeaders, disableConnectors: true,
   };
   if (Object.keys(modelMap).length) acct.modelMap = modelMap;
+  if (Object.keys(envMap).length) acct.env = envMap;
+  if (model) acct.model = model;   // ANTHROPIC_MODEL — a proxy serving a FOREIGN model must pin it
   if (color) acct.color = color;
 
   const bak = C.CONFIG_PATH + '.bak-' + Date.now();

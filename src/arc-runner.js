@@ -613,20 +613,37 @@ function promptLine(label, opts = {}) {
 }
 
 // ---- interactive add-account wizard ----------------------------------------
-// Type-select (Subscription vs Gateway) then guided prompts. arc-runner owns the
-// TTY (claude was killed by the wizard trigger). Delegates the real work to
+// PROVIDER first (Claude vs Codex/GPT), then type, then guided prompts. arc-runner owns
+// the TTY (claude was killed by the wizard trigger). Delegates the real work to
 // doAddAccount (oauth) / core.addApiAccountResolved (api). Any Esc/Ctrl-C cancels.
+//
+// Why the provider question comes FIRST: arc hosts one harness (Claude Code) — a "Codex
+// account" is not a second runtime any more, it is a GPT model served to Claude Code through
+// an Anthropic-compatible proxy (ANTHROPIC_BASE_URL). That account needs a materially
+// different setup — the model ids must be PINNED and the gateway probe must be SKIPPED,
+// because arc's probe rejects a gateway that serves no Claude models, which is exactly what
+// such a proxy is. Asking after the fact would mean guessing which kind the user meant.
 async function runAddWizard() {
   resetTerminal();
   const out = process.stdout;
   const cancel = () => out.write('\x1b[2m[arc] add cancelled.\x1b[0m\n');
 
-  const type = await selectMenu('Add an arc account — what type?', [
-    { label: 'Subscription', desc: 'claude.ai login (MAX / Pro / Team) — opens a browser' },
-    { label: 'Gateway / pool', desc: 'an API key + URL (e.g. mate, APIHub)' },
+  const provider = await selectMenu('Add an arc account — which provider?', [
+    { label: 'Claude (Anthropic)', desc: 'a claude.ai subscription, or an Anthropic-compatible gateway/pool' },
+    { label: 'Codex / GPT', desc: 'run a GPT model INSIDE Claude Code, via an Anthropic-compatible proxy' },
   ]);
   out.write('\x1b[2J\x1b[H');
-  if (type === null) return cancel();
+  if (provider === null) return cancel();
+
+  let type = 1; // codex is always an api-shaped account
+  if (provider === 0) {
+    type = await selectMenu('Claude account — what type?', [
+      { label: 'Subscription', desc: 'claude.ai login (MAX / Pro / Team) — opens a browser' },
+      { label: 'Gateway / pool', desc: 'an API key + URL (e.g. mate, APIHub)' },
+    ]);
+    out.write('\x1b[2J\x1b[H');
+    if (type === null) return cancel();
+  }
 
   let id;
   while (true) {
@@ -636,6 +653,8 @@ async function runAddWizard() {
     if (C.findAccount(reloadCfg(), id)) { out.write(`  \x1b[31m✗ "${id}" already exists — pick another\x1b[0m\n`); continue; }
     break;
   }
+
+  if (provider === 1) return runCodexAccountWizard(id, out, cancel);
 
   if (type === 0) { // subscription → browser login flow
     out.write(`\r\n\x1b[2m[arc] adding subscription "${id}" — a browser sign-in will open; log in as the NEW account…\x1b[0m\n`);
@@ -672,6 +691,77 @@ async function runAddWizard() {
     }
   }
   out.write((r.ok ? '\x1b[32m' : '\x1b[31m') + r.message + '\x1b[0m\r\n');
+}
+
+// A "Codex account" in arc is NOT a second runtime (arc stopped peer-hosting the Codex TUI).
+// It is a GPT model served to Claude Code's harness through an Anthropic-compatible proxy:
+// same session, same fridge, same hooks — only the model and the quota change, and you can
+// swap to it mid-conversation with /model. Two things make it different from a normal
+// gateway, and both are why this needs its own path:
+//   • The proxy serves NO Claude models, so arc's /v1/models probe would REJECT it. We add it
+//     unverified and PIN the model ids instead.
+//   • A foreign model in this harness may need accommodations (tool search, tool concurrency),
+//     which is what the account's `env` map is for.
+async function runCodexAccountWizard(id, out, cancel) {
+  out.write('\x1b[1mCodex / GPT account\x1b[0m — a GPT model inside Claude Code, via an Anthropic-compatible proxy.\n');
+  out.write('\x1b[2mYou need such a proxy already running (it fronts your Codex/OpenAI credentials and speaks\n');
+  out.write('/v1/messages). arc only points Claude Code at it — it does not install or run one for you.\x1b[0m\n');
+  out.write('\x1b[33mNote: routing subscription credentials through a third-party proxy may breach the provider\'s\n');
+  out.write('terms of service. That is your call to make, not arc\'s.\x1b[0m\n\n');
+
+  let url;
+  while (true) {
+    url = await promptLine('Proxy URL (http(s)://… , the Anthropic-compatible endpoint): ');
+    if (url === null) return cancel();
+    if (/^https?:\/\/.+/i.test(url.trim())) { url = url.trim(); break; }
+    out.write('  \x1b[31m✗ enter a full http(s):// URL\x1b[0m\n');
+  }
+
+  let model;
+  while (true) {
+    model = await promptLine('Model id the proxy serves (e.g. gpt-5.6-sol): ');
+    if (model === null) return cancel();
+    if (model.trim()) { model = model.trim(); break; }
+    out.write('  \x1b[31m✗ a model id is required — the proxy serves no Claude models, so arc cannot detect one\x1b[0m\n');
+  }
+
+  // Pin EVERY family to it. Claude Code always asks for a family (opus/sonnet/haiku/fable) —
+  // an unpinned family would fall back to a real Claude model id the proxy cannot serve, so
+  // picking it in /model would just error. One model behind all four keeps every choice valid.
+  const modelOverrides = { opus: model, sonnet: model, haiku: model, fable: model };
+
+  // Harness accommodations. Free-form on purpose: which knobs a given proxy+model needs is an
+  // empirical fact about THAT setup, and arc should not pretend to know it. Claude Code already
+  // disables MCP tool search by itself once ANTHROPIC_BASE_URL points at a non-first-party host,
+  // so the realistic knob here is turning it back ON for a proxy that does forward tool_reference.
+  const envMap = {};
+  out.write('\r\n\x1b[2m  Claude Code already disables MCP tool search on a non-Anthropic host, so usually: none.\n');
+  out.write('  If your proxy DOES forward tool_reference blocks, set ENABLE_TOOL_SEARCH=true.\x1b[0m\n');
+  const envLine = await promptLine('Harness env tweaks, if any (KEY=VALUE, comma-separated; blank to skip): ');
+  if (envLine === null) return cancel();
+  for (const pair of String(envLine).split(',').map((s) => s.trim()).filter(Boolean)) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) { out.write(`  \x1b[33m! skipping "${pair}" — expected KEY=VALUE\x1b[0m\n`); continue; }
+    const k = pair.slice(0, eq).trim();
+    if (!C.envKeyAllowed(k)) { out.write(`  \x1b[33m! skipping "${k}" — reserved (ARC_*) or owned by the URL/model settings\x1b[0m\n`); continue; }
+    envMap[k] = pair.slice(eq + 1).trim();
+  }
+
+  out.write('\r\n  \x1b[1mCopy the proxy\'s API key/token to the clipboard now\x1b[0m \x1b[2m(never shown or typed; stored DPAPI-encrypted)\x1b[0m\n');
+  const go = await promptLine('  press Enter to read the key (or Esc to cancel): ');
+  if (go === null) return cancel();
+
+  const { key, src, error } = core.readAddKey([]); // clipboard
+  out.write('\x1b[2m  adding (models pinned, gateway probe skipped — the proxy serves no Claude models)…\x1b[0m\n');
+  const r = core.addApiAccountResolved({
+    id, baseUrl: url, key, keySrc: src, keyErr: error, label: id,
+    modelOverrides, envMap, model, noVerify: true,
+  });
+  out.write((r.ok ? '\x1b[32m' : '\x1b[31m') + r.message + '\x1b[0m\r\n');
+  if (r.ok) {
+    out.write(`\x1b[2m  switch to it any time with  arc:switch ${id}  — or mid-conversation with  /model\x1b[0m\n`);
+    out.write('\x1b[2m  heads-up: arc\'s usage readout reads Anthropic\'s usage endpoint, so it is meaningless on this account.\x1b[0m\n');
+  }
 }
 
 // ---- one claude session ---------------------------------------------------

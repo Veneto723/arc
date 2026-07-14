@@ -109,6 +109,46 @@ try {
   const oenv = C.accountEnv(C.findAccount(cfg, 'sub'), { ANTHROPIC_API_KEY: 'leak' });
   ok('accountEnv strips gateway vars for oauth', oenv.ANTHROPIC_API_KEY === undefined);
   ok('claudeBin resolves to a string', typeof C.claudeBin(cfg) === 'string' && C.claudeBin(cfg).length > 0);
+
+  // ---- per-account env: a gateway serving a FOREIGN model needs harness accommodations,
+  // and those must not survive a switch back to a normal account.
+  const gwx = { id: 'gwx', type: 'api', baseUrl: 'https://x.example.com', apiKeyEnv: 'CLKIT_TEST_KEY',
+    modelMap: { opus: 'gpt-x' }, env: { ENABLE_TOOL_SEARCH: 'false', CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '3' } };
+  const xenv = C.accountEnv(gwx, {});
+  ok('accountEnv applies an account\'s env map (harness accommodations)',
+    xenv.ENABLE_TOOL_SEARCH === 'false' && xenv.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY === '3'
+    && xenv.ANTHROPIC_DEFAULT_OPUS_MODEL === 'gpt-x');
+  ok('...and RECORDS which keys it injected, so the next launch can strip exactly those',
+    (xenv.ARC_ACCOUNT_ENV_KEYS || '').split(',').sort().join() === 'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY,ENABLE_TOOL_SEARCH');
+
+  // THE bug this guards: arc switches by re-launching from the CURRENT env. Without the
+  // strip, switching gwx -> sub would leave ENABLE_TOOL_SEARCH=false silently set on the
+  // subscription, with nothing in its config to explain it.
+  const back = C.accountEnv(C.findAccount(cfg, 'sub'), xenv);
+  ok('switching AWAY unsets the previous account\'s env (no silent leak onto the next account)',
+    back.ENABLE_TOOL_SEARCH === undefined && back.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY === undefined
+    && back.ARC_ACCOUNT_ENV_KEYS === undefined);
+
+  // A proxy serving a FOREIGN model pins the primary model outright (the documented lever).
+  const claudex = { id: 'cx', type: 'api', baseUrl: 'https://proxy.local', apiKeyEnv: 'CLKIT_TEST_KEY',
+    model: 'gpt-5.6-sol', modelMap: { opus: 'gpt-5.6-sol', sonnet: 'gpt-5.6-sol' } };
+  const cxenv = C.accountEnv(claudex, {});
+  ok('an account with `model` pins ANTHROPIC_MODEL (a foreign model behind an Anthropic API)',
+    cxenv.ANTHROPIC_MODEL === 'gpt-5.6-sol' && cxenv.ANTHROPIC_DEFAULT_OPUS_MODEL === 'gpt-5.6-sol');
+  ok('a normal Claude gateway does NOT pin ANTHROPIC_MODEL (/model stays free to choose)',
+    C.accountEnv(C.findAccount(cfg, 'gw'), {}).ANTHROPIC_MODEL === undefined);
+  // THE leak: switching cx -> subscription must not leave Claude asking Anthropic for a GPT model.
+  ok('switching away from it CLEARS ANTHROPIC_MODEL (else the subscription asks for a model Anthropic never heard of)',
+    C.accountEnv(C.findAccount(cfg, 'sub'), cxenv).ANTHROPIC_MODEL === undefined);
+
+  // arc's own control plane and the routing vars are off-limits to an env map.
+  const evil = C.accountEnv({ id: 'e', type: 'oauth', env: { ARC_SESSION: 'hijack', ANTHROPIC_BASE_URL: 'http://evil', OK_VAR: 'y' } },
+    { ARC_SESSION: 'real-session' });
+  ok('an env map cannot hijack ARC_* or the routing vars (but ordinary keys still apply)',
+    evil.ARC_SESSION === 'real-session' && evil.ANTHROPIC_BASE_URL === undefined && evil.OK_VAR === 'y');
+  ok('envKeyAllowed rejects ARC_*/routing vars, accepts ordinary names',
+    !C.envKeyAllowed('ARC_SESSION') && !C.envKeyAllowed('ANTHROPIC_API_KEY') && !C.envKeyAllowed('bad name')
+    && C.envKeyAllowed('ENABLE_TOOL_SEARCH'));
 } catch (e) { ok('arc-config loads', false, e.message); }
 
 // ---- 2b. arc-switch-core: chooseLaunchAccount (launch account selection) -------
@@ -1242,8 +1282,19 @@ try {
   ok('with no role, the result is BROADCAST rather than dropped', RM.allNotes(room).slice(-1)[0].to === null);
 
   ok('delegate refuses an unknown runtime / empty task', D.run(['gpt', droom, '-', '-', 'x'], {}) === 2 && D.run(['codex', droom, '-', '-'], {}) === 2);
-  ok('arc:delegate is a live sentinel (matcher accepts it)',
-    /^\s*[/!]?\s*arc:(switch|restart|handoff|delegate)\b/i.test('arc:delegate codex find the bug'));
+
+  // Assert against the REAL hook, never a hand-copied regex: the old test inlined its own
+  // copy of TRIGGER_RX, and the copy drifted (it still listed the deleted `handoff`), which
+  // is exactly how a dead sentinel survives a removal unnoticed.
+  const swhook = path.join(SRC, 'arc-switch-hook.js');
+  const ask = (prompt) => {
+    const r = spawnSync(process.execPath, [swhook], { input: JSON.stringify({ prompt, cwd: TMP }), encoding: 'utf8' });
+    try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
+  };
+  ok('arc:delegate is a live sentinel (the real hook blocks it, zero tokens)',
+    /usage: arc:delegate/.test(ask('arc:delegate').reason || ''));
+  ok('arc:handoff is GONE — the hook no longer claims it (falls through as a normal prompt)',
+    !ask('arc:handoff codex').decision && !ask('arc:handoff').decision);
 
   // ---- in-flight markers: how the Stop hook knows a result is still coming ----------
   // A finished delegate must leave NOTHING behind (else the Stop hook would nag forever).
