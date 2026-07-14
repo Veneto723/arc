@@ -1,6 +1,6 @@
 ---
 name: peers
-description: You may be sharing this repo with ANOTHER arc session — a "peer" (e.g. a read-only `research` session while you write code, or an `android` session while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel. Use this skill for BOTH halves of that protocol. SPEAKING — when you finish something that changes their world (a shared API/contract/schema change, a decision that constrains their side, a blocker they'll hit, a feature they now build on), leave ONE concise note: `arc note all "<one line>"` or `arc note <role> "<one line>"`; run `arc role` first to see who is actually there, and never narrate routine progress. LISTENING — notes arrive automatically at the start of your next turn, so normally you do nothing; but if your job is ANSWERING others (a responder session), watch the board with `arc watch <your-role>` so an incoming request wakes you while idle. Also covers note kinds (request/result/correction/blocker) and retracting a note you got wrong with `--supersedes`.
+description: You may be sharing this repo with ANOTHER arc session — a "peer" (e.g. a read-only `research` session while you write code, or an `android` session while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel. Use this skill for BOTH halves of that protocol. SPEAKING — when you finish something that changes their world (a shared API/contract/schema change, a decision that constrains their side, a blocker they'll hit, a feature they now build on), leave ONE concise note: `arc note all "<one line>"` or `arc note <role> "<one line>"`; run `arc role` first to see who is actually there, and never narrate routine progress. LISTENING — you arm nothing: notes arrive automatically at your turn start, and a note that lands mid-work is handed to you at your turn end. The one ask: when arc tells you to run `arc await <your-role>` as a background task before going idle, do it — an idle session is otherwise unreachable, and that command's exit is what wakes you. Also covers note kinds (request/result/correction/blocker) and retracting a note you got wrong with `--supersedes`.
 ---
 
 # Peers & the board
@@ -30,10 +30,12 @@ deviation announces itself:
 |---|---|---|
 | **balanced** *(the default)* | leave a note when you change a peer's world (SPEAK) | *nothing — silence means this* |
 | **passive** | **nothing here.** Act only on the user's explicit order. | `[arc stance: PASSIVE]` |
-| **active** | balanced, **plus** ask a peer when you're stuck, arm a watch, answer requests (SPEAK **and** LISTEN) | `[arc stance: ACTIVE]` |
+| **active** | balanced, **plus** ask a peer when you're stuck, instead of grinding alone | `[arc stance: ACTIVE]` |
 
-So: **SPEAK by default; stay silent if you see PASSIVE; only LISTEN (arm a watch) under ACTIVE
-or when the user asks.** And when you're solo — `arc role` shows no peer — do nothing regardless.
+So: **SPEAK by default; stay silent if you see PASSIVE; ASK a peer under ACTIVE or when the user
+says so.** LISTENING is not on this table — it is always on, in every stance, and arc arms it for
+you (see below). And when you're solo — `arc role` shows no peer — there is nobody to speak to, so
+say nothing; but stay reachable anyway, because a peer can join while you're idle.
 
 ---
 
@@ -147,42 +149,52 @@ peer can act on a claim you have already publicly withdrawn. If you say *"I was 
 
 ---
 
-# LISTEN — you usually do nothing
+# LISTEN — arc does this for you
 
-Notes are delivered to you **automatically at the start of your next turn**, and a reply to
-something you asked is handed to you at the **end** of a turn. Claude sessions also show a
-waiting-note mark in the statusline. So for ordinary work: no watch, no polling, nothing to arm.
+You are reachable on three channels, and **you have to arm none of them**:
 
-## …unless your job is ANSWERING others
+| when | what happens |
+|---|---|
+| **turn start** | waiting notes are injected into your context |
+| **turn end** | a note that landed *while you worked* is handed over — no human types anything |
+| **while idle** | arc asks you to arm `arc await <role>`; its exit wakes you |
 
-Only if this session exists to service other peers' requests (a `research` session investigating
-what an `android` or `frontend` session asks):
+All three run in **every stance, passive included** — listening isn't acting, so the dial
+doesn't touch it. You never poll, and you never decide to listen.
 
-An **idle** session can't be pushed to — the board delivers on a turn, and a turn only starts
-on a human prompt. So a request sits unread until someone nudges you. A background watch
-removes that nudge: an incoming note *wakes you*.
+## The one thing arc needs from you
 
-```sh
-arc watch <your-role>     # e.g. arc watch research
+When you're about to stop, arc may say:
+
+```
+  Bash tool, run_in_background: true  →  arc await research
 ```
 
-Run it as a **Monitor** (preferred — a persistent event stream) or a **background task**. It
-only *observes*; it never marks notes read. It fires immediately for anything already waiting,
-then for each new note.
+**Do it, then finish your turn normally.** That's the whole ask. It blocks for free until a note
+lands, then **exits** — and that exit is what re-invokes you. It's not a chore you can skip: an
+idle session is genuinely unreachable without it. Notes arrive on a *turn*, and nothing outside
+your session can start one. arc won't ask again while it's listening.
 
-**When a request wakes you:**
+Why it must be *you* who runs it: only a background command **your own session** started can
+re-invoke your session. arc launches you on a real terminal and holds no handle into you — so
+this one step can't be done on your behalf. That's the entire reason you're being asked.
 
-1. **Read it** — `arc notes` (this delivers it *and* marks it read; a wake is not a human turn,
-   so the automatic turn-start injection does **not** fire).
-2. **Do the work.** If you're a `research` session, stay **READ-ONLY on code** — you investigate
-   and report; you don't edit or commit. That ownership split is the point: the coding session
-   keeps the code, you bring back findings.
-3. **Answer back** — `arc note <their-role> --reply-to #<their-note> "<findings + a file:line pointer>"`.
-   They'll see it at their next turn (they're actively working, so they need no watch).
-4. **Keep watching.** Re-arm a one-shot background task; a Monitor keeps running on its own.
+## When a note wakes you
 
-**Honest limit:** your session must stay **alive** (terminal open). A watch pulls back an *idle*
-session; nothing can wake a *closed* one.
+1. **Read it** — `arc notes`. This delivers it *and* marks it read. A wake is **not** a human
+   turn, so the automatic turn-start injection does **not** fire; if you skip this, you're
+   acting on the summary line instead of the note.
+2. **Do the work** — if it's a `request`, that's your job now. If you're a `research` peer, stay
+   **READ-ONLY on code**: you investigate and report; the coding peer owns the code. That split
+   is the point.
+3. **Answer** — `arc note <them> --reply-to #<seq> "DONE — <findings + file:line>"`. Lead with
+   `DONE` / `BLOCKED` / `REVISE` so they get the outcome before the detail.
+4. **Stop normally.** arc re-arms your listener on the way out. The loop is self-sustaining —
+   there's nothing to remember.
+
+**Honest limit:** your session must stay **alive** (terminal open). A listener pulls back an
+*idle* session; nothing can wake a *closed* one. If you close the tab, your peers are talking to
+an empty chair — and they won't be told.
 
 ---
 

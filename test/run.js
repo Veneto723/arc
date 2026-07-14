@@ -948,44 +948,60 @@ try {
   try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-role-${S}.json`)); } catch {}
 } catch (e) { ok('arc-runner board CLI works', false, e.message); }
 
-// ---- arc-watch (wake an idle RESPONDER peer on an incoming note) -----------------
-// A responder (e.g. research) can't be pushed to while idle; it runs `arc watch` in the
-// background so an incoming request prints a line that re-invokes it. This tests the emit
-// logic: each unread note once, own notes excluded, the read cursor never touched.
-section('arc-watch (the responder waker)');
+// ---- arc-await (the ONLY thing that can reach an idle session) -------------------
+// arc runs claude on a real TTY and holds no handle into it; Claude Code has no timer hook.
+// So exactly one thing pulls back an idle session: a background command IT started, whose
+// EXIT re-invokes it. `arc await` is that command. (`arc watch` used to live here — it
+// streamed forever and never exited, so it could never wake anything on its own.)
+//
+// That EXIT is covered by a real subprocess further down (it is the property under test, so
+// it must be a real process). What is tested here is the ARMED MARKER — the state that lets
+// the Stop hook arm a listener at every idle without stacking up a waiter per turn.
+section('arc-await (blocks, then its EXIT is the wake)');
 try {
-  const W = require(path.join(SRC, 'arc-watch.js'));
+  const A = require(path.join(SRC, 'arc-await.js'));
   const RM = require(path.join(SRC, 'arc-board.js'));
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clwatch-'));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clawait-'));
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
   const board = RM.resolveBoard(repo); RM.ensureBoard(board);
 
-  ok('resolveRole prefers an explicit arg', W.resolveRole('research', 'sess', board) === 'research');
-  ok('resolveRole with no arg + no session -> null', W.resolveRole('', '', board) === null);
+  ok('resolveRole prefers an explicit arg', A.resolveRole('research', 'sess', board) === 'research');
+  ok('resolveRole with no arg + no session -> null', A.resolveRole('', '', board) === null);
 
+  const WS = 'await-sess-' + process.pid;
+  A.clearWaiting(WS);
+  ok('a session with no waiter is NOT waiting (so the hook will arm one)',
+    A.isWaiting(WS) === false);
+
+  A.markWaiting(WS, 'research', process.pid);            // a LIVE pid: this very test process
+  ok('a live waiter marks the session as already listening (no duplicate arm per turn)',
+    A.isWaiting(WS) === true);
+
+  // THE property that decides whether a crash makes a session permanently deaf: the test is
+  // LIVENESS, not existence. A stale marker left by a dead waiter must re-arm — otherwise the
+  // session never hears another note and nothing ever tells it why.
+  A.markWaiting(WS, 'research', 999999);                 // a pid that cannot be alive
+  ok('a DEAD waiter does not count — the session re-arms instead of going deaf forever',
+    A.isWaiting(WS) === false);
+  ok('...and the stale marker is swept, not left to rot', !fs.existsSync(A.awaitFile(WS)));
+
+  ok('clearWaiting is idempotent (safe on an already-gone marker)',
+    (() => { try { A.clearWaiting(WS); A.clearWaiting(WS); return true; } catch { return false; } })());
+
+  // awaitOnce checks the board SYNCHRONOUSLY on entry (inside the Promise executor), so a note
+  // that is already waiting is reported before the first poll interval — no wait, no flake.
   RM.appendNote(board, { from: 'android', to: 'research', body: 'investigate the tap drop' });
-  RM.appendNote(board, { from: 'android', to: null, body: 'broadcast: bumped node' });   // to:null = real broadcast
-  RM.appendNote(board, { from: 'research', to: 'android', body: 'my own note' });
-
-  const out = []; const emitted = new Set();
-  W.poll(board, 'research', emitted, (l) => out.push(l));
-  ok('emits the addressed delegation', out.some((l) => /from android: investigate the tap drop/.test(l)));
-  ok('emits a real broadcast (to:null)', out.some((l) => /broadcast: bumped node/.test(l)));
-  ok('does NOT emit the watcher\'s own note', !out.some((l) => /my own note/.test(l)));
-  ok('emits exactly the two for-me notes', out.length === 2);
-
-  const dup = []; W.poll(board, 'research', emitted, (l) => dup.push(l));
-  ok('a second poll re-emits nothing (each note once)', dup.length === 0);
-  ok('watching never advances the read cursor (cl notes still delivers)',
-    RM.readCursor(board, 'research') === 0 && RM.unreadFor(board, 'research').count === 2);
-
-  // a high-priority delegation is flagged
-  RM.appendNote(board, { from: 'android', to: 'research', priority: 'high', body: 'URGENT: prod is down' });
-  const hi = []; W.poll(board, 'research', emitted, (l) => hi.push(l));
-  ok('a [!] delegation is flagged in the emit', hi.length === 1 && /\[!\]/.test(hi[0]));
+  const said = [];
+  A.awaitOnce('research', repo, { pollMs: 5, write: (l) => said.push(l) });
+  ok('a note already on the board is seen immediately (no polling delay)',
+    said.some((l) => /investigate the tap drop/.test(l)));
+  ok('...and it tells the woken agent to run `arc notes` (a wake is not a turn, so the',
+    said.some((l) => /arc notes/.test(l)));   // ...turn-start injection does NOT fire for it
+  ok('await only OBSERVES — it never advances the read cursor',
+    RM.readCursor(board, 'research') === 0 && RM.unreadFor(board, 'research').count === 1);
 
   fs.rmSync(repo, { recursive: true, force: true });
-} catch (e) { ok('arc-watch works', false, e.message); }
+} catch (e) { ok('arc-await works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- arc-profile: adoptIntoShared (migrate a real dir into the shared one) -------
 // Regression: `tasks` joined SHARED_DIRS. The old code did rmSync(recursive) on the
@@ -1583,8 +1599,13 @@ try {
     try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
   };
 
-  // nothing on the board, nothing in flight -> the session is allowed to go idle
-  ok('Stop hook stays SILENT when there is nothing to deliver',
+  // Nothing on the board, nothing in flight — but this session HOLDS A ROLE, so a peer can
+  // address it at any moment, and an idle session cannot be reached (both delivery points need
+  // a TURN). So the one thing left to say is "arm your listener", said exactly once.
+  const first = fire({ hook_event_name: 'Stop', cwd: sboard });
+  ok('with nothing to deliver, the hook arms the LISTENER (an idle role-holder is unreachable)',
+    first.decision === 'block' && /arc await code/.test(first.reason || ''));
+  ok('...and then goes SILENT — asked once per cycle, never nagged every turn',
     !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
 
   // a note lands mid-turn (e.g. a peer answering) -> handed over at turn END
@@ -1635,13 +1656,78 @@ try {
   //  "arm the waker exactly once, never nag", now belongs to the unanswered-request tests
   //  directly above: same Stop hook, same channel, same once-only guarantee.)
 
+  // ---- case 3: holding a role means being REACHABLE ------------------------------
+  // Both automatic delivery points need a TURN — the turn-start injection needs a human
+  // prompt, and this hook needs a turn to end. An idle session has neither, so a role-holder
+  // that stops without a listener is simply unreachable until a human types. That defeats the
+  // point of asking a peer who is "sitting there ready". So the listener is armed on the way
+  // out, at every idle.
+  const A2 = require(path.join(SRC, 'arc-await.js'));
+  const St2 = require(path.join(SRC, 'arc-stance.js'));
+  const cycle = () => { A2.clearWaiting(SESSION); A2.clearOffered(SESSION); };  // a fresh listening cycle
+  cycle();
+  RM.markRead(board, 'code');                       // nothing unread, nothing pending
+
+  const lis = fire({ hook_event_name: 'Stop', cwd: sboard });
+  ok('holding a role, with nothing pending, the hook ARMS the listener before going idle',
+    lis.decision === 'block' && /arc await code/.test(lis.reason || '')
+    && /run_in_background/.test(lis.reason || ''));
+  ok('...and it says WHY (an idle session cannot be reached), not just what to run',
+    /idle/i.test(lis.reason || '') && /reach/i.test(lis.reason || ''));
+
+  // Once a listener is live the hook must go quiet — else every turn stacks another waiter,
+  // and they would all wake at once on the next note.
+  A2.markWaiting(SESSION, 'code', process.pid);
+  ok('with a listener already live, the hook stays SILENT (not one waiter per turn)',
+    !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
+
+  // A live listener also RESETS the offer, so the next cycle (after a note wakes it and the
+  // waiter exits) gets a fresh one. Otherwise a session would be offered a listener exactly
+  // once in its whole life and go deaf after the first note.
+  ok('a live listener resets the offer, so the NEXT cycle can arm again',
+    !A2.wasOffered(SESSION));
+
+  // A crashed listener must not leave the session deaf: liveness is the test, not existence.
+  A2.markWaiting(SESSION, 'code', 999999);
+  A2.clearOffered(SESSION);
+  ok('a DEAD listener re-arms (a crash must not make a session permanently unreachable)',
+    /arc await code/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+
+  // NOT gated on a peer existing. Such a check is evaluated at the exact moment it stops
+  // being true: a session that idles ALONE and only then gets a peer (arc:invite, a second
+  // tab) would be asleep and unarmed, with no way to ever learn about them.
+  cycle();
+  const others = RM.liveRoles(board).filter((r) => (r.role || r) !== 'code');
+  const solo = fire({ hook_event_name: 'Stop', cwd: sboard });
+  ok('armed even with NO peer on the board — a peer can join while you are idle',
+    others.length === 0 && /arc await code/.test(solo.reason || ''));
+
+  // NOT gated on stance. Listening is not acting: a passive session that wakes on a note
+  // reads it and tells the user; it still won't self-initiate work. Muting the ear would not
+  // make it more passive, only deaf.
+  const prevStance = St2.getStance(SESSION);
+  St2.setStance(SESSION, 'passive');
+  cycle();
+  ok('a PASSIVE session is armed too (listening is not acting)',
+    /arc await code/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+  ok('...and the passive directive no longer contradicts it by forbidding the listener',
+    !/no background watching/i.test(St2.directive('passive'))
+    && /listening is exempt/i.test(St2.directive('passive')));
+  St2.setStance(SESSION, prevStance || 'balanced');
+  cycle();
+
+  // No role = not addressable = nothing to listen for. Never nag a session nobody can reach.
+  const NOROLE = 'sess-norole-' + process.pid;
+  ok('a session with NO role is never nagged (nobody can address it)',
+    !fire({ hook_event_name: 'Stop', cwd: sboard }, { ARC_SESSION: NOROLE }).decision);
+
   // ---- arc await: the EXIT is the wake --------------------------------------------
   // Run it as a real subprocess, because "it exits" IS the property under test — in Claude
   // Code a background command's exit re-invokes the agent, and a command that merely prints
   // does not. If this ever stops exiting, an idle session silently never wakes.
   RM.appendNote(board, { from: 'research', to: 'code', body: 'the reply landed', priority: 'normal' });
   const aw = spawnSync(process.execPath, ['-e',
-    `require(${JSON.stringify(path.join(SRC, 'arc-watch.js'))}).awaitOnce('code', ${JSON.stringify(sboard)}, { pollMs: 20 }).then((c) => process.exit(c));`,
+    `require(${JSON.stringify(path.join(SRC, 'arc-await.js'))}).awaitOnce('code', ${JSON.stringify(sboard)}, { pollMs: 20 }).then((c) => process.exit(c));`,
   ], { encoding: 'utf8', timeout: 8000, env: { ...process.env, ARC_SESSION: SESSION } });
   ok('`arc await` EXITS the moment a note lands (that exit is what wakes an idle session)',
     aw.status === 0 && !aw.error && /the reply landed/.test(aw.stdout) && /arc notes/.test(aw.stdout));

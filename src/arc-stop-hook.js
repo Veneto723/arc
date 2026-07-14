@@ -8,7 +8,7 @@
 //
 // Stop fires as the agent is about to go idle. `{decision:'block', reason}` keeps the
 // turn alive and feeds `reason` to the model, so an arrived note is handed over with
-// NOBODY TYPING A CHARACTER. Two cases, in order:
+// NOBODY TYPING A CHARACTER. Three cases, in order:
 //
 //   1. Unread notes  → block once and hand them over. injection() advances the read
 //      cursor over exactly what it delivered, so the same note can never block twice —
@@ -21,6 +21,13 @@
 //      channel is a background command the session itself started, which re-invokes the
 //      agent WHEN IT EXITS. So we block once and ask the agent to arm `arc await <role>`
 //      before it stops. That exits the moment the reply lands → the session wakes itself.
+//
+//   3. Nothing pending at all, but I HOLD A ROLE → arm the listener anyway. Both delivery
+//      points need a TURN, and an idle session has none, so a role-holder that stops without
+//      a listener is simply unreachable until a human types. This is what makes "being on a
+//      board IS being reachable" true rather than aspirational. Deliberately NOT gated on a
+//      peer existing (that check expires the instant you idle — a peer can join afterwards)
+//      nor on stance (listening is not acting).
 //
 // STANCE (arc:mode) does NOT gate any of this, on purpose. Every case here is conditioned on
 // something YOU ALREADY STARTED — an unread note addressed to you, a request you sent. That is
@@ -71,20 +78,54 @@ function run(raw) {
   //    never every turn.
   const N = require('./arc-notes');
   const open = N.unarmedRequests(session, cwd);
-  if (!open.notes.length) return null;
-  N.markRequestsArmed(session, open.notes.map((n) => n.seq));
+  if (open.notes.length) {
+    N.markRequestsArmed(session, open.notes.map((n) => n.seq));
+    const asked = open.notes.map((n) => `#${n.seq} → ${n.to || 'everyone'}: "${String(n.body).replace(/\s+/g, ' ').slice(0, 60)}"`).join('\n  ');
+    out({
+      decision: 'block',
+      reason: `[arc] ${open.notes.length} request(s) you asked a peer are STILL UNANSWERED:\n  ${asked}\n\n`
+        + `They answer on their own schedule, and nothing can wake an idle session from outside. `
+        + `If you want the answer, arm the waker before you stop:\n`
+        + `  Bash tool, run_in_background: true  →  arc await ${open.role}\n\n`
+        + `It exits the moment they reply, and that exit re-invokes YOU with it. If the answer `
+        + `isn't worth waiting on, just say so and stop — you won't be asked about these again.`,
+    });
+    return 'request';
+  }
 
-  const asked = open.notes.map((n) => `#${n.seq} → ${n.to || 'everyone'}: "${String(n.body).replace(/\s+/g, ' ').slice(0, 60)}"`).join('\n  ');
+  // 3. Nothing pending — but you HOLD A ROLE, so a peer can address you at any time, and you
+  //    are about to become unreachable. Both automatic delivery points need a TURN: the
+  //    UserPromptSubmit injection needs a human prompt, and this hook needs a turn to end.
+  //    An idle session has neither, so a note posted to you now would sit unseen until a human
+  //    happens to type — which defeats the entire point of asking a peer who is "just sitting
+  //    there ready".
+  //
+  //    So: arm the listener on the way out. Every idle, unconditionally.
+  //
+  //    NOT gated on "does a peer exist right now?" — that check is evaluated at the exact
+  //    moment it stops being true. A session that idles alone, and only THEN gets a peer
+  //    (someone runs arc:invite, or opens a second tab), would be asleep and unarmed with no
+  //    way to ever learn about them. Holding a role is what makes you addressable; that is the
+  //    condition, and it does not expire.
+  //
+  //    NOT gated on stance either, for the reason above: listening is not acting. A PASSIVE
+  //    session that wakes on a note reads it and tells the user — it still won't self-initiate
+  //    work. Muting the ear would not make it more passive, just deaf.
+  const A = require('./arc-await');
+  if (!open.role) return null;                       // no role = nobody can address you = nothing to hear
+  if (A.isWaiting(session)) { A.clearOffered(session); return null; }  // listening: quiet, and re-offer next cycle
+  if (A.wasOffered(session)) return null;            // already asked this cycle — never nag
+  A.markOffered(session);
   out({
     decision: 'block',
-    reason: `[arc] ${open.notes.length} request(s) you asked a peer are STILL UNANSWERED:\n  ${asked}\n\n`
-      + `They answer on their own schedule, and nothing can wake an idle session from outside. `
-      + `If you want the answer, arm the waker before you stop:\n`
+    reason: `[arc] You hold the role "${open.role}" on this board, so a peer can address you at any time — `
+      + `but you are about to go idle, and an idle session cannot be reached: notes arrive on a TURN, and `
+      + `nothing outside can start one. Arm your listener before you stop:\n`
       + `  Bash tool, run_in_background: true  →  arc await ${open.role}\n\n`
-      + `It exits the moment they reply, and that exit re-invokes YOU with it. If the answer `
-      + `isn't worth waiting on, just say so and stop — you won't be asked about these again.`,
+      + `It blocks (costing nothing) until a note lands, then EXITS — and that exit re-invokes you with it. `
+      + `Do this, then finish your turn normally; you won't be asked again while it's listening.`,
   });
-  return 'request';
+  return 'listen';
 }
 
 module.exports = { run };

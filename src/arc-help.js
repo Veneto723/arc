@@ -85,11 +85,12 @@ The board — sticky notes between sessions working in the same folder:
       strict  REFUSES to mark a task done when no commit backs it (the agent is told why)
       off     no notes, no gate
 
-Agent initiative — how proactive your agent is with arc's tools (note/watch/await):
+Agent initiative — how proactive your agent is with arc's tools (note / ask a peer):
   arc:mode                open the ← / → dial:  passive · balanced · active — ZERO tokens
   arc:mode balanced       (DEFAULT) note peers on real changes; won't ask/watch unasked
-  arc:mode active         also ASK a peer when stuck + watch for the reply, on its own judgment
+  arc:mode active         also ASK a peer when stuck, instead of grinding alone
   arc:mode passive        silent — act only on your order, no self-initiated notes at all
+                         (LISTENING is never gated: every stance stays reachable on the board)
                          (shows in the statusline: ○ passive · ◐ balanced · ● active)
                          Only a DEVIATION costs tokens: balanced injects nothing.
 
@@ -143,14 +144,15 @@ TYPE the arc: form, which the hook eats before the model):
   arc note <role> "<text>" leave a note for one peer
   arc notes               read your unread notes
   arc note <role> --kind request "<packet>"   ASK a peer — tracked until they answer
-  arc await [role]        block until a note lands, then EXIT. Run it as a BACKGROUND
-                         task before you go idle: that EXIT re-invokes you with the
-                         reply (arc arms this for you when a request is unanswered)
-  arc watch [role]        (long-running) print a line per incoming note, so a BACKGROUND
-                         task / Monitor can WAKE an idle RESPONDER peer
+  arc await [role]        block until a note lands, then EXIT. Run as a BACKGROUND task
+                         before going idle: that EXIT re-invokes you with the note.
+                         arc ARMS THIS FOR YOU at every idle if you hold a role — an idle
+                         session is otherwise unreachable, so holding a role means being
+                         reachable. Never times out. ("arc watch" was removed: it streamed
+                         forever and never exited, so it could never wake anything by itself.)
   arc claudex [stop]      show (or stop) the auto-managed GPT-in-Claude translator sidecars
   (skill: peers = the whole protocol — WHEN a note is worth leaving, how to ask when
-   you're stuck, the note kinds, and how a responder peer watches the board)
+   you're stuck, the note kinds, and what to do when a peer's note wakes you)
 
 Configured accounts: ${accounts.join(', ') || '(none — run `arc setup`)'}
 `;

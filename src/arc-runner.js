@@ -1275,12 +1275,13 @@ async function main() {
     for (const p of list) process.stdout.write(`  127.0.0.1:${p.port}\t${p.alive ? 'up  ' : 'dead'}\tpid ${p.pid}\t${p.account}\t${p.model}\t-> ${p.upstream}\n`);
     return;
   }
-  // `arc await [role]` — block until a note lands, then EXIT. Meant to be run by an agent
-  // as a BACKGROUND task before it goes idle: in Claude Code a background command's EXIT
-  // re-invokes the agent, so this exit is what hands an idle session the answer to a request
-  // it asked a peer, with nobody typing anything. arc-stop-hook arms it automatically.
+  // `arc await [role]` — block until a note lands, then EXIT. Run by an agent as a BACKGROUND
+  // task before it goes idle: in Claude Code a background command's EXIT re-invokes the agent,
+  // so this exit is what reaches an idle session with nobody typing anything. It never times
+  // out. arc-stop-hook arms it automatically for any session holding a role, which is what
+  // makes being on a board mean being reachable.
   if (userArgs[0] === 'await') {
-    require('./arc-watch').awaitOnce(userArgs[1], process.cwd()).then((code) => process.exit(code));
+    require('./arc-await').awaitOnce(userArgs[1], process.cwd()).then((code) => process.exit(code));
     return;
   }
   if (userArgs[0] === 'role' || userArgs[0] === 'note' || userArgs[0] === 'notes') {
@@ -1296,13 +1297,11 @@ async function main() {
     process.stdout.write(msg + '\n');
     process.exit(r.ok ? 0 : 1);
   }
-  // `arc watch [role]` — a LONG-RUNNING watcher: prints a line per new note so a background
-  // task / Monitor can wake an idle RESPONDER peer (a session whose job is answering others).
-  // Never returns on its own (loops until killed), so it must come after the quick subcommands.
-  if (userArgs[0] === 'watch') {
-    require('./arc-watch').run(userArgs[1], process.cwd());
-    return; // the interval keeps the process alive
-  }
+  // (`arc watch` lived here. REMOVED — it streamed forever and NEVER exited, so it could only
+  //  wake a session through the Monitor tool's output events, while `arc await` wakes one
+  //  through a background command's EXIT: the channel we actually verified. Two mechanisms for
+  //  one job, and the Stop hook now re-arms `await` at every idle, which is the same loop with
+  //  no second tool. `git log -- src/arc-watch.js` has it.)
 
   let respawning = process.env.ARC_RESPAWNED === '1';
   if (!respawning) { sweepStaleStates(); migrateProfilesOnce(); } // only the original launch; not re-execs

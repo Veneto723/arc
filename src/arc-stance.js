@@ -56,7 +56,7 @@ function setStance(session, stance) {
 // Only a DEVIATION from the default speaks: passive restricts, active grants, balanced is silent.
 function directive(stance) {
   if (stance === 'passive') {
-    return "[arc stance: PASSIVE] Do NOT self-initiate anything with arc's tools this turn — no notes to peers, no asking peers for help, no background watching. Act only on the user's explicit order. (They can lift this with `arc:mode balanced`.)";
+    return "[arc stance: PASSIVE] Do NOT self-initiate anything with arc's tools this turn — no notes to peers, no asking peers for help. Act only on the user's explicit order. (Listening is exempt and always on: if arc asks you to arm `arc await`, do it, and if a peer's note wakes you, read it and tell the user. Passive means you don't START things, not that you go deaf.) They can lift this with `arc:mode balanced`.";
   }
   if (stance === 'active') {
     return "[arc stance: ACTIVE] Beyond noting peers, you MAY self-initiate the rest of the board when it clearly helps: when you're STUCK and `arc role` shows a peer whose job it is, ask them (`arc note <role> --kind request`) instead of grinding alone, and watch for the answer (`arc await`). Still confirm anything irreversible or outward-facing before doing it.";
