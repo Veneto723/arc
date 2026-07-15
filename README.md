@@ -166,19 +166,49 @@ start of your next turn (an agent can't be interrupted mid-turn, so a turn bound
 the only moment a note can land). And the statusline shows `📌 N from research` while
 anything is waiting — counted from the files, so it can't be forgotten or wrong.
 
-**The agents can post too.** An agent can't *type* `arc:note` (the hook eats it before
-the model), but it can **run** the CLI form via its Bash tool — `arc note all "<line>"`,
-`arc note <role> "<line>"`, `arc role`, `arc notes`. The bundled `peers` skill teaches
-the whole protocol: that it *has* a peer, *when* a note is worth leaving (a shared
-API/schema change, a decision, a blocker) — and, importantly, when NOT to (routine steps);
-the note **kinds** (`request` / `result` / `correction` / `blocker`); and, if the session's
-job is answering others, how to watch the board so an incoming request wakes it. So the sessions
-leave each other high-signal notes on their own judgment, the way agent-team teammates
-message each other. How much they may do *unprompted* is governed by `arc:mode`.
+**A role is reachable even while idle.** An idle session can't be pushed to — a note arrives on a
+*turn*, and nothing outside can start one. So a session holding a role is asked, on its way out,
+to run `arc join <role>` in the background: it blocks for free until a note lands, then **exits**,
+and that exit is what re-invokes the agent. This is the only wake channel there is (arc runs
+claude on a real terminal and holds no handle into it), which is why it must be the session's own
+command. Nothing to remember: arc asks, once, every time it would otherwise go deaf. If a
+role-holder never armed one, the statusline says `⚠ <role> · DEAF`.
+
+**Invite a peer instead of opening one by hand.** `arc:invite frontend` opens a tab in the current
+window running a session that **forks this conversation's context** — so it already knows the
+project — claims `frontend`, and arms its own listener. Zero setup. How much an *agent* may do
+that on its own is the `arc:mode` dial: `passive` refuses, `balanced` asks you first, `active`
+auto-approves (and still asks once several peers are live — each one burns its own quota).
+
+**A role declares what it owns.** `.arc/roles/<role>.md` says `owns:` / `send me:` / `not me:` in
+three lines. It is **committed**, because a duty is a project fact — the same on every machine,
+and true whether or not anyone is sitting in that chair. That last part is the point: `arc role`
+shows a roster of who is here *and what this repo has*, so an empty chair is readable —
+
+```
+your role: android — the android app surface
+roster:
+  ● research  live   — investigation and docs; READ-ONLY on code
+  ○ frontend  closed — the web surface   ← empty chair: arc:invite frontend
+```
+
+— which is how an agent knows a job belongs to `frontend` rather than doing it itself or spawning
+a duplicate under a synonym. A note to an empty chair still keeps (the cursor is per-*role*, so
+whoever claims it next reads it in full), and arc says so rather than returning a silent ✓.
+
+**The agents use all of this themselves.** An agent can't *type* `arc:note` (the hook eats it
+before the model), but it can **run** the CLI form via its shell — `arc note all "<line>"`,
+`arc note <role> --kind request "<packet>"`, `arc role`, `arc notes`, `arc join <role>`. The
+bundled `peers` skill teaches the protocol: *when* a note is worth leaving (a shared API/schema
+change, a decision, a blocker) and when NOT to (routine steps); the note **kinds** (`request` /
+`result` / `correction` / `blocker`); how to ask a peer well instead of grinding alone; and who an
+invited peer actually answers to — the peer who asked, on the board, not the human in its tab.
 
 Notes are never consumed. Reading one only advances *your* cursor; every other peer
-still sees it. The board lives in `.plan/`, which ignores itself, so it never enters the
-repo's history.
+still sees it. The board lives in `.arc/peer/`, which ignores itself, so it never enters the
+repo's history — while its sibling `.arc/roles/` commits normally. One folder, two lifetimes:
+**duty is a project fact, presence is machine state** (a claim is a PID, and a PID means nothing
+on your other PC).
 
 ### "Done" comes from git, not from the agent
 
@@ -543,8 +573,8 @@ The repo has all the *code* but deliberately **not** your accounts or secrets
 ## Repo layout
 
 ```
-src/            wrapper + hooks, account switching, the board (boards/notes/roles),
-                bundles, status/usage tools
+src/            wrapper + hooks, account switching, the board (notes/roles/claims,
+                duty roster, peer invite), bundles, status/usage tools
 mcp/            arc MCP server (account management + pool metrics tools)
 pool/           optional pool-DB metrics tooling (pool-query, pool-neon-url)
 test/           test suite (run.js; `npm test`) — Windows, incl. a real DPAPI round-trip
