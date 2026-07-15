@@ -2482,7 +2482,57 @@ try {
   ok('a DEAD holder\'s claim is vacant', R.roleClaim(rTop, 'coding') === null);
   ok('a vacant role can be claimed by anyone', R.claimRole(rTop, 'coding', process.pid, 's3').ok === true);
   ok('liveRoles lists live holders only', R.liveRoles(rTop).map((l) => l.role).join(',') === 'coding');
-} catch (e) { ok('arc-board works', false, e.message); }
+
+  // ---- A PID IS NOT AN IDENTITY -----------------------------------------------------------
+  // Windows recycles pids and arc spawns node for every hook, so a closed peer's pid gets taken.
+  // Caught live on the whalephone board: `research` (pid 9512) read dead → LIVE → dead across
+  // three probes with the session closed throughout. A dead process cannot resurrect — a stranger
+  // had its pid. Cost of believing it: a note nobody answers, and staffRole refusing to revive
+  // ("already held") — the chair becomes unfillable.
+  //
+  // No pid recycling needed to test it: an impostor is EXACTLY a claim that predates its own
+  // process, so backdating one reproduces the bug deterministically.
+  const genuine = { role: 'genuine', pid: process.pid, sessionId: 'g1', convId: 'g-conv', at: Date.now() };
+  const impostor = { role: 'impostor', pid: process.pid, sessionId: 'i1', convId: 'i-conv',
+    at: Date.now() - 6 * 60 * 60 * 1000 };   // claimed 6h ago; this process is minutes old
+  fs.writeFileSync(path.join(rTop.planDir, 'claim-genuine.json'), JSON.stringify(genuine));
+  fs.writeFileSync(path.join(rTop.planDir, 'claim-impostor.json'), JSON.stringify(impostor));
+
+  ok('a claim written AFTER its process started is genuine (the normal case still works)',
+    R.isHolder(genuine) === true && !!R.roleClaim(rTop, 'genuine'));
+  ok('...but a claim that PREDATES its own process is an impostor — a recycled pid, not a peer',
+    R.isHolder(impostor) === false && R.roleClaim(rTop, 'impostor') === null);
+  ok('...so liveRoles hides it, and the ghost peer disappears from the roster',
+    R.liveRoles(rTop).map((l) => l.role).sort().join(',') === 'coding,genuine');
+  // The worst face of the bug: the chair reads "held" so nothing may staff it, while the session
+  // that could answer is gone. Vacancy and liveness MUST be decided by the same rule.
+  ok('...and CRUCIALLY the squatted chair is revivable — vacancy uses the same rule as liveness',
+    !!R.vacantClaimForRole(rTop, 'impostor')
+    && R.vacantClaimForRole(rTop, 'impostor').convId === 'i-conv');
+  ok('...while a genuinely live role is NOT offered up for revival',
+    R.vacantClaimForRole(rTop, 'genuine') === null);
+
+  // THE TIMEZONE TRAP, as a regression guard. PowerShell's `.StartTime.Ticks` encodes the LOCAL
+  // wall clock; read as epoch it lands TZ-offset hours in the future (here: +8h), every genuine
+  // claim looks like it predates its own process, and EVERY peer on the board reads as dead.
+  // `.ToFileTimeUtc()` is the correct one. This catches that instantly.
+  const starts = R.procStarts([process.pid]);
+  if (starts) {
+    const drift = Math.abs(starts[process.pid] - (Date.now() - process.uptime() * 1000));
+    ok('procStarts agrees with our OWN start time (a TZ mix-up would be hours out, not seconds)',
+      drift < 5000, `drift ${Math.round(drift / 1000)}s — .Ticks instead of .ToFileTimeUtc()?`);
+  } else ok('procStarts agrees with our OWN start time', true, '(skipped: OS could not be asked)');
+
+  // FAIL OPEN when the OS cannot be asked. Reading a LIVE peer as dead is the worse error — it
+  // invites a second session into an occupied chair, where two peers share one cursor and eat
+  // each other's notes. Unsure must mean "behave exactly as arc always did".
+  ok('when the OS cannot be asked, a live-looking claim is TRUSTED (never block work on doubt)',
+    R.isHolder(impostor, null) === true);
+  // A claim from before this field existed has no `at` to compare — trust the pid, as before.
+  ok('a LEGACY claim with no timestamp still resolves (no flag day, no orphaned peers)',
+    R.isHolder({ role: 'old', pid: process.pid }) === true);
+  for (const f of ['claim-genuine.json', 'claim-impostor.json']) fs.unlinkSync(path.join(rTop.planDir, f));
+} catch (e) { ok('arc-board works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- arc-notes (the arc: sentinels over the ledger) ---------------------------
 section('arc-notes (role / note / notes)');

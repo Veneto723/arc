@@ -30,6 +30,7 @@
 
 const fs = require('fs');
 const os = require('os');
+const { spawnSync } = require('child_process');
 const path = require('path');
 
 // THE BOARD FOLDER: .arc/peer/
@@ -314,9 +315,91 @@ function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
+// ---- A PID IS NOT AN IDENTITY -------------------------------------------------
+// isAlive() answers "does SOME process have this pid?", never "is it the one that wrote this
+// claim?". Windows recycles pids, and arc spawns a node process for EVERY hook — so the collision
+// is not theoretical. Caught on the whalephone board: the `research` claim (pid 9512) read
+// dead → LIVE → dead across three probes minutes apart, with the session closed the whole time.
+// A stranger had taken its pid. A dead process cannot resurrect; that flicker IS the proof.
+//
+// What believing it costs: `arc delegate research "…"` posts a note into a chair nobody is in and
+// nobody ever answers, staffRole refuses to revive ("already held by a LIVE session"), and the
+// empty-chair warning never fires. The role becomes unfillable — the exact failure the whole
+// live/closed distinction exists to prevent.
+//
+// THE RULE, and it needs no new field: a claim is genuine only if its process started BEFORE the
+// claim was written. A recycled pid always starts AFTER the claim it inherited.
+//     android: process started 10:54:21, claim written 10:54:29  → genuine.
+//
+// THE COST, measured before choosing (this runs on the per-turn path):
+//   • process.kill is 0ms and has no false NEGATIVE — a genuinely dead pid is settled for FREE,
+//     with no query at all. That is the overwhelmingly common case.
+//   • Only a live-LOOKING pid needs the OS. One powershell spawn is ~270ms, and ~270ms is its
+//     STARTUP: asking about 3 pids costs the same as asking about 1. So we batch.
+//   • A short disk cache then amortises it to ~0 across the many short-lived hook processes.
+// Bounded lie: ≤ PIDSTART_TTL, instead of forever.
+const PIDSTART_CACHE = path.join(os.homedir(), '.claude', 'cache', 'arc-pidstart.json');
+const PIDSTART_TTL = 30000;
+const FILETIME_EPOCH = 11644473600000;   // ms from 1601-01-01 (FILETIME) to 1970-01-01 (unix)
+const CLAIM_SKEW_MS = 2000;              // absorb rounding only; a recycled pid is off by hours
+let pidStartMemo = null;                 // per-process memo, so one hook run pays at most once
+
+// pid -> start time (epoch ms), null if no such process. Returns null ENTIRELY if the OS cannot
+// be asked — the caller must then FAIL OPEN, never invent a verdict.
+function procStarts(pids) {
+  const want = [...new Set(pids.map(Number).filter(Boolean))];
+  if (!want.length) return {};
+  if (!pidStartMemo) {
+    try { pidStartMemo = JSON.parse(fs.readFileSync(PIDSTART_CACHE, 'utf8')) || {}; } catch { pidStartMemo = {}; }
+  }
+  const now = Date.now();
+  const need = want.filter((p) => {
+    const e = pidStartMemo[p];
+    return !e || typeof e.at !== 'number' || now - e.at > PIDSTART_TTL;
+  });
+  if (need.length) {
+    // .ToFileTimeUtc() — NOT .Ticks. `.Ticks` on a LOCAL DateTime encodes the local wall clock, so
+    // on this UTC+8 box a process started 02:54:21Z reports as 10:54:21Z: every genuine claim would
+    // look like it predated its own process by 8 hours and EVERY peer would read as dead. Verified
+    // against a process whose real start time was known before this was trusted.
+    let r;
+    try {
+      r = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+        `Get-Process -Id ${need.join(',')} -ErrorAction SilentlyContinue | %{ "$($_.Id) $($_.StartTime.ToFileTimeUtc())" }`],
+      { encoding: 'utf8', timeout: 5000 });
+    } catch { return null; }
+    if (!r || r.error || r.status !== 0) return null;      // only status 0 is an answer (status is
+    const seen = {};                                       // null on BOTH timeout and ENOENT)
+    for (const line of String(r.stdout || '').split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+      if (m) seen[m[1]] = Number(m[2]) / 10000 - FILETIME_EPOCH;
+    }
+    // A pid absent from the output is GONE — cache that as null, it is a real answer.
+    for (const p of need) pidStartMemo[p] = { start: seen[p] !== undefined ? seen[p] : null, at: now };
+    try { fs.mkdirSync(path.dirname(PIDSTART_CACHE), { recursive: true }); atomicWriteJson(PIDSTART_CACHE, pidStartMemo); } catch {}
+  }
+  const out = {};
+  for (const p of want) out[p] = pidStartMemo[p] ? pidStartMemo[p].start : null;
+  return out;
+}
+
+// Is this claim's process still the one that WROTE it? `starts` lets a caller pre-batch.
+function isHolder(claim, starts) {
+  if (!claim || !claim.pid) return false;
+  if (!isAlive(claim.pid)) return false;          // free, and never a false negative
+  if (!claim.at) return true;                     // legacy claim, no timestamp — trust the pid
+  const s = starts !== undefined ? starts : procStarts([claim.pid]);
+  // FAIL OPEN when the OS cannot be asked. Reading a LIVE peer as dead is the worse error: it
+  // invites a duplicate session into an occupied chair. Unsure means "behave as we always did".
+  if (!s) return true;
+  const t = s[claim.pid];
+  if (t == null) return false;                    // it died between the two probes
+  return claim.at >= t - CLAIM_SKEW_MS;
+}
+
 function roleClaim(board, role) {
   const l = readClaimFile(board, role);          // claim-*.json, or a legacy lease-*.json
-  return l && isAlive(l.pid) ? l : null;        // a dead holder's claim is vacant
+  return l && isHolder(l) ? l : null;            // a dead — or IMPOSTOR — holder's claim is vacant
 }
 
 // Returns {ok:true} if claimed, or {ok:false, holder} if a LIVE *other* session holds it.
@@ -356,7 +439,10 @@ function claimRole(board, role, pid, sessionId, convId) {
 // someone else's context, which hands the role's name to a session that has none of its memory.
 function vacantClaimForRole(board, role) {
   const l = readClaimFile(board, role);
-  return (l && l.convId && !isAlive(l.pid)) ? l : null;
+  // !isHolder, NOT !isAlive: a stranger squatting the pid must leave the chair REVIVABLE. This is
+  // the worst face of the bug — the role reads "held" so nothing may staff it, while the session
+  // that could answer is gone. Vacancy and liveness have to be decided by the same rule.
+  return (l && l.convId && !isHolder(l)) ? l : null;
 }
 
 function vacantClaimForConv(board, convId) {
@@ -367,7 +453,7 @@ function vacantClaimForConv(board, convId) {
     if (!CLAIM_FILE_RX.test(f)) continue;   // a legacy lease-*.json is still OUR claim
     try {
       const l = JSON.parse(fs.readFileSync(path.join(board.planDir, f), 'utf8'));
-      if (l.convId && l.convId === convId && !isAlive(l.pid)) return l;   // ours, and vacant
+      if (l.convId && l.convId === convId && !isHolder(l)) return l;      // ours, and vacant
     } catch { /* torn claim = no claim */ }
   }
   return null;
@@ -375,13 +461,19 @@ function vacantClaimForConv(board, convId) {
 
 // Who else is live in this flat right now (dead claims are ignored, not deleted —
 // a crashed session's claim just goes vacant).
+// THE place to batch: this asks about every claim on the board at once, so it must cost ONE
+// query, not one per role. The pids that survive the free isAlive probe are the only ones the
+// OS is asked about — usually one, often none.
 function liveRoles(board) {
   let files = []; try { files = fs.readdirSync(board.planDir); } catch { return []; }
-  return files
+  const claims = files
     .map((f) => (f.match(CLAIM_FILE_RX) || [])[1])
     .filter((r, i, a) => r && a.indexOf(r) === i)   // one role may have BOTH names mid-migration
-    .map((r) => roleClaim(board, r))
-    .filter(Boolean);
+    .map((r) => readClaimFile(board, r))
+    .filter((l) => l && isAlive(l.pid));            // free pass: settles every ordinary dead claim
+  if (!claims.length) return [];
+  const starts = procStarts(claims.map((l) => l.pid));
+  return claims.filter((l) => isHolder(l, starts));
 }
 
 function releaseRole(board, role, pid) {
@@ -396,6 +488,6 @@ module.exports = {
   notesPath, appendNote, allNotes, noteCount, latestSeq,
   KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo,
   readCursor, writeCursor, unreadFor, markRead,
-  isAlive, roleClaim, claimRole, releaseRole, liveRoles, vacantClaimForRole,
+  isAlive, isHolder, procStarts, roleClaim, claimRole, releaseRole, liveRoles, vacantClaimForRole,
   atomicWriteJson, withLock, vacantClaimForConv,
 };
