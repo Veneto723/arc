@@ -1786,7 +1786,7 @@ try {
   // means claude resumes the peer's conversation and immediately BRANCHES it into a new one —
   // abandoning everything the peer built. The user hit this the first time an invited peer ran out
   // of tokens and switched accounts, which is precisely when its history mattered most.
-  const born = ['--account', 'whale', '--resume', 'caller-conv', '--fork-session', 'arc:role scout'];
+  const born = ['--account', 'whale', '--name', 'scout', '--resume', 'caller-conv', '--fork-session', 'arc:role scout'];
   const relaunch = RUN.stripConvArgs(born);
   ok('a relaunch NEVER re-forks: --fork-session is stripped (this is what ate a conversation)',
     !relaunch.includes('--fork-session'));
@@ -1794,6 +1794,11 @@ try {
     !relaunch.some((a) => /^arc:/i.test(a)));
   ok('...while the real flags survive untouched',
     relaunch.includes('--account') && relaunch.includes('whale') && !relaunch.includes('caller-conv'));
+  // A peer that loses its NAME on a switch is back to being another "arc" in the picker — and a
+  // switch is exactly when you go looking for it. It survives because stripConvArgs removes only
+  // what it names; this pins that, since the strip list is where a careless `continue` would land.
+  ok('...including --name, so a switched/restarted peer stays findable in the picker',
+    relaunch.includes('--name') && relaunch.includes('scout'));
 
   fs.rmSync(frepo, { recursive: true, force: true });
   for (const f of [`arc-state-${FS_}.json`, `arc-active-${FS_}.json`, `arc-role-${FS_}.json`]) {
@@ -2062,6 +2067,12 @@ try {
     /--resume conv-abc-123 --fork-session/.test(psOf()));
   ok('...whose opening prompt is the arc:role sentinel, quote-nested to survive PS->wt->cmd',
     psOf().includes(`'"arc:role frontend"'`));
+  // The SESSION's name, which is not the tab title. Claude Code names a session after the project,
+  // so every arc session in one repo read "arc" — including in the `--resume` picker, where a peer
+  // and the session that staffed it were indistinguishable and reviving the right conversation by
+  // hand was guesswork. (Caught live: the tab said "arc: research", the session still said "arc".)
+  ok('...and the session is NAMED for its role (else the --resume picker is a list of "arc")',
+    /--name frontend/.test(psOf()));
   ok('...and the confirmation says WHY it forked (it starts knowing the project)',
     /staffing a new "frontend" peer/.test(okr.message) && /FORKS this conversation/.test(okr.message));
 
@@ -2103,7 +2114,7 @@ try {
   process.env.ARC_RUNTIME_ACCOUNT = 'veneto';
   I.staffRole(VS, 'backend', NOHIST);
   ok('staffing PINS the caller\'s account (the transcript only exists in that profile)',
-    /arc --account veneto --resume/.test(psOf()));
+    /arc --account veneto\b/.test(psOf()) && /--resume conv-abc-123/.test(psOf()));
   if (oldAcct === undefined) delete process.env.ARC_RUNTIME_ACCOUNT; else process.env.ARC_RUNTIME_ACCOUNT = oldAcct;
 
   // No wt: fall back to a fresh console window via `start`.

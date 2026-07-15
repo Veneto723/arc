@@ -118,9 +118,18 @@ const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // `fork:false` = REVIVE: we are resuming the role's OWN conversation, so it must NOT be forked —
 // it comes back as itself, with everything it learned. `fork:true` = a NEW peer born from the
 // caller's context, which is the only sensible thing when the role has no history to return to.
+// `--name <role>` names the SESSION, which is a different thing from the tab title below and was
+// missing: Claude Code defaults a session's display name to the project, so every arc session in
+// one repo showed up as "arc" — in the prompt box and, worse, in the `--resume` picker, where the
+// peer and the session that staffed it were indistinguishable. Reviving the RIGHT conversation by
+// hand was then guesswork on a list of identical names. It survives a relaunch on its own:
+// stripConvArgs only removes --continue/--fork-session/the birth prompt, and arc-runner forwards
+// anything that is not its own flag, so a switched or restarted peer keeps its name.
+// (No conflict with the tab title: --name also sets the terminal title, but the wt tab is pinned
+// by --suppressApplicationTitle, so "arc: <role>" still wins there.)
 function buildLaunch(wt, account, conv, role, root, fork) {
   const acct = account ? ` --account ${account}` : '';
-  const inner = `arc${acct} --resume ${conv}${fork ? ' --fork-session' : ''} '"arc:role ${role}"'`;
+  const inner = `arc${acct} --name ${role} --resume ${conv}${fork ? ' --fork-session' : ''} '"arc:role ${role}"'`;
   if (wt) {
     // --suppressApplicationTitle is what makes the title STICK. Without it the tab shows "arc"
     // like every other tab: Claude Code sets the terminal title from the project folder, and an

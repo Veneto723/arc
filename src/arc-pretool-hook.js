@@ -21,6 +21,13 @@
 //   role EMPTY, balanced→ ASK    (the default) the permission prompt IS the confirmation.
 //   role EMPTY, active  → ALLOW  auto-approved: you asked for an agent that staffs its own peers.
 //
+// BALANCED'S "ASK" IS ONLY AS REAL AS THE PROMPT. Under Claude Code's auto-accept mode (⏵⏵), the
+// harness answers permission prompts for you, so `ask` is approved without a human ever seeing it
+// and balanced behaves exactly like active. Observed the first time a peer was staffed this way.
+// KNOWN AND ACCEPTED — the user runs auto mode deliberately and likes it; passive is then the
+// meaningful restraint. Do NOT "fix" this by escalating balanced to DENY: that would break the
+// default mode for everyone to re-create a confirmation the user has already opted out of.
+//
 // RUNAWAY GUARD: even under ACTIVE it drops to ASK once several peers are live. Each is a session
 // burning its own quota, and "spawn a helper" is exactly the move that looks locally reasonable
 // every single time. It fails OPEN to a prompt, never to a refusal.
