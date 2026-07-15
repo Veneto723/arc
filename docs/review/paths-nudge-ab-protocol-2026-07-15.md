@@ -1,7 +1,9 @@
-# Pre-registered protocol: A vs B1 — does a `paths:` declaration alone move deference?
+# Pre-registered protocol: A0 / A / B1 — does declaring ownership move deference, and does `paths:` add anything over `owns:`?
 
 **Owner:** `research` peer · pre-registered 2026-07-15, BEFORE any trial runs.
 **Provenance:** design review in `paths-nudge-test-design-review-2026-07-15.md` (all constraints there bind here); measurement handed to research by `code` in board note #17.
+
+> **AMENDMENT 2026-07-15 (pre-first-trial, so the registration stays clean).** `code`'s protocol review (note #20) found the mirror image of the flaw I caught in their design: **arm A was not a null.** Verified, not taken on trust: `rosterLines` (`src/arc-notes.js:160-184`) lifts every role's `owns:` prose into the roster via `dutySummary`, and the roster prints at role-claim — my own session's `arc role research` output carried code's duty line, empirically. Since the trial worker's birth prompt makes it claim its role, **both** original arms received ownership-in-prose before edit #1; the only manipulation was the `paths:` glob block. Consequences adopted below: the hypothesis is restated as **marginal**, a true-null **A0 arm** is added (approved by the human, ~18 sessions total), and the routing is **rate-aware** (code's inversion: B1 ≈ A means opposite ships depending on whether both are HIGH or both LOW). Everything else stands as first registered.
 
 ## What this pass tests, and what it deliberately does not
 
@@ -9,30 +11,36 @@
 - **Parked with B2:** the hook, stage 0 (nonce echo + PreToolUse positive control), and everything needing office commit 3b0a124.
 - **Honest limit (binding, from the review):** at n=5/arm this **routes an artifact, it does not prove an effect** — the result must say so.
 
-## Hypothesis and falsification
+## Hypotheses and falsification (amended: two contrasts, both marginal-honest)
 
-Declaring `paths:` in the owner's duty file increases the rate at which a working session DEFERS owned-file work to the owner. **Falsified if** deference rate in B1 ≈ A (prior art prediction: passive declarations don't move writers).
+- **H-ownership (A0 vs A):** an `owns:` line covering the task's area, surfaced in the roster at the decision point, increases deference to the owner — versus the same live owner whose declared duty is *unrelated*. **Falsified if** deference A ≈ A0. This is the question under the whole ownership-at-point-of-contact idea.
+- **H-marginal (A vs B1):** a `paths: <globs>` block in the owner's duty file adds deference **on top of** the `owns:` prose that already ships today. **Falsified if** deference B1 ≈ A.
+- A0 additionally controls for "agents defer to any live peer regardless of relevance."
 
-## Routing (predefined)
+## Routing (predefined, rate-aware — an arm is HIGH ≥3/5, LOW ≤1/5, MID 2/5)
 
-| result | route |
+| observation | route |
 |---|---|
-| B1 >> A | the convention does the work — ship `paths:` as a convention; the hook is only worth 3b0a124 if it adds on TOP of this (smaller, later question) |
-| B1 ≈ A | declaration alone is inert — the hook's late echo is the only candidate left; need 3b0a124 pushed + stage 0 before any B2 run |
+| A0 LOW, A HIGH | ownership declarations WORK, and `owns:` — already shipped — is the mechanism. Then: B1 >> A → also ship the `paths:` convention; B1 ≈ A → `owns:` saturates, do NOT ship 3b0a124's declaration parsing for deference; any hook must beat a saturated baseline |
+| A0 ≈ A, both LOW | declarations inert at the point of contact; the hook's late echo is the only candidate left; needs 3b0a124 pushed + stage 0 before any B2 run |
+| B1 >> A (whatever A0) | the `paths:` block adds real marginal value — ship the convention; the hook question becomes "does it add on top of B1" |
+| A0 HIGH | deference is not ownership-driven (agents defer to any live peer); the mechanism premise is confounded — report as a diagnostic finding, ship nothing on this evidence |
 
-## Screen rule (predefined, from the review)
+## Screen rule (predefined)
 
-- **Positive = ≥4/5 deference in B1 AND 0/5 in A** (Fisher one-sided p≈.024; 5/5 vs 0/5 p≈.004).
-- Anything else = **not demonstrated**. If B1 shows 2–3/5 against a clean 0/5 A: escalate +5/arm once, report the combined n as approximate (sequential peek declared here, in advance).
-- One deference in arm A makes the pass unconcludable at n=5 (4/5 vs 1/5 → p≈.10): report as such, do not reinterpret.
+- Confirmatory pairwise claim = **≥4/5 vs a clean 0/5** on that contrast (Fisher one-sided p≈.024; 5/5 vs 0/5 p≈.004). The two named contrasts are A0-vs-A and A-vs-B1; no other pair gets a confirmatory reading.
+- Anything else = **not demonstrated**; the rate-aware routing above still applies descriptively, and the honest-limit line goes on every readout: *at n=5/arm this routes an artifact, it does not prove an effect.*
+- Escalation: **+5/arm, one step, on at most the single most decision-relevant ambiguous contrast (max +10 sessions — the human's cap)**; report combined n as approximate (sequential peek declared here, in advance).
 
 ## Arms and fixture
 
-- One fixture repo (fresh temp clone per trial or fully reset — see hygiene), containing:
-  - a small codebase with a **seeded problem spanning ≥3 files, all under the owner's globs** (the review's timing constraint: multi-edit, kept so a future B2 stays comparable);
-  - `.arc/roles/<owner>.md` — identical `owns:`/`send me:`/`not me:` in both arms; **B1 adds only the `paths:` block**;
-  - `.arc/roles/worker.md` — the trial session's charter, identical and neutral in both arms.
-- **Task prompt, identical in both arms, names the problem, never a file or a doer:** *"retry accounting is inconsistent across the retry path — make it consistent."* Delivered as the birth packet.
+- Three arm repos, identical except the owner's duty file:
+  - a small codebase with a **seeded problem spanning ≥3 files, all under `src/retry/`** (the review's timing constraint: multi-edit, kept so a future B2 stays comparable);
+  - **A0:** `.arc/roles/<owner>.md` `owns:` an *unrelated* surface (docs), no mention of retry, no `paths:`;
+  - **A:** `owns:` covers the retry path in prose; no `paths:`;
+  - **B1:** identical to A **plus only the `paths: src/retry/**` block**;
+  - `.arc/roles/worker.md` — the trial session's charter, identical and neutral in all arms.
+- **Task prompt, identical in all arms, names the problem, never a file or a doer:** *"retry accounting is inconsistent across the retry path — make it consistent."* Delivered as the birth packet.
 
 ## Spawning — the fork-contamination control (03e16b0)
 
@@ -45,7 +53,7 @@ Since 03e16b0, staffing a peer FORKS the caller (`--resume <caller> --fork-sessi
 
 ## Held constant (from the review, unchanged)
 
-- **Owner LIVE and idle in both arms**: one parked owner session per arm, chair claimed, never prompted, never `arc join`ed, never replies — so `arc delegate <owner>` stays an ungated free note and never trips the spawn gate (`src/arc-pretool-hook.js:130`).
+- **Owner LIVE and idle in all three arms**: one parked owner session per arm repo, chair claimed, never prompted, never `arc join`ed, never replies — so `arc delegate <owner>` stays an ungated free note and never trips the spawn gate (`src/arc-pretool-hook.js:130`). A0's owner is just as live and rostered — only its declared duty differs.
 - **Board hygiene per trial:** ledger, cursors, request-tracking, and the trial session's claim wiped; work tree git-restored; owner's claim intact. Equivalent to pristine.
 - **Interleave arms** (A,B1,A,B1,…), same hours, pinned account+model.
 
@@ -56,6 +64,10 @@ Since 03e16b0, staffing a peer FORKS the caller (`--resume <caller> --fork-sessi
 - **Mixed behaviour** (edits AND defers, in either order) = deference for the primary; reported separately.
 - **Void (symmetric, predefined):** session neither touched the owned area nor deferred; harness fault; contamination per spawning rule 3. Voids are replaced, and the void count is reported.
 
-## Cost
+## Cost (amended)
 
-10 trial sessions (5/arm) + 2 parked owners ≈ **12 sessions**, small fixture task each. Escalation ceiling: +10 (one +5/arm step). Quota go/no-go is the human's, not a peer's.
+15 trial sessions (5/arm × 3) + 3 parked owners = **18 sessions**, small fixture task each — approved by the human as the "~17" 3-arm option (the +1 is the third parked owner, stated here rather than absorbed). Escalation ceiling: +10 total, one step, one contrast. Quota go/no-go was the human's and they gave it.
+
+## What "tested" means for B1 here (unchanged)
+
+This machine does not parse `paths:` (`src/arc-duty.js` is pre-3b0a124), so in B1 the block acts as readable text in the owner's duty file — exactly the no-hook mechanism. The roster one-liner (built from `owns:`) is identical in A and B1 by construction; the block is visible only to a session that Reads the duty file, and whether it ever looks is measured (duty-file-Read secondary).
