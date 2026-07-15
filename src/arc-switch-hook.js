@@ -217,15 +217,25 @@ function run(raw) {
   // outcome nobody typing "delegate" wants. So we intercept and point at the two things that
   // replaced it, at zero tokens.
   if (action === 'delegate') {
-    return clBlock('arc:delegate has been removed — it fired a headless one-shot that re-read the\n'
-      + 'repo from scratch and then died. Two better tools already cover it:\n\n'
-      + '  ONE-SHOT, no context needed (research a question, sweep some files)\n'
-      + '    → ask your agent for a SUBAGENT. Claude Code runs it natively, in-session,\n'
-      + '      on your own quota, and it can target another model (even Fable).\n\n'
-      + '  STATEFUL, context worth keeping (an ongoing frontend/android/research thread)\n'
-      + '    → a PEER on the board: `arc:role` to see who is here, then\n'
-      + '      `arc note <role> --kind request "<packet>"`. They keep their context across\n'
-      + '      turns, so the 3rd ask is as cheap as the 1st — and arc wakes you on the reply.\n\n'
+    // THE WORD WAS REUSED, so this cannot just be a tombstone. `arc:delegate` once fired a headless
+    // one-shot and was removed; `arc delegate <role>` is now the AGENT's verb for handing work to a
+    // peer. Someone typing this today almost certainly means the second one — so answer THAT, and
+    // keep the old redirect only for the case the old tool actually served (a stateless one-shot).
+    //
+    // There is deliberately no prompt-form that staffs a peer: a human's natural act is prose. Say
+    // what to say instead, rather than teaching a command we chose not to build.
+    return clBlock('there is no arc:delegate for you to type — just ask, in prose:\n\n'
+      + '    "get research on this"        "have frontend look at the login bug"\n\n'
+      + 'Your agent runs `arc delegate <role> "<packet>"`, and arc works out the rest: it notes\n'
+      + 'that peer if they are live, REVIVES their own conversation if they have closed (they come\n'
+      + 'back as themselves, with everything they learned), or opens a tab and staffs the chair if\n'
+      + 'nobody has ever held it. You pick WHO; you never have to know which of the three it is.\n'
+      + '  `arc:role` shows who is here and what this repo has.\n'
+      + '  `arc:mode` decides how freely the agent may spawn one (passive · balanced · active).\n\n'
+      + 'If the job needs NO context and nobody should own it (research a question, sweep some\n'
+      + 'files), that is not a peer — ask your agent for a SUBAGENT: in-session, your quota, any\n'
+      + 'model. (The OLD arc:delegate fired a headless one-shot that re-read the repo and died;\n'
+      + 'that is the tool it lost to.)\n\n'
       + 'To run a task on GPT: `arc:switch` to your codex account (that is claudex).');
   }
   if (action === 'mode' || action === 'stance') {

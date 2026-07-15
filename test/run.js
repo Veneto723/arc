@@ -2832,12 +2832,20 @@ try {
   const d = ask('arc:delegate codex "find why the import test is flaky"');
   ok('arc:delegate is still INTERCEPTED (never falls through to the model as a prompt)',
     !!(d.reason || '').length);
-  ok('...and it REDIRECTS to the two things that replaced it (subagent + peer)',
-    /removed/i.test(d.reason || '') && /SUBAGENT/i.test(d.reason || '') && /--kind request/.test(d.reason || ''));
+  // THE WORD WAS REUSED, and that makes this more than a tombstone. `arc:delegate` once fired a
+  // headless one-shot; `arc delegate <role>` is now the agent's peer verb. Someone typing the
+  // sentinel today means the CURRENT thing, so answering "that was removed" would deny a command
+  // that exists and send them to advice the merge superseded.
+  ok('...and it answers what the word MEANS NOW (the peer verb), not what it used to mean',
+    /arc delegate <role>/.test(d.reason || '') && !/has been removed/i.test(d.reason || ''));
+  ok('...and it tells the human to ask in PROSE (we chose not to build them a command)',
+    /in prose/i.test(d.reason || '') && /get research on this/i.test(d.reason || ''));
+  ok('...while still redirecting the case the OLD tool really served (a stateless one-shot)',
+    /SUBAGENT/i.test(d.reason || ''));
   ok('...and it points at arc:switch for GPT (claudex SURVIVES the removal)',
     /arc:switch/.test(d.reason || ''));
   ok('the bare form redirects too (no crash on a missing task)',
-    /removed/i.test(ask('arc:delegate').reason || ''));
+    /in prose/i.test(ask('arc:delegate').reason || ''));
 
   // The sibling removal, kept as a regression: handoff was deleted OUTRIGHT (no redirect), so
   // it must fall through with NO decision at all. Two removals, two deliberate shapes — if
