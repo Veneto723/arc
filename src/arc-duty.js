@@ -38,12 +38,61 @@ function dutyRel(role) { return path.join(ROLES_REL, `${String(role).toLowerCase
 // shows ONE line per role (cheap even with six peers), and the full declaration is one Read away.
 // Prefer an explicit `owns:` line; fall back to the first real prose line so a free-form
 // declaration still surfaces something rather than nothing.
+// The roster renders to a TERMINAL, not to a markdown viewer, so `**bold**` and `` `code` ``
+// arrive as literal punctuation. We ask for three plain lines (owns:/send me:/not me:) and the
+// first real board answered with two full documents — headings, bold, bullets. That is the honest
+// default: a session writing its own charter writes prose. So strip the markup here rather than
+// pretend the format guidance will hold.
+function plainly(s) {
+  return String(s)
+    .replace(/`([^`]+)`/g, '$1')            // `code` -> code
+    .replace(/\*\*([^*]+)\*\*/g, '$1')      // **bold** -> bold
+    .replace(/(^|\W)\*([^*]+)\*(?=\W|$)/g, '$1$2')   // *ital* -> ital (never touches a*b)
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')          // [text](url) -> text
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Cut on a WORD boundary. A mid-word chop ("evidence-grounded, skeptic-verifi") reads as data
+// corruption in a roster whose whole job is telling an agent who owns what.
+function clip(s, max) {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const sp = cut.lastIndexOf(' ');
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s,;:.\-–—]+$/, '') + '…';
+}
+
+// A duty file is hard-wrapped prose, so ONE PHYSICAL LINE is an arbitrary column cut, not a
+// thought: the first real board's `android` ended its summary at "the on-device Android app (the"
+// — a dangling article and an unclosed paren, because the author's editor wrapped at 104 columns.
+// So read a PARAGRAPH (consecutive lines, joined) and let the sentence decide where it ends.
+const isBreak = (l) => !l || /^#/.test(l) || /^<!--/.test(l) || /^-{3,}$/.test(l) || /^[-*+]\s/.test(l);
+
+function paragraphFrom(lines, i, stopAtKey) {
+  const out = [];
+  for (let j = i; j < lines.length; j++) {
+    const l = lines[j];
+    if (j > i && (isBreak(l) || (stopAtKey && /^\**[a-z][a-z ]{1,12}\**\s*:/i.test(l)))) break;
+    out.push(l);
+  }
+  return out.join(' ');
+}
+
+// Prefer a whole SENTENCE when one fits — "The read-only inquiry / research session." says more,
+// and says it cleanly, than 100 characters chopped out of the middle of a paragraph.
+function summarize(para, max) {
+  const s = plainly(para);
+  const dot = s.search(/[.!?](?:\s|$)/);
+  if (dot >= 24 && dot + 1 <= max) return s.slice(0, dot + 1);
+  return clip(s, max);
+}
+
 function dutySummary(text) {
   const lines = String(text || '').split('\n').map((l) => l.trim());
-  const owns = lines.find((l) => /^owns\s*:/i.test(l));
-  if (owns) return owns.replace(/^owns\s*:\s*/i, '').slice(0, 100);
-  const prose = lines.find((l) => l && !/^#/.test(l) && !/^<!--/.test(l) && !/^-{3,}$/.test(l));
-  return prose ? prose.slice(0, 100) : '';
+  const oi = lines.findIndex((l) => /^\**owns\**\s*:/i.test(l));
+  if (oi >= 0) return summarize(paragraphFrom(lines, oi, true).replace(/^\**owns\**\s*:\s*/i, ''), 100);
+  const pi = lines.findIndex((l) => l && !isBreak(l));
+  return pi >= 0 ? summarize(paragraphFrom(lines, pi, false), 100) : '';
 }
 
 function readDuty(board, role) {

@@ -1500,6 +1500,51 @@ try {
   ok('...and falls back to the first prose line, so a free-form charter still surfaces something',
     D.dutySummary('# x\n\njust some prose here\n') === 'just some prose here');
 
+  // EVERY FIXTURE ABOVE IS ONE LINE, AND THAT IS WHY THEY ALL PASSED WHILE THE ROSTER WAS WRONG.
+  // We ask for three plain lines (owns:/send me:/not me:). The first real board answered with two
+  // full markdown documents, hard-wrapped at ~104 columns — so "the first prose LINE" was an
+  // arbitrary column cut, and the live roster read:
+  //     ● android live — The **product-build** session: owns **both sides of Whale's core loop
+  // …ending on a dangling article inside an unclosed paren, with the bold markers intact, in a
+  // TERMINAL. Format guidance does not survive contact with a session writing its own charter, so
+  // these assert the CODE copes with prose instead.
+  // the source as the summary sees it: markup gone, lines joined — so "is this a whole word?"
+  // is asked against the same text dutySummary was reading.
+  const plainSrc = (t) => t.replace(/[*`]/g, '').replace(/\s+/g, ' ');
+  const wrapped = '# Role: android — whalephone\n\n'
+    + "The **product-build** session: owns **both sides** of the core loop — the on-device app (the\n"
+    + '*eyes and hands*) AND the cloud edge. Named `android` for historical reasons.\n\n'
+    + '## Owns\n- **The app** (`android/`): a bullet that must not be swallowed\n';
+  const s = D.dutySummary(wrapped);
+  // "eyes and" lives on the SECOND physical line — reaching it proves the lines were joined
+  // rather than the summary stopping where the author's editor happened to wrap.
+  ok('a hard-wrapped paragraph is JOINED, not cut at the author\'s column width',
+    /\(the eyes and/.test(s) && !/\n/.test(s));
+  ok('...markdown emphasis is stripped (the roster is a terminal, not a markdown viewer)',
+    !/[*`]/.test(s));
+  // The real property: the last word kept must be a WHOLE word of the source. A length check
+  // cannot see the difference between "…and" (fine) and "…skeptic-verifi" (corruption).
+  const lastWord = s.replace(/…$/, '').trim().split(/\s+/).pop();
+  ok('...and it never chops mid-word — the last word survives whole, or not at all',
+    s.length <= 101 && /…$/.test(s)
+    && new RegExp('(^|\\s)' + lastWord.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '(\\s|[.,)]|$)').test(plainSrc(wrapped)));
+  ok('...and a heading or bullet never leaks into the summary',
+    !/##|bullet/.test(s));
+
+  // A whole sentence beats 100 chars chopped out of the middle of one, when it fits.
+  ok('a short leading SENTENCE is preferred whole (it says more, and says it cleanly)',
+    D.dutySummary('# r\n\nThe read-only inquiry session. Turns questions into evidence-grounded\nfindings that survive a skeptic.\n')
+      === 'The read-only inquiry session.');
+  // ...but not a fragment: "e.g." must not end the summary two words in.
+  ok('...but a too-short fragment is not mistaken for a sentence',
+    /^Owns the edge/.test(D.dutySummary('# r\n\nOwns the edge. Everything server-side, including the deep-link recipe table.\n')));
+
+  // An `owns:` that wraps must join too — but STOP at the next key, or the summary swallows
+  // "send me:" and the one line a peer needs to route work becomes three.
+  const ownsWrap = D.dutySummary('owns: the web frontend and any user-facing\nweb surface\nsend me: copy and layout asks\nnot me: the app\n');
+  ok('a wrapped `owns:` joins its continuation but STOPS at the next key',
+    ownsWrap === 'the web frontend and any user-facing web surface');
+
   // THE ROSTER: declarations merged with claims. The `closed` row is the whole point — the state
   // an agent could not see before, and the one that decides invite-vs-do-it-myself.
   const ros = D.roster(dbd, [{ role: 'android' }]);
