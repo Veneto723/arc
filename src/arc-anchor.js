@@ -13,7 +13,7 @@
 //     handleLogin validates the nonce before issuing a session.
 //
 // The FIRST time arc sees an anchor it seals it: it resolves the symbol, hashes the
-// block, and remembers the hash in .plan/anchor-state.json. Afterwards, whenever the
+// block, and remembers the hash in .peer/anchor-state.json. Afterwards, whenever the
 // repo moves, it re-resolves. If the block's hash changed, or the symbol vanished, or
 // the file is gone, a HIGH-PRIORITY note lands on the board — which the research
 // session then receives at the top of its next turn, without asking.
@@ -32,7 +32,7 @@
 // correct bias for a staleness alarm — a false STALE costs a glance, a missed one
 // costs a wrong decision.
 //
-// We never rewrite the user's doc. The seal lives in .plan/, so the doc stays the
+// We never rewrite the user's doc. The seal lives in .peer/, so the doc stays the
 // doc.
 'use strict';
 
@@ -130,7 +130,7 @@ function hashSlice(slice) {
 // `git grep` respects .gitignore and is far faster than walking. No repo -> no anchors.
 // --untracked matters: a doc you have written but not yet committed still makes claims
 // about the code, and without it the anchor stays invisible until the doc is committed.
-// (.gitignore is still honoured, so .plan/ and node_modules never get scanned.)
+// (.gitignore is still honoured, so .peer/ and node_modules never get scanned.)
 function anchorDocs(root) {
   try {
     const out = execFileSync('git', ['grep', '-l', '-I', '-F', '--untracked', 'arc:anchor'],

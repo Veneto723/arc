@@ -24,7 +24,7 @@
 //    one file on one filesystem: single-line O_APPEND writes are atomic between
 //    processes. (git compare-and-swap only mattered for writers in different
 //    clones/worktrees — which are, by definition, different boards.)
-//  * SELF-IGNORING. .plan/.gitignore is "*", so the board never enters the
+//  * SELF-IGNORING. .peer/.gitignore is "*", so the board never enters the
 //    project's history and the project's own .gitignore never learns it exists.
 'use strict';
 
@@ -32,11 +32,23 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const PLAN_DIR = '.plan';
+// The board folder. It was `.plan` until 2026-07-15 — a name left from before the room->board
+// rename, and confusing enough that it had to be explained out loud ("there is no .board; .plan
+// IS the board"). `.peer` says what lives here: the peers' channel.
+//
+// Renaming it moves LIVE STATE, which is the dangerous kind, so it is done in exactly two moves:
+//   * READ falls back to the legacy name (below), so the ledger is never invisible for even one
+//     call between a deploy and the first write.
+//   * ensureBoard MIGRATES with a single atomic rename on the next write — the whole ledger,
+//     every cursor and claim, arrives intact and `.plan` ceases to exist.
+// After that the fallback is one failed stat, forever. No permanent shim, no data loss, no
+// window where two sessions write to different folders and silently stop seeing each other.
+const PLAN_DIR = '.peer';
+const LEGACY_PLAN_DIR = '.plan';
 const NOTES = 'notes.jsonl';
 const GITIGNORE_BODY =
   '# The board: cross-session sticky notes. Coordination scratch, not a project\n' +
-  '# artifact — this ignores the whole .plan/ area (including this file), so the\n' +
+  '# artifact — this ignores the whole .peer/ area (including this file), so the\n' +
   "# project's own .gitignore never needs to know it exists.\n" +
   '*\n';
 
@@ -65,11 +77,30 @@ function resolveBoard(cwd) {
   const root = canonical(repoRoot(cwd || process.cwd()));
   // basename of a drive root ("e:\") is "" — fall back to the path so a board is
   // never nameless. (Yes, people really do keep a git repo at a drive root.)
-  return { root, planDir: path.join(root, PLAN_DIR), name: path.basename(root) || root };
+  // READ FALLBACK to the legacy name: a board that has not been written to since the rename
+  // still lives in `.plan`, and pointing at an empty `.peer` would report "no notes" — a lie,
+  // and the worst kind (silent). Prefer the new name; use the old one only while it is the one
+  // that actually exists. ensureBoard migrates it on the next write, and then this never fires.
+  let planDir = path.join(root, PLAN_DIR);
+  if (!fs.existsSync(planDir)) {
+    const legacy = path.join(root, LEGACY_PLAN_DIR);
+    if (fs.existsSync(legacy)) planDir = legacy;
+  }
+  return { root, planDir, name: path.basename(root) || root };
 }
 
-// Create .plan/ + its self-ignore. Idempotent; cheap to call every time.
+// Create the board dir + its self-ignore. Idempotent; cheap to call every time.
+// Also THE MIGRATION POINT: this runs on every write path (a claim, a note), so the legacy
+// `.plan` folder is renamed the first time anyone writes. One atomic rename carries the entire
+// ledger, every cursor and every claim — nothing is copied, nothing is lost, and it cannot
+// half-finish. It MUTATES board.planDir because callers hold the object by reference and would
+// otherwise keep writing to the folder we just moved out from under them.
 function ensureBoard(board) {
+  const target = path.join(board.root, PLAN_DIR);
+  if (board.planDir !== target && !fs.existsSync(target)) {
+    try { fs.renameSync(board.planDir, target); board.planDir = target; }
+    catch { /* someone raced us, or it is locked — keep using the legacy dir, still correct */ }
+  }
   fs.mkdirSync(board.planDir, { recursive: true });
   const gi = path.join(board.planDir, '.gitignore');
   if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE_BODY);

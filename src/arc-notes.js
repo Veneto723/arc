@@ -201,7 +201,7 @@ function requestRole(session, arg, cwd) {
   // it, deaf to its real peers. Caught live in the first two-session drill: the responder was
   // launched in E:\ and claimed research on an "e:\" board while its peer was on "e:\arc" —
   // two boards, zero contact, no error anywhere. Refuse BEFORE ensureBoard, so we don't even
-  // leave a .plan/ at a drive root.
+  // leave a .peer/ at a drive root.
   if (!fs.existsSync(path.join(board.root, '.git'))) {
     return { ok: false, message:
       `"${board.root}" is not a git repository, so there is no board here to claim a role on.\n` +

@@ -1170,6 +1170,118 @@ try {
 // <caller conv> --fork-session "arc:role <role>"`, and the existing fresh-claim pass-through
 // does the claiming + arming in the new session's first turn. These tests inject a spawn
 // recorder — nothing real opens.
+// ---- .plan -> .peer : renaming the board folder without losing a session ------------
+// The folder was `.plan` — a name left from before the room->board rename, confusing enough that
+// it had to be explained out loud ("there is no .board; .plan IS the board"). Renaming it moves
+// LIVE STATE, which is the dangerous kind: get it wrong and two sessions write to different
+// folders and silently stop seeing each other (the wrong-board split, which has already cost one
+// drill). So the migration is read-fallback + one atomic rename, and these are its guards.
+section('.plan -> .peer migration (live state moves without a silent split)');
+try {
+  const RM8 = require(path.join(SRC, 'arc-board.js'));
+
+  // A board frozen exactly as the old code left it: ledger, cursor, claim, self-ignore.
+  const old = fs.mkdtempSync(path.join(os.tmpdir(), 'mig-'));
+  spawnSync('git', ['init', '-q'], { cwd: old });
+  const legacy = path.join(old, '.plan');
+  fs.mkdirSync(legacy, { recursive: true });
+  fs.writeFileSync(path.join(legacy, 'notes.jsonl'),
+    '{"from":"android","to":"research","body":"first"}\n{"from":"research","to":"android","body":"second"}\n');
+  fs.writeFileSync(path.join(legacy, 'cursor-android.json'), JSON.stringify({ seq: 1 }));
+  fs.writeFileSync(path.join(legacy, 'claim-android.json'),
+    JSON.stringify({ role: 'android', pid: process.pid, sessionId: 'mig-s', convId: 'mig-c', at: Date.now() }));
+  fs.writeFileSync(path.join(legacy, '.gitignore'), '*\n');
+
+  // READ FALLBACK: before any write, the ledger must still be fully visible. Pointing at an
+  // empty `.peer` and reporting "no notes" would be a lie, and the silent kind.
+  const b1 = RM8.resolveBoard(old);
+  // NB compare against b1.root: resolveBoard CANONICALISES (lowercases) the path, so the raw
+  // mkdtemp string never matches on Windows.
+  ok('before any write, a legacy board is still READ in full (never a silently empty board)',
+    b1.planDir === path.join(b1.root, '.plan') && RM8.allNotes(b1).length === 2);
+  ok('...and its claim is still seen, so nobody steals a role that is genuinely held',
+    (RM8.roleClaim(b1, 'android') || {}).sessionId === 'mig-s');
+  ok('...and its cursor still counts (unread is 1, not "all of it again")',
+    RM8.unreadFor(b1, 'android').count === 1);
+
+  // THE MIGRATION: one atomic rename on the first write. Everything arrives; nothing is copied.
+  RM8.ensureBoard(b1);
+  ok('the first write MIGRATES .plan -> .peer, atomically',
+    fs.existsSync(path.join(old, '.peer')) && !fs.existsSync(legacy));
+  ok('...and mutates the caller\'s board object (or it would write to the folder we just moved)',
+    b1.planDir === path.join(b1.root, '.peer'));
+  ok('...carrying the whole ledger', RM8.allNotes(b1).length === 2);
+  ok('...the cursor', RM8.unreadFor(b1, 'android').count === 1);
+  ok('...and the live claim (a session does not lose its role to a rename)',
+    (RM8.roleClaim(b1, 'android') || {}).sessionId === 'mig-s');
+
+  // And a freshly resolved board now finds the new name with no fallback.
+  const b2 = RM8.resolveBoard(old);
+  ok('a fresh resolve now points at .peer (the fallback is one failed stat, then never again)',
+    b2.planDir === path.join(b2.root, '.peer') && RM8.allNotes(b2).length === 2);
+  ok('the self-ignore came along, so the board still never enters the project history',
+    /^\*$/m.test(fs.readFileSync(path.join(old, '.peer', '.gitignore'), 'utf8')));
+
+  // A BRAND-NEW board must simply be .peer — no legacy anything.
+  const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'mig2-'));
+  spawnSync('git', ['init', '-q'], { cwd: fresh });
+  const b3 = RM8.resolveBoard(fresh);
+  RM8.ensureBoard(b3);
+  ok('a NEW board is born as .peer, with no .plan anywhere',
+    fs.existsSync(path.join(fresh, '.peer')) && !fs.existsSync(path.join(fresh, '.plan')));
+
+  // NEVER clobber: if BOTH exist (a half-migrated repo, or someone made .peer by hand), the
+  // rename must not fire — silently merging two ledgers would be far worse than leaving it.
+  const both = fs.mkdtempSync(path.join(os.tmpdir(), 'mig3-'));
+  spawnSync('git', ['init', '-q'], { cwd: both });
+  fs.mkdirSync(path.join(both, '.plan'), { recursive: true });
+  fs.mkdirSync(path.join(both, '.peer'), { recursive: true });
+  fs.writeFileSync(path.join(both, '.peer', 'notes.jsonl'), '{"from":"x","body":"new"}\n');
+  const b4 = RM8.resolveBoard(both);
+  RM8.ensureBoard(b4);
+  ok('with BOTH folders present, .peer wins and .plan is left untouched (never merge two ledgers)',
+    b4.planDir === path.join(b4.root, '.peer') && fs.existsSync(path.join(both, '.plan'))
+    && RM8.allNotes(b4).length === 1);
+
+  for (const d of [old, fresh, both]) fs.rmSync(d, { recursive: true, force: true });
+} catch (e) { ok('.plan -> .peer migration', false, e.message + '\n' + (e.stack || '')); }
+
+// ---- the listener must not go deaf when its board moves ------------------------------
+// A listener captures its folder at spawn and polls that exact path forever. A rename underneath
+// it would leave it polling a corpse — and WORSE than merely missing notes: the armed marker
+// still names a LIVE pid, so the Stop hook sees "already listening" and stays quiet. The session
+// would be deaf forever while arc reported it reachable. So it exits, and the next idle re-arms.
+section('listener self-heal (a board that moves must not make a session silently deaf)');
+try {
+  const A9 = require(path.join(SRC, 'arc-await.js'));
+  const RM9 = require(path.join(SRC, 'arc-board.js'));
+  const mrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'moved-'));
+  spawnSync('git', ['init', '-q'], { cwd: mrepo });
+  const mb = RM9.resolveBoard(mrepo); RM9.ensureBoard(mb);
+  const MS = 'moved-sess-' + process.pid;
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${MS}.json`),
+    JSON.stringify({ pid: process.pid, cwd: mrepo }));
+
+  // Run a listener in a real subprocess (its exit IS the property), then move the board.
+  const child = spawnSync(process.execPath, ['-e',
+    `process.env.ARC_SESSION = ${JSON.stringify(MS)};`
+    + `const A = require(${JSON.stringify(path.join(SRC, 'arc-await.js'))});`
+    + `setTimeout(() => { try { require('fs').renameSync(${JSON.stringify(mb.planDir)}, ${JSON.stringify(mb.planDir + '-moved')}); } catch {} }, 120);`
+    + `A.awaitOnce('code', ${JSON.stringify(mrepo)}, { pollMs: 30 }).then((c) => process.exit(c));`,
+  ], { encoding: 'utf8', timeout: 8000, env: { ...process.env, ARC_SESSION: MS } });
+
+  ok('a listener whose board FOLDER moves exits instead of polling a corpse forever',
+    child.status === 0 && !child.error, child.error ? 'timed out — it kept polling a dead path' : '');
+  ok('...and says why, so the wake is not a mystery',
+    /board folder moved/i.test(child.stdout || ''));
+  ok('...and clears its armed marker, so the next idle RE-ARMS on the new folder',
+    !A9.isWaiting(MS));
+
+  fs.rmSync(mrepo, { recursive: true, force: true });
+  try { fs.rmSync(mb.planDir + '-moved', { recursive: true, force: true }); } catch {}
+  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${MS}.json`)); } catch {}
+} catch (e) { ok('listener self-heal', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- the duty roster: what a ROLE owns, declared once, outliving every session -------
 // `research` used to be just a STRING. An agent asking "is this research's job or mine?" could
 // only guess — and when research was CLOSED the string said nothing at all, so a peer would
@@ -1999,7 +2111,7 @@ try {
   // 2) the board self-ignores
   R.ensureBoard(rTop);
   const gi = fs.readFileSync(path.join(rTop.planDir, '.gitignore'), 'utf8');
-  ok('.plan/.gitignore ignores everything (incl. itself)', /^\*$/m.test(gi));
+  ok('.peer/.gitignore ignores everything (incl. itself)', /^\*$/m.test(gi));
 
   // 3) append + seq is the LINE NUMBER (race-free: two writers can't collide)
   R.appendNote(rTop, { from: 'research', to: 'coding', body: 'spec for P-014 changed' });

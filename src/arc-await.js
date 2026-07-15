@@ -138,6 +138,16 @@ function awaitOnce(roleArg, cwd, opts) {
   const ownerPid = session ? F.sessionPid(session) : 0;
   const orphaned = () => ownerPid && !R.isAlive(ownerPid);
 
+  // MY BOARD MOVED. A listener captures its folder at spawn and then polls that exact path
+  // forever — so if the board dir is renamed underneath it (the .plan -> .peer migration), it
+  // polls a corpse. And it is WORSE than merely missing notes: the armed marker still names a
+  // LIVE pid, so the Stop hook sees "already listening" and stays quiet. The session would be
+  // deaf forever while arc reported it reachable — the exact failure this whole design exists to
+  // prevent. So: if the folder we were watching stops existing, EXIT. That exit wakes the
+  // session, the marker clears, and the next idle re-arms on the new path. Self-healing.
+  const watching = board.planDir;
+  const moved = () => !fs.existsSync(watching);
+
   const check = () => {
     let u;
     try { u = R.unreadFor(board, role); } catch { return false; }
@@ -158,6 +168,10 @@ function awaitOnce(roleArg, cwd, opts) {
       // header on why a TIMEOUT would make a session wake forever.
       if (check()) { clearInterval(t); return done(0); }
       if (orphaned()) { clearInterval(t); return done(0); }   // my session is gone: nothing to wake
+      if (moved()) {                                          // my board moved: re-arm on the new one
+        write(`[${tag}] the board folder moved (${watching} is gone) — exiting so this session re-arms on the new one.`);
+        clearInterval(t); return done(0);
+      }
       if (o.maxPolls && (o._n = (o._n || 0) + 1) >= o.maxPolls) { clearInterval(t); return done(0); }
     }, pollMs);
   });

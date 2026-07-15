@@ -5,7 +5,7 @@
 //   .arc/roles/<role>.md   what "research" OWNS. A project fact: identical on every machine,
 //                          true whether or not anyone is sitting in that chair right now.
 //                          COMMITTED — this is CODEOWNERS for agent peers.
-//   .plan/claim-<role>.json  WHO is live in that chair, on THIS machine, right now.
+//   .peer/claim-<role>.json  WHO is live in that chair, on THIS machine, right now.
 //                          Local, ephemeral, gitignored (see arc-board).
 //
 // Why it earns its keep: without it, `research` is just a STRING, and an agent asking "is this
