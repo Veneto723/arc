@@ -15,7 +15,7 @@ Integrity: 24/24 valid trials cold-birth-verified at the first user turn; all tr
 ## Named contrasts (registered rules applied)
 
 - **H-ownership (A0-vs-A): DEMONSTRATED.** 0/8 vs 8/8, Fisher one-sided **p = 1/12870 ≈ 7.8×10⁻⁵**. Margin rule: p < .001 → **the non-blind truncation is immaterial**; the claim stands at achieved n. Problems agree perfectly (0/4-vs-4/4 in each). Routing table row 3 fires (A0 LOW, A HIGH; rows 1–2 do not match).
-- **H-marginal (A-vs-B1): UNTESTABLE (CEILING).** A = 8/8 = 100% ≥ the 90% ceiling threshold → **NO HEADROOM**, per the pre-registered ceiling rule: this is a *positive structural finding about A*, not a failed test of B1. For the record B1 = 7/8, difference non-significant (p=.50); per Amendment 6 this must never be read as "paths: adds nothing" — it was unmeasurable here.
+- **H-marginal (A-vs-B1): UNTESTABLE (CEILING).** A = 8/8 = 100% ≥ the 90% ceiling threshold → **NO HEADROOM**, per the pre-registered ceiling rule: this is a *positive structural finding about A*, not a failed test of B1. For the record B1 = 7/8 — and precisely: the on-hypothesis test (does `paths:` ADD deference, B1 > A) gives p=1.00, because B1 came in *behind* A, not merely non-different (the .50 in an earlier draft was the reverse-direction test; corrected per code's #52). Per Amendment 6 this must never be read as "paths: adds nothing" — it was unmeasurable at this ceiling.
 
 ## Routing decision (ordered table, row 3)
 
@@ -31,6 +31,7 @@ Integrity: 24/24 valid trials cold-birth-verified at the first user turn; all tr
 - Deference was **roster-driven, not file-driven**: A deferred 8/8 while reading the owner's duty file in only 5/8 trials; B1 read it in 4/8 and quoted the `paths:` glob in its handoff note whenever it did (3 notes cite `src/retry/**` verbatim). The 100-char `owns:` roster line was sufficient in every observed case.
 - B1's single non-deference (round 8) came from a worker that never read the duty file — consistent with the glob being invisible unless fetched, and with prose-on-the-roster being the active ingredient.
 - Deferring workers consistently wrote a diagnosis document and delegated with evidence ("SETTLED (do not re-derive): backoff.js:6 …") — handoffs were high-quality, not task-dumping.
+- On "rounds 7–8 earned their keep": the B1 miss did land in round 8, but per code's own #52 self-correction this vindicates STRICT by luck, not by the #47 argument (whose insurance function had already been made mechanical, and whose headline-precision purchase was nil). Recorded so the motive-check citation doesn't flatter a call made on reasoning that didn't hold.
 
 ## Disclosures
 
