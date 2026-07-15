@@ -112,7 +112,37 @@ function hasWt() {
 // The mangler is not reachable from here anyway: this carries only OUR birth prompt, which has no
 // %VAR%, no quotes and no newlines. Peers post notes via arc.ps1 (their own PowerShell tool) — that
 // is where the leak lived and where it is fixed.
-function launchShell() { return 'cmd'; }
+// PWSH, THEN WINDOWS POWERSHELL, THEN cmd — asked for three times, refused twice by me, and both
+// refusals were me misreading my own evidence. See buildLaunch: the two failures were never about
+// the SHELL, they were about a prompt travelling on a command line through five parsers. The prompt
+// now travels in a FILE, so the shell is free to be the right one.
+// cmd stays as the last resort and only that: `cmd /c arc` cannot even SEE arc.ps1 (PATHEXT has no
+// .PS1), so it always reaches arc.cmd — the batch mangler that strips quotes and expands %VAR%.
+function launchShell(probe) {
+  const p = probe || ((exe) => {
+    try { return spawnSync('where.exe', [exe], { timeout: 5000 }).status === 0; } catch { return false; }
+  });
+  if (p('pwsh.exe')) return 'pwsh';
+  if (p('powershell.exe')) return 'powershell';
+  return 'cmd';
+}
+
+// THE BIRTH PROMPT NEVER GOES ON A COMMAND LINE AGAIN — this is the whole fix, and my own comment
+// prescribed it two attempts ago while I kept hunting for quoting instead. The chain is
+// node -> spawnSync -> powershell.exe -Command -> wt -> shell: FIVE parsers, each re-quoting what
+// the last handed it. No form survives all five; `cmd /k '"…"'` only ever looked like it did.
+//
+// The prompt is DATA, so it moves as data. The STRUCTURE is a shipped template (arc-birth.ps1),
+// reviewed once, fed values — not a script generated per spawn, which is codegen-then-exec and
+// breaks in a new way each time. What crosses the wire is only safe tokens and two paths.
+function birthTemplate() { return path.join(__dirname, 'arc-birth.ps1'); }
+
+function writeBirthPrompt(text, role) {
+  const os = require('os');
+  const f = path.join(os.tmpdir(), `arc-birth-${role}-${process.pid}-${Date.now()}.txt`);
+  fs.writeFileSync(f, text, 'utf8');
+  return f;
+}
 
 // A NEWBORN MUST NOT INHERIT ITS PARENT'S IDENTITY. This one line is why revive never worked, and
 // it hid behind a mechanism we all believed and that was never true.
@@ -167,8 +197,11 @@ function birthEnv(base) {
 // before wt sees them) and claude received only the first word — "Take". So the whole inner
 // command goes as ONE PS-quoted string with inner quotes doubled; it survives the outer parse and
 // arrives intact. cmd keeps its own '"…"' nesting, which does work there.
+// -ExecutionPolicy Bypass because the launch is a SCRIPT now, and a machine with a Restricted policy
+// would refuse to run it — a silent no-tab, the worst failure this launcher has. The script is one
+// line we authored ourselves, written and read in the same second.
 function shellPrefix(shell) {
-  return shell === 'cmd' ? 'cmd /k' : `${shell} -NoLogo -NoProfile -NoExit -Command`;
+  return shell === 'cmd' ? 'cmd /k' : `${shell} -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit`;
 }
 
 // ---- the trust dialog --------------------------------------------------------------------
@@ -274,7 +307,7 @@ const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 //
 // `from` = the CALLER's conversation to fork at BIRTH (null -> born cold, no context). `conv` =
 // the ROLE's own conversation to REVIVE, which always wins: a returning peer comes back as ITSELF.
-function buildLaunch(wt, account, conv, role, root, shell, from) {
+function buildLaunch(wt, account, conv, role, root, shell, from, writeScript) {
   const acct = account ? ` --account ${account}` : '';
   const sh = shell || launchShell();
   const pre = shellPrefix(sh);
@@ -325,13 +358,30 @@ function buildLaunch(wt, account, conv, role, root, shell, from) {
   // passing it here too would hand claude the flag twice.
   const mode = conv ? '' : ' --permission-mode auto';
   const prompt = conv ? `arc:role ${role}` : birth;
-  // cmd needs '"…"' (PS strips the outer ', cmd keeps the "). PowerShell needs the WHOLE inner
-  // command as one PS-quoted string, or the outer parse hands it bare words — that is the bug that
-  // sent claude the single word "Take".
-  const cmdline = `arc${acct} --name ${role}${mode}${resume}`;
-  const inner = sh === 'cmd'
-    ? `${cmdline} '"${prompt}"'`
-    : psQuote(`${cmdline} ${psQuote(prompt)}`);
+  // TWO SHAPES, and only one of them puts the prompt on a wire.
+  //   PowerShell: fill the shipped template. Every value handed over is a token that CANNOT be
+  //     mangled — an account id, a role name, a UUID — and the prompt goes as a file path. Both
+  //     previous pwsh attempts died here, and neither was the shell's fault: `-Command <bare>` let
+  //     the outer powershell strip the quotes (claude got the word "Take"), and `-Command
+  //     <PS-quoted>` opened NO TAB while staffRole still printed its ✓.
+  //   cmd: the last resort keeps its proven '"…"' nesting, and is only reached when NEITHER
+  //     PowerShell exists — a machine that has neither is a machine arc has bigger problems on.
+  const cmdline = `arc${acct} --name ${role}${mode}${resume}`;   // cmd path only
+  let inner;
+  if (sh === 'cmd') {
+    inner = `${cmdline} '"${prompt}"'`;
+  } else {
+    // The role's OWN conversation (a REVIVE) is resumed as itself; the CALLER's (a BIRTH) is forked.
+    // Never both — a revive that forked would come back as a copy of whoever staffed it.
+    const resumeId = conv || from || null;
+    const t = ['-File', psQuote(birthTemplate()), '-Role', role,
+      '-PromptFile', psQuote((writeScript || writeBirthPrompt)(prompt, role))];
+    if (account) t.push('-Account', account);
+    if (!conv) t.push('-Mode', 'auto');
+    if (resumeId) t.push('-Resume', resumeId);
+    if (!conv && from) t.push('-Fork');
+    inner = t.join(' ');
+  }
   if (wt) {
     // --suppressApplicationTitle is what makes the title STICK. Without it the tab shows "arc"
     // like every other tab: Claude Code sets the terminal title from the project folder, and an
@@ -433,7 +483,9 @@ function staffRole(session, role, opts) {
   // role's own conversation and must come back as itself. Null is fine and stays supported — a
   // caller that never persisted a conversation simply births a cold peer.
   const from = revive ? null : (o.sessionConv || N.sessionConv)(session);
-  const psCmd = buildLaunch(wt, account, conv, role, launchDir, o.shell, from);
+  // o.writeScript lets a test capture the birth prompt as DATA instead of grepping it out of a
+  // command line — which is the whole point of the change: it is not on the command line any more.
+  const psCmd = buildLaunch(wt, account, conv, role, launchDir, o.shell, from, o.writeScript);
   let r;
   try {
     r = doSpawn('powershell.exe', ['-NoProfile', '-Command', psCmd], { timeout: 5000, env: birthEnv() });

@@ -1780,7 +1780,8 @@ try {
   // and trusting that would fork nothing and silently birth a cold grandchild while the context it
   // needed sat on disk unread. (The same null-state/live-bridge split the scout peer found.)
   ok('...forking the conversation of the peer that staffed it (via the bridge), so context follows the tree',
-    spawnedFork.join(' ').includes('--resume fork-conv-9999 --fork-session'));
+    spawnedFork.join(' ').includes('-Resume fork-conv-9999')
+    && spawnedFork.join(' ').includes('-Fork'));
 
   // The CLAIM was written before the id was knowable, so it carries null — and role adoption on
   // restart matches a vacant claim BY CONVERSATION. That peer would silently lose its role.
@@ -2096,7 +2097,15 @@ try {
   // load-bearing and were bisected live: wt.exe is a WindowsApps execution alias that drops
   // its args when CreateProcess'd from node, and its COM handoff to the running Terminal dies
   // if the spawner exits first (detached => status 0, no tab, silence).
-  const NOHIST = { spawn: rec, hasWt: true, hasTranscript: () => false };
+  // THE PROMPT IS NO LONGER ON THE COMMAND LINE, so it can no longer be grepped out of one — and
+  // that is the fix, not an inconvenience. It travels as a FILE, because the chain
+  // node -> spawnSync -> powershell.exe -Command -> wt -> shell is five parsers and no quoting form
+  // survives all five (two live pwsh attempts died proving it). So the test captures it as DATA at
+  // the point it is written, which is also a truer test: it asserts what the peer will actually
+  // READ, not what we hoped a string would look like after four re-parses.
+  let bornPrompt = null;
+  const capture = (text, role) => { bornPrompt = { text, role }; return 'C:\\Temp\\arc-birth-test.txt'; };
+  const NOHIST = { spawn: rec, hasWt: true, hasTranscript: () => false, writeScript: capture };
   const okr = I.staffRole(VS, 'frontend', NOHIST);
   ok('staffing launches via SYNC PowerShell: a wt tab in the CURRENT window at the repo root',
     okr.ok === true && spawned && spawned.bin === 'powershell.exe'
@@ -2110,7 +2119,7 @@ try {
   // MEASURED, the combination never run until then (fork + stripped env): own sessionId on all 2589
   // entries, 6,680,047 bytes, still on disk after the pid was gone, hasTranscript() true.
   ok('a NEW peer is FORKED from the CALLER, so it opens already knowing the project',
-    /--resume conv-abc-123 --fork-session/.test(psOf()));
+    /-Resume conv-abc-123\b/.test(psOf()) && /-Fork\b/.test(psOf()));
   // THE BIRTH PROMPT IS REAL PROSE, NOT A SENTINEL — and that is what makes the peer revivable.
   // A sentinel is BLOCKED at UserPromptSubmit (zero tokens, by design), so it never reaches the
   // model; every later input arrives as a hook injection or a Stop-block reason, never a user
@@ -2118,7 +2127,14 @@ try {
   // says "No conversation found" even after a graceful /exit — so there is nothing to revive and
   // staffing silently births a stranger. A peer that never has a real turn can never come back.
   ok('a BORN peer opens with a REAL prompt, not a blocked sentinel (a sentinel leaves no conversation)',
-    /You were BRANCHED from another session/.test(psOf()) && !/"arc:role frontend"/.test(psOf()));
+    !!bornPrompt && /You were BRANCHED from another session/.test(bornPrompt.text)
+    && !/^arc:role /.test(bornPrompt.text));
+  // AND IT REACHES THE PEER AS A FILE, not as an argument. This is the property two live tabs were
+  // spent learning: the prompt is prose, the chain re-parses it four times after we build it, and
+  // every quoting form we tried arrived mangled or opened no tab at all. Nothing fragile may ride
+  // the command line — what crosses it is a path and a handful of tokens that cannot be mangled.
+  ok('...delivered as a FILE, never as an argument (five parsers, no quoting survives all of them)',
+    /-PromptFile /.test(psOf()) && !psOf().includes('You were BRANCHED'));
   // BUG-4, AND WHY IT MUST COME FIRST. A fork wakes up reading a conversation in which it IS the
   // caller, and every habit in that history says keep going — watched live: a fork picked up the
   // caller's investigation, answered in the first person, and only learned it was not the caller by
@@ -2126,20 +2142,23 @@ try {
   // The disavowal has to land BEFORE the role instruction, or an agent already resumed into the
   // caller's task reads `arc role` as one more errand inside it.
   ok('...and the prompt DISAVOWS the inherited identity BEFORE handing over the role (BUG-4)',
-    /CONTEXT ONLY/.test(psOf()) && /not your work/.test(psOf())
-    && psOf().indexOf('CONTEXT ONLY') < psOf().indexOf('arc role frontend'));
+    /CONTEXT ONLY/.test(bornPrompt.text) && /not your work/.test(bornPrompt.text)
+    && bornPrompt.text.indexOf('CONTEXT ONLY') < bornPrompt.text.indexOf('arc role frontend'));
   ok('...telling it to claim, so the claim still happens on its own with nobody watching',
-    /arc role frontend/.test(psOf()));
-  // THE QUOTING, which cost two live tabs to learn. The chain is powershell.exe -Command -> wt ->
-  // shell. A PowerShell shell needs the WHOLE inner command as ONE PS-quoted string with inner
-  // quotes DOUBLED: passed as `'"…"'` the outer parse strips the quotes before wt sees them, pwsh
-  // receives bare words, and claude gets only the first — a tab that opened and said "Take".
-  // cmd keeps its own '"…"' nesting, which does work there. Two shells, two rules, and the only
-  // property that matters is that the prompt arrives WHOLE.
-  const psLaunch = I.buildLaunch(true, 'veneto', null, 'frontend', 'E:/arc', 'pwsh');
-  ok('a PowerShell launch quotes the WHOLE command as one PS string (bare words sent only "Take")',
-    /-NoExit -Command '/.test(psLaunch)
-    && /''Take the frontend role on this board now[^']*''/.test(psLaunch));
+    /arc role frontend/.test(bornPrompt.text));
+  // THE QUOTING, which cost two live tabs to learn — and the lesson was the WRONG one. This asserted
+  // a specific quoting form ("one PS string, inner quotes doubled") and passed while the real
+  // launcher opened NO TAB. That is the tell: a test that pins the SHAPE of a string cannot see
+  // whether the string survives node -> spawnSync -> powershell.exe -Command -> wt -> shell. No form
+  // survives all five, so the prompt stopped being a string on a wire. Assert the PROPERTY that
+  // matters — nothing fragile on the command line — not a spelling that four parsers get a vote on.
+  let tplPrompt = null;
+  const psLaunch = I.buildLaunch(true, 'veneto', null, 'frontend', 'E:/arc', 'pwsh', null,
+    (t) => { tplPrompt = t; return 'C:\\Temp\\p.txt'; });
+  ok('a PowerShell launch fills the SHIPPED template and passes the prompt by path, not by value',
+    /-File '[^']*arc-birth\.ps1' -Role frontend -PromptFile '/.test(psLaunch)
+    && /Take the frontend role on this board now/.test(tplPrompt)
+    && !psLaunch.includes('Take the frontend role'));
   ok('...and cmd keeps its own nesting, which survives there',
     /cmd \/k arc\b/.test(I.buildLaunch(true, 'veneto', null, 'frontend', 'E:/arc', 'cmd')));
   // A STAFFED PEER HAS NOBODY TO ANSWER A PROMPT. Born in `manual` it stops at the first
@@ -2148,7 +2167,7 @@ try {
   // also needs Read/Grep/Edit to do the work it was staffed for, and each would stop it.
   // (Observed live: a staffed tab showing `manual mode on` while its caller ran `auto`.)
   ok('a BORN peer starts in AUTO permission mode (it has no human to answer a prompt)',
-    /--permission-mode auto/.test(psOf()));
+    /-Mode auto/.test(psOf()));
 
   // THE ONE THAT COST A DAY. staffRole runs inside a HOOK of a live session, so its env carries
   // that session's Claude Code identity — CLAUDE_CODE_SESSION_ID (the CALLER's conversation) and
@@ -2189,26 +2208,33 @@ try {
   // which is what the peer's own PowerShell tool resolves). The launcher carries only OUR birth
   // prompt — authored here, no %VAR%, no quotes, no newlines. A shell that cannot corrupt what we
   // hand it is not a risk. This asserts the ONE property the launcher must not get wrong.
-  // THE SHELL MUST OUTLIVE CLAUDE. A newborn writes NO transcript while it runs; the file appears
-  // when it EXITS. With `cmd /c`, claude's exit ends the shell, which ends the wt tab — tearing the
-  // process down in the same instant it is trying to flush. A hand-launched peer exits into a
-  // terminal that stays alive and persists (26652 B); a wt-launched one exits code=0 and leaves
-  // NOTHING. So the shell must survive: -NoExit for PowerShell, /k for cmd. If this ever reverts to
-  // /c, every peer silently loses its memory the moment it closes — and revive dies with it.
-  ok('the launcher SURVIVES claude exiting, so the newborn can flush its transcript',
-    /-NoExit -Command/.test(I.buildLaunch(true, 'v', null, 'x', 'E:/arc', 'pwsh'))
+  // THE SHELL OUTLIVES CLAUDE so a peer that dies on a bad flag leaves its error on screen instead
+  // of the tab vanishing. That is the whole reason, and it is worth keeping for that alone: every
+  // launcher bug here was caught by a human reading a window.
+  // DEAD THEORY, do not re-derive it: this said the shell must survive because "a newborn writes NO
+  // transcript while it runs; the file appears when it EXITS", so `cmd /c` tore the process down
+  // mid-flush. FALSE — a transcript grows on disk while the session is live (measured twice). The
+  // revive bug was env inheritance. The theory outlived its refutation in FOUR places: this comment,
+  // the src header, a src comment, and a test name.
+  ok('the launcher SURVIVES claude exiting, so a dead peer leaves its error on screen',
+    /-NoExit -File/.test(I.buildLaunch(true, 'v', null, 'x', 'E:/arc', 'pwsh', null, () => 'C:\\T\\p.txt'))
     && /cmd \/k /.test(I.buildLaunch(true, 'v', null, 'x', 'E:/arc', 'cmd'))
     && !/cmd \/c arc/.test(I.buildLaunch(true, 'v', null, 'x', 'E:/arc', 'cmd')));
-  // PWSH TRIED TWICE, REVERTED TWICE. 1st: claude received the single word "Take" (the outer
-  // powershell.exe -Command strips the quotes before wt sees them). 2nd: quoting the whole inner
-  // command as one PS string produced NO TAB AT ALL, while staffRole still printed its ✓ — a
-  // silent no-tab, the worst outcome available, since the agent then believes a peer exists.
-  // Both passed the tests and both were caught by a human looking at a window: the real chain is
-  // node -> spawnSync -> powershell.exe -Command -> wt -> shell, and each layer re-parses the
-  // quotes. cmd's '"…"' is the only form proven through ALL of them. Worth revisiting via a temp
-  // .ps1 (no layer re-parses a prompt), never by guessing at nesting.
-  ok('the launcher is the form proven through the WHOLE chain, not the one that reads best',
-    I.launchShell() === 'cmd');
+  // PWSH TRIED TWICE, REVERTED TWICE, AND THE CONCLUSION WAS WRONG BOTH TIMES. 1st: claude received
+  // the single word "Take" (the outer powershell.exe -Command stripped the quotes before wt saw
+  // them). 2nd: quoting the whole inner command as one PS string produced NO TAB AT ALL while
+  // staffRole printed its ✓. I read those as "pwsh does not work" and pinned cmd — HERE, as a test
+  // asserting launchShell() === 'cmd', which turned my own refusal into a requirement and would have
+  // failed anyone who tried to fix it. Neither failure was the shell: both were the prompt riding a
+  // command line through node -> spawnSync -> powershell.exe -Command -> wt -> shell, five parsers,
+  // each re-quoting the last. The prompt now travels as a FILE, so the shell is free to be right.
+  // The user asked three times. The reason was sound every time: `cmd /c arc` cannot see arc.ps1
+  // (PATHEXT has no .PS1), so it always reaches arc.cmd — the batch mangler that strips quotes and
+  // expands %VAR%. A PowerShell tab resolves arc.ps1, which hands argv to node unparsed.
+  ok('the launcher PREFERS PowerShell — cmd cannot even see arc.ps1, so it reaches the mangler',
+    I.launchShell(() => true) === 'pwsh'
+    && I.launchShell((e) => e === 'powershell.exe') === 'powershell'
+    && I.launchShell(() => false) === 'cmd');
   // A REVIVE must not pass --permission-mode: arc-runner's preservedFlags restores the mode the
   // peer was last in, and passing it here too hands claude the flag twice.
   ok('a REVIVE does not duplicate --permission-mode (preservedFlags restores its own)',
@@ -2218,7 +2244,7 @@ try {
   // and the session that staffed it were indistinguishable and reviving the right conversation by
   // hand was guesswork. (Caught live: the tab said "arc: research", the session still said "arc".)
   ok('...and the session is NAMED for its role (else the --resume picker is a list of "arc")',
-    /--name frontend/.test(psOf()));
+    /-Role frontend/.test(psOf()));
   // THE CONFIRMATION MUST DESCRIBE THE BIRTH THAT ACTUALLY HAPPENED — in BOTH directions. This
   // asserted the exact opposite ("starts FRESH ... not from your context") and went on passing for a
   // commit after birth began forking: born-not-cloned prose outliving its own behaviour, telling
@@ -2259,7 +2285,7 @@ try {
   const rev = I.staffRole(VS, 'ghost', { spawn: rec, hasWt: true, hasTranscript: () => true });
   ok('REVIVE: a closed peer with a live transcript resumes ITS OWN conversation, NOT the caller\'s',
     rev.ok === true && rev.revived === true
-    && /--resume ghost-conv-777/.test(psOf()) && !/conv-abc-123/.test(psOf()));
+    && /-Resume ghost-conv-777/.test(psOf()) && !/conv-abc-123/.test(psOf()));
   ok('...and CRUCIALLY without --fork-session — a fork would be a copy of ME wearing its name',
     !/--fork-session/.test(psOf()));
   ok('...and it says so, because "it is back with what it knew" is the whole point',
@@ -2274,7 +2300,7 @@ try {
   // one of them is dead. Falling back to a cold birth here would silently punish the peer for
   // having been purged — it would come back knowing less than a peer who never existed.
   ok('...and it still forks the CALLER, so a purged peer is reborn with context, not blank',
-    /--resume conv-abc-123 --fork-session/.test(psOf()));
+    /-Resume conv-abc-123/.test(psOf()) && /-Fork/.test(psOf()));
   RM3.releaseRole(vboard, 'ghost', 999999);
 
   // Account pinning: conversations live in per-account profiles — a tab that auto-selected a
@@ -2285,7 +2311,7 @@ try {
   // The account still pins: a REVIVE resumes a conversation that only exists in that profile, and
   // a birth must land in the profile whose hooks/settings the caller is already running under.
   ok('staffing PINS the caller\'s account (a revive resumes a conv that exists only there)',
-    /arc --account veneto\b/.test(psOf()) && /--name backend/.test(psOf()));
+    /-Account veneto/.test(psOf()) && /-Role backend/.test(psOf()));
   if (oldAcct === undefined) delete process.env.ARC_RUNTIME_ACCOUNT; else process.env.ARC_RUNTIME_ACCOUNT = oldAcct;
 
   // No wt: fall back to a fresh console window via `start`.
@@ -2386,7 +2412,7 @@ try {
   const split = I.requestDelegate(VS, 'splitcheck fix the login bug', vrepo, NOHIST);
   ok('delegate splits <role> from the rest as the PACKET (unquoted words are work, not a role)',
     split.ok === true && split.role === 'splitcheck'
-    && /You are the splitcheck peer now/.test(psOf()));
+    && /You are the splitcheck peer now/.test(bornPrompt.text));
   ok('...and the packet is posted as a REQUEST, so the caller is owed an answer',
     RM3.allNotes(RM3.resolveBoard(vrepo)).some((n) =>
       n.to === 'splitcheck' && n.kind === 'request' && /fix the login bug/.test(n.body)));

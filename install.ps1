@@ -23,6 +23,9 @@ New-Item -ItemType Directory -Force $scripts, $commands, $bin, (Join-Path $scrip
 Copy-Item (Join-Path $kit 'src\*.js') $scripts -Force
 Copy-Item (Join-Path $kit 'src\arc-focus.ps1') $scripts -Force
 Copy-Item (Join-Path $kit 'src\arc-focus.vbs') $scripts -Force
+# The birth template MUST land beside arc-invite.js — birthTemplate() resolves it via __dirname, so a
+# missing copy here is a launcher that opens no tab at all.
+Copy-Item (Join-Path $kit 'src\arc-birth.ps1') $scripts -Force
 Copy-Item (Join-Path $kit 'src\icons\make-icons.ps1') (Join-Path $scripts 'icons') -Force
 Write-Host "  scripts -> $scripts"
 
