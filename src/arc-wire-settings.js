@@ -65,10 +65,37 @@ function mergeHooks(settings, entries) {
   return added;
 }
 
+// WHY A TIMER, when the statusline is already event-driven: Claude Code re-runs it "after each
+// new assistant message" (plus /compact, permission-mode and vim toggles) — i.e. on TURNS. arc's
+// statusline shows three things that no turn of YOURS produces:
+//   📌 2 from research   a note a PEER wrote, in another process, while you sat idle
+//   ⚠ code · DEAF        a listener that died out from under you
+//   ~20h30m to limit     a clock
+// An idle session never re-renders, so the note badge — the ambient signal that arc's whole
+// premise rests on — only appeared once you typed, by which point you no longer needed the hint.
+// The docs name this exact case: "These triggers can go quiet when the main session is idle …
+// To keep time-based or externally-sourced segments current during idle periods, set
+// refreshInterval". 10s costs ~77ms of node per tick and no extra network (the usage API stays
+// behind its own 60s cache), so what a tick actually does is re-read three local files.
+//
+// It also happens to fix the stance dial lagging after `arc:mode`, but that was the symptom, not
+// the reason: a SENTINEL is blocked at UserPromptSubmit and a blocked prompt is not a turn — the
+// very property that makes it cost zero tokens is what starves the bar of its refresh.
+const STATUSLINE_REFRESH_SECONDS = 10;
+
 // Set the statusline command only if the user has none of their own.
+//
+// ...but ADOPT our own: this used to bail on ANY existing statusLine, which meant arc could never
+// change its own config after the first install — every later improvement silently skipped every
+// existing machine, which is the worst kind of no-op (the installer says "Done"). So: a statusline
+// that is not ours is still never touched, and one that IS ours is kept current.
 function setStatusline(settings, command) {
-  if (!settings.statusLine) { settings.statusLine = { type: 'command', command }; return true; }
-  return false;
+  const cur = settings.statusLine;
+  const isOurs = cur && cur.type === 'command' && typeof cur.command === 'string'
+    && /usage-monitor\.js/.test(cur.command);
+  if (cur && !isOurs) return false;                       // the user's own — leave it alone
+  settings.statusLine = Object.assign({}, cur, { type: 'command', command, refreshInterval: STATUSLINE_REFRESH_SECONDS });
+  return !cur;                                            // true only when we ADDED one
 }
 
 // arc's own core hooks, as merge entries relative to a scripts dir.
@@ -134,7 +161,7 @@ function wireArcSettings(scriptsDir = path.join(CLAUDE_DIR, 'scripts'), settings
   return { settingsPath, backedUp: raw != null };
 }
 
-module.exports = { readSettings, writeSettings, mergeHooks, mergePermissions, BOARD_PERMISSIONS, setStatusline, coreHookEntries, wireArcSettings };
+module.exports = { readSettings, writeSettings, mergeHooks, mergePermissions, BOARD_PERMISSIONS, setStatusline, STATUSLINE_REFRESH_SECONDS, coreHookEntries, wireArcSettings };
 
 if (require.main === module) {
   try {

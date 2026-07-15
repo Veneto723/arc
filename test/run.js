@@ -543,6 +543,7 @@ try {
   const scriptsDir = path.join(CLAUDE, 'scripts');
   fs.mkdirSync(scriptsDir, { recursive: true });
   const wire = path.join(SRC, 'arc-wire-settings.js');
+  const W = require(wire);
   // start from a user settings.json with a pre-existing key to confirm we merge, not clobber
   writeJSON(path.join(CLAUDE, 'settings.json'), { theme: 'dark', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node other.js' }] }] } });
   const r1 = spawnSync(process.execPath, [wire, scriptsDir], { encoding: 'utf8' });
@@ -553,6 +554,28 @@ try {
   ok('wires UserPromptSubmit (switch-hook + notify start)', cmds('UserPromptSubmit').includes('arc-switch-hook.js') && cmds('UserPromptSubmit').includes('arc-notify.js'));
   ok('wires Stop/StopFailure/Notification arc-notify', cmds('Stop').includes('arc-notify.js') && cmds('StopFailure').includes('arc-notify.js') && cmds('Notification').includes('arc-notify.js'));
   ok('sets statusline', /usage-monitor\.js/.test(JSON.stringify(s.statusLine)));
+  // A TIMER, because arc's bar shows things no turn of YOURS produces: a peer's note badge, DEAF,
+  // the time-to-limit clock. Claude Code re-renders "after each new assistant message", so an idle
+  // session never re-rendered and the note badge — the ambient signal arc's premise rests on —
+  // only appeared once you typed, i.e. exactly when you no longer needed it.
+  ok('...with a refreshInterval, or an IDLE session never shows a peer\'s note badge',
+    s.statusLine.refreshInterval === W.STATUSLINE_REFRESH_SECONDS && s.statusLine.refreshInterval >= 1);
+  // THE NO-OP THAT HID FOR MONTHS: setStatusline bailed on ANY existing statusLine, so arc could
+  // never update its OWN config after the first install — every later improvement silently skipped
+  // every existing machine while the installer still printed "Done".
+  const mine = { statusLine: { type: 'command', command: 'node "C:/old/usage-monitor.js" --compact' } };
+  ok('a re-install ADOPTS arc\'s own statusline and brings it up to date',
+    W.setStatusline(mine, 'node "C:/new/usage-monitor.js" --compact') === false
+    && /new/.test(mine.statusLine.command) && mine.statusLine.refreshInterval === W.STATUSLINE_REFRESH_SECONDS);
+  // ...but someone else's bar is still sacred.
+  const theirs = { statusLine: { type: 'command', command: 'my-own-prompt.sh' } };
+  ok('...while a statusline that is NOT ours is never touched',
+    W.setStatusline(theirs, 'node "x/usage-monitor.js"') === false
+    && theirs.statusLine.command === 'my-own-prompt.sh' && !theirs.statusLine.refreshInterval);
+  // And a user's own tuning of OUR bar survives (Object.assign keeps unknown keys).
+  const tuned = { statusLine: { type: 'command', command: 'node "x/usage-monitor.js"', padding: 0 } };
+  W.setStatusline(tuned, 'node "y/usage-monitor.js"');
+  ok('...and their own tweaks to our bar survive the update', tuned.statusLine.padding === 0);
   ok('no cl-signal allow-rule (slash commands removed)', !JSON.stringify(s.permissions || {}).includes('cl-signal.js'));
   ok('wires TaskCreated -> arc-done (baseline the HEAD sha)', cmds('TaskCreated').includes('arc-done.js'));
   ok('wires TaskCompleted -> arc-done (the git-derived gate)', cmds('TaskCompleted').includes('arc-done.js'));
