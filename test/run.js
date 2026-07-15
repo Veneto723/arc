@@ -3113,12 +3113,21 @@ try {
   ok('the same note can never block twice (cursor advanced -> no Stop loop)',
     !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
 
-  // the loop guard: we NEVER chain a block onto our own block
+  // DELIVERY MUST CHAIN — the OFFERS must not. This asserted the opposite until a peer answered
+  // at length and the tail sat unread until the human typed: a batch is capped at INJECT_MAX, so
+  // a long answer arrives in PIECES, and bailing on stop_hook_active delivered the first piece and
+  // stranded the rest. It stayed hidden while bodies were clipped to 400 (many notes fit one
+  // batch); letting a peer's answer through whole is what made multi-batch normal.
+  // Chaining is safe HERE because delivery is provably terminating: the cursor advances over
+  // exactly what was delivered, so each block strictly shrinks the unread set.
   RM.appendNote(board, { from: 'research', to: 'code', body: 'second answer', priority: 'normal' });
-  ok('stop_hook_active is honoured (never chains a block onto its own block)',
+  ok('a note IS delivered mid-continuation (a capped batch must drain, not wait for a keystroke)',
+    /second answer/.test(fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }).reason || ''));
+  ok('...and it still cannot block twice — the cursor advanced, so the chain TERMINATES',
     !fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }).decision);
-  ok('...and the note it held back is still delivered on the NEXT stop (nothing is lost)',
-    /second answer/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+  // The offers are advice, not a queue that drains — they must never nag mid-continuation.
+  ok('an OFFER never chains onto our own block (advice has no terminating property)',
+    !fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }).decision);
 
   // a non-arc session (no ARC_SESSION) must be left completely alone
   const bare = spawnSync(process.execPath, [HOOK], {

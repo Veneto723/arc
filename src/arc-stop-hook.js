@@ -53,9 +53,6 @@ function run(raw) {
   let hook = {};
   try { hook = JSON.parse(raw || '{}'); } catch {}
 
-  // A block already fired this turn — the model is mid-continuation. Never chain.
-  if (hook.stop_hook_active) return null;
-
   const session = (process.env.ARC_SESSION || '').trim();
   if (!session) return null;                       // not an arc session — stay out of the way
   const cwd = typeof hook.cwd === 'string' ? hook.cwd : process.cwd();
@@ -67,15 +64,37 @@ function run(raw) {
   try { require('./arc-notes').healClaimConv(session, cwd); } catch { /* never wedge a turn */ }
 
   // 1. Anything on the board for me? Hand it over instead of going idle.
+  //
+  // THIS CASE MAY CHAIN, and must. A batch is capped at INJECT_MAX, so a peer that answers at
+  // length arrives in PIECES — and `stop_hook_active` used to bail out at the top of this hook,
+  // so the FIRST batch was delivered and every later one sat there until a human typed. That is
+  // the whole promise ("the board reaches you without a keystroke") broken exactly when a peer
+  // has the most to say. Caught live: research replied 2985 + 2555 chars, #26 landed, #27 waited
+  // for the user. It was latent for as long as bodies were clipped to 400 (many notes fit one
+  // batch); raising the clip so a peer's ANSWER survives whole is what made multi-batch normal.
+  //
+  // Chaining is safe HERE and nowhere else, because delivery is provably terminating: injection()
+  // advances the read cursor over exactly what it delivered, so every block strictly shrinks the
+  // unread set and the next stop either delivers the remainder or returns null. Claude Code's cap
+  // of 8 consecutive Stop blocks is the backstop, not the mechanism. The OFFERS below (arm a
+  // listener) have no such property — they are advice, not a queue that drains — so they keep the
+  // stop_hook_active guard and can never nag mid-continuation.
   const inj = require('./arc-notes').injection(session, cwd);
   if (inj) {
+    const more = inj.count > inj.shown;   // a capped batch — the rest arrives on the next stop
     out({
       decision: 'block',
       reason: `${inj.text}\n\n(arc delivered this at the END of your turn — the user typed nothing. `
-        + `Act on it if it needs acting on, then tell the user what came back.)`,
+        + `Act on it if it needs acting on, then tell the user what came back.`
+        + (more ? ' More is still unread; arc will hand you the next batch when this turn ends.' : '')
+        + `)`,
     });
     return 'notes';
   }
+
+  // Past here we only ever OFFER something. An offer must never chain onto our own block, or a
+  // session mid-continuation gets nagged on every stop.
+  if (hook.stop_hook_active) return null;
 
   // 2. A QUESTION you asked a PEER that nobody has answered yet. You asked, so you want the
   //    answer — but a peer replies on THEIR schedule, and if you go idle first, nothing wakes
