@@ -2104,8 +2104,41 @@ try {
   // and arc-runner mints one with --session-id — which does persist.
   ok('a NEW peer is BORN with its own conversation — never a fork of the caller',
     !/--fork-session/.test(psOf()) && !/--resume/.test(psOf()));
-  ok('...whose opening prompt is the arc:role sentinel, quote-nested to survive PS->wt->cmd',
-    psOf().includes(`'"arc:role frontend"'`));
+  // THE BIRTH PROMPT IS REAL PROSE, NOT A SENTINEL — and that is what makes the peer revivable.
+  // A sentinel is BLOCKED at UserPromptSubmit (zero tokens, by design), so it never reaches the
+  // model; every later input arrives as a hook injection or a Stop-block reason, never a user
+  // message. Measured: such a session leaves NO conversation on disk — `claude --resume <its id>`
+  // says "No conversation found" even after a graceful /exit — so there is nothing to revive and
+  // staffing silently births a stranger. A peer that never has a real turn can never come back.
+  ok('a BORN peer opens with a REAL prompt, not a blocked sentinel (a sentinel leaves no conversation)',
+    /Take the frontend role on this board now/.test(psOf()) && !/"arc:role frontend"/.test(psOf()));
+  ok('...telling it to claim, so the claim still happens on its own with nobody watching',
+    /arc role frontend/.test(psOf()));
+  // The nesting is '"..."' through PS -> wt -> cmd, so an inner " closes the arg early and the
+  // prompt arrives truncated. Written with quotes the first time; the built command showed it.
+  ok('...and the prompt carries NO inner double quotes, or the nesting truncates it',
+    (psOf().match(/"/g) || []).length === 2);
+  // A STAFFED PEER HAS NOBODY TO ANSWER A PROMPT. Born in `manual` it stops at the first
+  // permission request and sits claimed-but-deaf — holding the role so nothing else may staff it,
+  // while answering nothing. The board allowlist covers arc's OWN commands only; a research peer
+  // also needs Read/Grep/Edit to do the work it was staffed for, and each would stop it.
+  // (Observed live: a staffed tab showing `manual mode on` while its caller ran `auto`.)
+  ok('a BORN peer starts in AUTO permission mode (it has no human to answer a prompt)',
+    /--permission-mode auto/.test(psOf()));
+  // NEVER cmd. cmd.exe parses its command line before a batch %* forwards anything — truncating
+  // at newlines, stripping quotes and EXPANDING %VAR% (the secret-leak vector) — and its PATHEXT
+  // cannot even see arc.ps1, so `cmd /c arc` reaches the mangler no matter what we ship. That put
+  // the BIRTH PROMPT through the same corruption that was silently eating peers' notes.
+  ok('the tab runs arc through PowerShell, never cmd (cmd expands %VAR% and cannot see arc.ps1)',
+    /\b(pwsh|powershell) -NoLogo -NoProfile -Command arc\b/.test(psOf()) && !/cmd \/c arc/.test(psOf()));
+  ok('...preferring pwsh, falling back to powershell, with cmd only as a last resort',
+    I.launchShell(() => true).startsWith('pwsh')
+    && I.launchShell((e) => e === 'powershell.exe').startsWith('powershell')
+    && I.launchShell(() => false) === 'cmd /c');
+  // A REVIVE must not pass --permission-mode: arc-runner's preservedFlags restores the mode the
+  // peer was last in, and passing it here too hands claude the flag twice.
+  ok('a REVIVE does not duplicate --permission-mode (preservedFlags restores its own)',
+    !/--permission-mode/.test(I.buildLaunch(true, 'veneto', 'some-conv', 'x', 'E:/arc', 'pwsh -NoLogo -NoProfile -Command')));
   // The SESSION's name, which is not the tab title. Claude Code names a session after the project,
   // so every arc session in one repo read "arc" — including in the `--resume` picker, where a peer
   // and the session that staffed it were indistinguishable and reviving the right conversation by
@@ -2258,7 +2291,8 @@ try {
   NI.requestRole(VS, 'caller', vrepo);
   const split = I.requestDelegate(VS, 'splitcheck fix the login bug', vrepo, NOHIST);
   ok('delegate splits <role> from the rest as the PACKET (unquoted words are work, not a role)',
-    split.ok === true && split.role === 'splitcheck' && psOf().includes(`'"arc:role splitcheck"'`));
+    split.ok === true && split.role === 'splitcheck'
+    && /Take the splitcheck role on this board now/.test(psOf()));
   ok('...and the packet is posted as a REQUEST, so the caller is owed an answer',
     RM3.allNotes(RM3.resolveBoard(vrepo)).some((n) =>
       n.to === 'splitcheck' && n.kind === 'request' && /fix the login bug/.test(n.body)));

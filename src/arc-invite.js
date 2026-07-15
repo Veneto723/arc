@@ -13,14 +13,23 @@
 //           claim). This is the one that matters — accumulated context is the entire reason a
 //           peer beats a subagent, and forking the caller would hand the role's NAME to a
 //           session with none of its MEMORY.
-//   FORK    no history to return to -> --fork-session from the caller, so the newcomer at least
-//           starts knowing the project instead of re-reading it.
+//   BIRTH   no history to return to -> a NORMAL managed session: no --resume, no --fork-session.
+//           arc-runner mints its conversation and launches --session-id, so the peer owns a real
+//           history from its first breath. It learns the job from its DUTY FILE and the BOARD —
+//           never from the caller's context, which it never needed.
 //
-// WHY THE OPENING PROMPT IS A SENTINEL: the tab launches `arc … --resume <conv> "arc:role <role>"`.
-// That first prompt hits UserPromptSubmit like any typed prompt: the claim happens in-hook, and
-// the fresh-claim PASS-THROUGH hands the new session one turn to run `arc join <role>`. So it
-// claims and arms with machinery that already exists and is already tested — staffing adds a TAB,
-// not a mechanism.
+// BIRTH IS WHAT MAKES REVIVAL POSSIBLE, and getting that backwards cost a day. A peer used to be
+// born by FORKING the caller (--resume <caller> --fork-session), which looked generous — it starts
+// knowing the project — and quietly destroyed the thing that matters: a forked session leaves NO
+// resumable transcript, so the moment it closed there was nothing to bring back. Revive had never
+// once fired. The fork also handed the newborn a false identity (it believed it WAS its caller and
+// reported to the wrong human) that the `peers` skill then had to argue it out of. So the fork was
+// never a feature we gave up; it was the bug.
+//
+// AND THE BIRTH PROMPT IS REAL PROSE, NOT A SENTINEL. `arc:role <role>` is blocked at
+// UserPromptSubmit — that is the point of a sentinel, zero tokens — so it never reaches the model,
+// and every later input arrives as a hook injection rather than a user message. A handful of
+// tokens buys a real turn, and a real turn is what a conversation is made of.
 //
 // ACCOUNT PINNING IS LOAD-BEARING: conversations live in per-account profiles
 // (~/.claude/arc-profiles/<id>/projects). If the new tab auto-selected a DIFFERENT account, the
@@ -46,6 +55,21 @@ const N = require('./arc-notes');
 // that must answer NOW — so probe first and pick the fallback deliberately.
 function hasWt() {
   try { return spawnSync('where.exe', ['wt.exe'], { timeout: 5000 }).status === 0; } catch { return false; }
+}
+
+// WHICH SHELL RUNS `arc` IN THE NEW TAB. It used to be `cmd /c arc …`, and that put the BIRTH
+// PROMPT through the same mangler that was silently corrupting every peer's notes: cmd.exe parses
+// its command line before a batch file's %* forwards anything, so it truncates at a newline,
+// strips quotes, and EXPANDS %VAR% — the secret-leak vector. cmd also cannot see arc.ps1 (its
+// PATHEXT has no .PS1), so it reaches arc.cmd no matter what we ship.
+// PowerShell resolves a bare `arc` to arc.ps1, which hands argv straight to node: no parsing, no
+// expansion. pwsh 7 preserves quotes too; Windows PowerShell 5.1 does not, but it is always
+// present — so prefer pwsh, fall back to powershell, and keep cmd only as the last resort.
+function launchShell(probe) {
+  const has = probe || ((exe) => { try { return spawnSync('where.exe', [exe], { timeout: 5000 }).status === 0; } catch { return false; } });
+  if (has('pwsh.exe')) return 'pwsh -NoLogo -NoProfile -Command';
+  if (has('powershell.exe')) return 'powershell -NoLogo -NoProfile -Command';
+  return 'cmd /c';   // last resort: mangles %VAR% and quotes, but a tab beats no tab
 }
 
 // ---- the trust dialog --------------------------------------------------------------------
@@ -143,20 +167,44 @@ const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // it owns) and the BOARD (the work) — the two things that outlive any session. Inheriting the
 // caller's transcript only ever handed it a false identity (BUG-4: a fork addressing the caller's
 // human as if it were the caller), which the `peers` skill then had to talk it out of.
-function buildLaunch(wt, account, conv, role, root) {
+function buildLaunch(wt, account, conv, role, root, shell) {
   const acct = account ? ` --account ${account}` : '';
+  const sh = shell || launchShell();
   // REVIVE resumes the role's own conversation; BIRTH passes nothing and lets the runner mint one.
   const resume = conv ? ` --resume ${conv}` : '';
-  const inner = `arc${acct} --name ${role}${resume} '"arc:role ${role}"'`;
+  // THE BIRTH PROMPT IS REAL PROSE, NOT A SENTINEL — and that is what makes the peer revivable.
+  // `arc:role <role>` was blocked at UserPromptSubmit (that is the point of a sentinel: zero
+  // tokens), so it never reached the model. Everything the newborn then received arrived as hook
+  // injections and Stop-block reasons — never a user message. Measured: such a session leaves NO
+  // conversation on disk at all. `claude --resume <its id>` answers "No conversation found" even
+  // after a graceful /exit, so there is nothing to revive and staffing silently births a stranger
+  // instead. A peer that never has a real turn is a peer that can never come back.
+  // So: spend the handful of tokens. One real prompt buys a persisted conversation, which is the
+  // entire reason a peer beats a subagent.
+  // NO double quotes in here: the whole thing is nested '"..."' to survive PS -> wt -> cmd, so an
+  // inner " closes the argument early and the prompt arrives truncated. (Written with quotes the
+  // first time; the built command showed it immediately.)
+  const birth = `Take the ${role} role on this board now: run  arc role ${role}  then do what it tells you.`;
+  // A STAFFED PEER HAS NOBODY TO ANSWER A PROMPT. Its whole job is to boot, claim, arm its
+  // listener and answer — unattended. Born in `manual` (the default) it stops at the first
+  // permission prompt and sits there claimed-but-deaf: holding the role, so nothing else may
+  // staff it, while answering nothing. That is the exact failure the board allowlist exists to
+  // prevent, and the allowlist only covers arc's OWN commands — a research peer also needs
+  // Read/Grep/Edit to do the work it was staffed for, and every one of those would stop it.
+  // (Observed: a staffed tab showing `manual mode on` while the caller ran `auto`.)
+  // BIRTH ONLY: a REVIVE restores the mode it was last in via arc-runner's preservedFlags, and
+  // passing it here too would hand claude the flag twice.
+  const mode = conv ? '' : ' --permission-mode auto';
+  const inner = `arc${acct} --name ${role}${mode}${resume} '"${conv ? `arc:role ${role}` : birth}"'`;
   if (wt) {
     // --suppressApplicationTitle is what makes the title STICK. Without it the tab shows "arc"
     // like every other tab: Claude Code sets the terminal title from the project folder, and an
     // application title escape overrides wt's --title. With two identical "arc" tabs you cannot
     // tell the caller from the peer it spawned — so the peer's tab is pinned to its ROLE.
-    return `wt -w 0 new-tab --title ${psQuote('arc: ' + role)} --suppressApplicationTitle -d ${psQuote(root)} cmd /c ${inner}`;
+    return `wt -w 0 new-tab --title ${psQuote('arc: ' + role)} --suppressApplicationTitle -d ${psQuote(root)} ${sh} ${inner}`;
   }
   // No Windows Terminal: a fresh console window via start (best-effort fallback).
-  return `cmd /c start "arc: ${role}" /d "${root}" cmd /c ${inner}`;
+  return `cmd /c start "arc: ${role}" /d "${root}" ${sh} ${inner}`;
 }
 
 // Does a conversation still have a transcript on disk? A revive is `--resume <conv>`, and that
@@ -243,7 +291,7 @@ function staffRole(session, role, opts) {
   // Only status === 0 is success. And the timeout must stay SHORT: this runs inside the
   // UserPromptSubmit hook, so a wedged launcher stalls the user's own prompt. wt's COM handoff
   // takes ~0.5s.
-  const psCmd = buildLaunch(wt, account, conv, role, launchDir);
+  const psCmd = buildLaunch(wt, account, conv, role, launchDir, o.shell);
   let r;
   try {
     r = doSpawn('powershell.exe', ['-NoProfile', '-Command', psCmd], { timeout: 5000 });
@@ -343,4 +391,4 @@ function requestDelegate(session, arg, cwd, opts) {
              : `\n  ${role} is live: its listener will wake it within seconds.`) };
 }
 
-module.exports = { staffRole, requestDelegate, buildLaunch, ensureTrusted, trustKey, hasWt, hasTranscript };
+module.exports = { staffRole, requestDelegate, buildLaunch, launchShell, ensureTrusted, trustKey, hasWt, hasTranscript };
