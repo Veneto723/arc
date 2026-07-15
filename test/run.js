@@ -2114,10 +2114,18 @@ try {
     /Take the frontend role on this board now/.test(psOf()) && !/"arc:role frontend"/.test(psOf()));
   ok('...telling it to claim, so the claim still happens on its own with nobody watching',
     /arc role frontend/.test(psOf()));
-  // The nesting is '"..."' through PS -> wt -> cmd, so an inner " closes the arg early and the
-  // prompt arrives truncated. Written with quotes the first time; the built command showed it.
-  ok('...and the prompt carries NO inner double quotes, or the nesting truncates it',
-    (psOf().match(/"/g) || []).length === 2);
+  // THE QUOTING, which cost two live tabs to learn. The chain is powershell.exe -Command -> wt ->
+  // shell. A PowerShell shell needs the WHOLE inner command as ONE PS-quoted string with inner
+  // quotes DOUBLED: passed as `'"…"'` the outer parse strips the quotes before wt sees them, pwsh
+  // receives bare words, and claude gets only the first — a tab that opened and said "Take".
+  // cmd keeps its own '"…"' nesting, which does work there. Two shells, two rules, and the only
+  // property that matters is that the prompt arrives WHOLE.
+  const psLaunch = I.buildLaunch(true, 'veneto', null, 'frontend', 'E:/arc', 'pwsh');
+  ok('a PowerShell launch quotes the WHOLE command as one PS string (bare words sent only "Take")',
+    /-NoExit -Command '/.test(psLaunch)
+    && /''Take the frontend role on this board now[^']*''/.test(psLaunch));
+  ok('...and cmd keeps its own nesting, which survives there',
+    /cmd \/k arc\b/.test(I.buildLaunch(true, 'veneto', null, 'frontend', 'E:/arc', 'cmd')));
   // A STAFFED PEER HAS NOBODY TO ANSWER A PROMPT. Born in `manual` it stops at the first
   // permission request and sits claimed-but-deaf — holding the role so nothing else may staff it,
   // while answering nothing. The board allowlist covers arc's OWN commands only; a research peer
@@ -2137,8 +2145,20 @@ try {
   // which is what the peer's own PowerShell tool resolves). The launcher carries only OUR birth
   // prompt — authored here, no %VAR%, no quotes, no newlines. A shell that cannot corrupt what we
   // hand it is not a risk. This asserts the ONE property the launcher must not get wrong.
-  ok('the launcher keeps the birth prompt WHOLE (pwsh -Command delivered only its first word)',
-    /cmd \/c arc\b/.test(psOf()) && /run  arc role frontend  then do what it tells you\.\"'$/.test(psOf()));
+  // THE SHELL MUST OUTLIVE CLAUDE. A newborn writes NO transcript while it runs; the file appears
+  // when it EXITS. With `cmd /c`, claude's exit ends the shell, which ends the wt tab — tearing the
+  // process down in the same instant it is trying to flush. A hand-launched peer exits into a
+  // terminal that stays alive and persists (26652 B); a wt-launched one exits code=0 and leaves
+  // NOTHING. So the shell must survive: -NoExit for PowerShell, /k for cmd. If this ever reverts to
+  // /c, every peer silently loses its memory the moment it closes — and revive dies with it.
+  ok('the launcher SURVIVES claude exiting, so the newborn can flush its transcript',
+    /-NoExit -Command/.test(I.buildLaunch(true, 'v', null, 'x', 'E:/arc', 'pwsh'))
+    && /cmd \/k /.test(I.buildLaunch(true, 'v', null, 'x', 'E:/arc', 'cmd'))
+    && !/cmd \/c arc/.test(I.buildLaunch(true, 'v', null, 'x', 'E:/arc', 'cmd')));
+  ok('...and PowerShell is preferred over cmd (cmd expands %VAR% and cannot see arc.ps1)',
+    I.launchShell(() => true) === 'pwsh'
+    && I.launchShell((e) => e === 'powershell.exe') === 'powershell'
+    && I.launchShell(() => false) === 'cmd');
   // A REVIVE must not pass --permission-mode: arc-runner's preservedFlags restores the mode the
   // peer was last in, and passing it here too hands claude the flag twice.
   ok('a REVIVE does not duplicate --permission-mode (preservedFlags restores its own)',

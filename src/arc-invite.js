@@ -81,7 +81,35 @@ function hasWt() {
 // %VAR%, no quotes and no newlines. A shell that cannot corrupt what we hand it is not a risk.
 // The launcher shell is also not the SESSION's shell — it runs arc and exits; Claude Code's tools
 // bring their own. So this choice is about one thing: does the prompt arrive whole.
-function launchShell() { return 'cmd /c'; }
+// PowerShell first — pwsh, then Windows PowerShell (always present), then cmd.
+// WHY IT MATTERS: cmd.exe parses a batch command line BEFORE arc.cmd's %* forwards anything, so it
+// strips quotes and EXPANDS %VAR% (the secret-leak vector), and its PATHEXT cannot even see
+// arc.ps1 — `cmd /c arc` reaches the mangler no matter what we ship. PowerShell resolves `arc` to
+// arc.ps1, which hands argv to node unparsed.
+function launchShell(probe) {
+  const has = probe || ((exe) => { try { return spawnSync('where.exe', [exe], { timeout: 5000 }).status === 0; } catch { return false; } });
+  if (has('pwsh.exe')) return 'pwsh';
+  if (has('powershell.exe')) return 'powershell';
+  return 'cmd';
+}
+
+// THE SHELL MUST OUTLIVE CLAUDE, and that is not cosmetic — it may be the whole revive bug.
+// A NEWBORN session writes NO transcript while it runs; the file appears when it EXITS. With
+// `cmd /c`, claude's exit ends cmd, which ends the wt tab — tearing the process down in the same
+// instant it is trying to flush. A hand-launched peer exits into a terminal that stays alive and
+// persists fine (26652 B); a wt-launched one exits code=0 and leaves nothing. Same flags, same
+// account, same folder. So: -NoExit / /k. The tab stays at a prompt, and the peer gets to save
+// itself. (If that is right, "a peer whose tab is closed with the X is unrevivable forever" was
+// never a Claude Code limitation — it was our launcher killing the peer before it could write.)
+//
+// QUOTING, which cost a live tab to learn: the chain is powershell.exe -Command -> wt -> shell.
+// Passing the prompt as `'"…"'` sends PowerShell BARE WORDS (the outer parse strips the quotes
+// before wt sees them) and claude received only the first word — "Take". So the whole inner
+// command goes as ONE PS-quoted string with inner quotes doubled; it survives the outer parse and
+// arrives intact. cmd keeps its own '"…"' nesting, which does work there.
+function shellPrefix(shell) {
+  return shell === 'cmd' ? 'cmd /k' : `${shell} -NoLogo -NoProfile -NoExit -Command`;
+}
 
 // ---- the trust dialog --------------------------------------------------------------------
 // Claude Code asks "Do you trust the files in this folder?" the first time it opens a project,
@@ -181,6 +209,7 @@ const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 function buildLaunch(wt, account, conv, role, root, shell) {
   const acct = account ? ` --account ${account}` : '';
   const sh = shell || launchShell();
+  const pre = shellPrefix(sh);
   // REVIVE resumes the role's own conversation; BIRTH passes nothing and lets the runner mint one.
   const resume = conv ? ` --resume ${conv}` : '';
   // THE BIRTH PROMPT IS REAL PROSE, NOT A SENTINEL — and that is what makes the peer revivable.
@@ -206,16 +235,23 @@ function buildLaunch(wt, account, conv, role, root, shell) {
   // BIRTH ONLY: a REVIVE restores the mode it was last in via arc-runner's preservedFlags, and
   // passing it here too would hand claude the flag twice.
   const mode = conv ? '' : ' --permission-mode auto';
-  const inner = `arc${acct} --name ${role}${mode}${resume} '"${conv ? `arc:role ${role}` : birth}"'`;
+  const prompt = conv ? `arc:role ${role}` : birth;
+  // cmd needs '"…"' (PS strips the outer ', cmd keeps the "). PowerShell needs the WHOLE inner
+  // command as one PS-quoted string, or the outer parse hands it bare words — that is the bug that
+  // sent claude the single word "Take".
+  const cmdline = `arc${acct} --name ${role}${mode}${resume}`;
+  const inner = sh === 'cmd'
+    ? `${cmdline} '"${prompt}"'`
+    : psQuote(`${cmdline} ${psQuote(prompt)}`);
   if (wt) {
     // --suppressApplicationTitle is what makes the title STICK. Without it the tab shows "arc"
     // like every other tab: Claude Code sets the terminal title from the project folder, and an
     // application title escape overrides wt's --title. With two identical "arc" tabs you cannot
     // tell the caller from the peer it spawned — so the peer's tab is pinned to its ROLE.
-    return `wt -w 0 new-tab --title ${psQuote('arc: ' + role)} --suppressApplicationTitle -d ${psQuote(root)} ${sh} ${inner}`;
+    return `wt -w 0 new-tab --title ${psQuote('arc: ' + role)} --suppressApplicationTitle -d ${psQuote(root)} ${pre} ${inner}`;
   }
   // No Windows Terminal: a fresh console window via start (best-effort fallback).
-  return `cmd /c start "arc: ${role}" /d "${root}" ${sh} ${inner}`;
+  return `cmd /c start "arc: ${role}" /d "${root}" ${pre} ${inner}`;
 }
 
 // Does a conversation still have a transcript on disk? A revive is `--resume <conv>`, and that
@@ -402,4 +438,4 @@ function requestDelegate(session, arg, cwd, opts) {
              : `\n  ${role} is live: its listener will wake it within seconds.`) };
 }
 
-module.exports = { staffRole, requestDelegate, buildLaunch, launchShell, ensureTrusted, trustKey, hasWt, hasTranscript };
+module.exports = { staffRole, requestDelegate, buildLaunch, launchShell, shellPrefix, ensureTrusted, trustKey, hasWt, hasTranscript };
