@@ -55,8 +55,9 @@ if ($hasClaude) {
   Write-Host "  arc MCP server installed (register later: claude mcp add --scope user arc node `"$mcpDest\server.js`")"
 }
 
-# 2. bin shims + PATH — TWO of them, and both are load-bearing.
-#    arc.cmd covers cmd.exe + PowerShell, which resolve a bare `arc` through PATHEXT.
+# 2. bin shims + PATH — THREE of them, and every one is load-bearing.
+#    arc.cmd covers cmd.exe. It used to be described as covering PowerShell too, and that belief
+#    silently corrupted every note a peer ever posted — see arc.ps1 below.
 #    Bash does NOT do PATHEXT: it looks for a file literally named `arc`, so with only the .cmd
 #    every `arc role` / `arc notes` / `arc await` died with 127 inside Claude Code's Bash tool —
 #    which is exactly where the `peers` skill tells agents to run them. The bin dir was on PATH
@@ -69,6 +70,35 @@ Set-Content (Join-Path $bin 'arc.cmd') $runnerCmd -Encoding ascii
 # $USERPROFILE not $HOME: node.exe is a Windows binary and cannot read a /c/Users/... MSYS path.
 $runnerSh = "#!/bin/sh`nexec node `"`$USERPROFILE/.claude/scripts/arc-runner.js`" `"`$@`"`n"
 [IO.File]::WriteAllText((Join-Path $bin 'arc'), $runnerSh, (New-Object Text.UTF8Encoding $false))
+
+# arc.ps1 — PowerShell prefers it over arc.cmd for a bare `arc`, and that is a SECURITY fix.
+#
+# cmd.exe parses a batch file's command line BEFORE %* forwards anything, and mangles every
+# argument three ways, all silent, all exit 0:
+#   1. TRUNCATES at the first newline  — a batch command line is one line. A peer's multi-line
+#      answer arrived as its FIRST LINE and the ✓ looked normal. (Board note #22: 91 chars.)
+#   2. STRIPS double quotes.
+#   3. EXPANDS %VAR%  — THE LEAK. A note that merely NAMES an env var stored its VALUE into
+#      .arc/peer/notes.jsonl, a durable file that is then injected into other peers' contexts.
+#      Proven with a fake secret: a body saying %ARC_FAKE_SECRET% stored as sk-ant-FAKE-...
+#      An agent discussing config is the likeliest thing on earth to name an env var.
+#      Gitignored is not the same as safe.
+#
+# WHY IT WENT UNNOTICED FOR SO LONG: the POSIX shim above is immune, and a session with the Bash
+# tool uses it. But a STAFFED PEER may have only PowerShell (the first one reported "No such tool
+# available: Bash"), so it went through arc.cmd — meaning every session that exists to ANSWER has
+# been posting through the mangler, and the asker could not tell. Found by the research peer,
+# which caught its OWN notes arriving corrupted and verified what STORED rather than trusting the
+# checkmark.
+#
+# Measured, not assumed: with arc.ps1 on PATH, `arc` resolves to it, and on pwsh 7 (what the
+# agent's PowerShell tool runs) newlines, quotes and literal %VAR% ALL survive. On Windows
+# PowerShell 5.1 quotes are still dropped — its native-argument passing predates the fix — but
+# the newline truncation and the leak are gone on both.
+# ExecutionPolicy: a locally-written .ps1 runs under RemoteSigned (this machine's LocalMachine
+# scope), verified before shipping. arc.cmd stays for cmd.exe and as the fallback.
+$runnerPs1 = "node `"`$env:USERPROFILE\.claude\scripts\arc-runner.js`" @args`r`n"
+Set-Content (Join-Path $bin 'arc.ps1') $runnerPs1 -Encoding utf8
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (($userPath -split ';') -notcontains $bin) {
   [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $bin), 'User')

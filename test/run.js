@@ -591,6 +591,21 @@ try {
   ok('...and no hand-rolled hook wiring survives in the installer (that is how lists drift)',
     !/Ensure-Hook/.test(ps));
 
+  // THE SHIM THAT STOPS A SECRET LEAK. cmd.exe parses a batch command line BEFORE %* forwards
+  // anything and mangles every argument three ways, silently, exit 0: truncates at the first
+  // NEWLINE, strips QUOTES, and EXPANDS %VAR% — so a note merely NAMING an env var stored its
+  // VALUE into notes.jsonl, a durable file injected into other peers' contexts. The POSIX shim is
+  // immune and a Bash session never saw it; a STAFFED PEER may have only PowerShell, so every
+  // session that exists to ANSWER posted through the mangler. arc.ps1 is what PowerShell resolves
+  // a bare `arc` to, and it fixes the newline + the leak on both shells (quotes too on pwsh 7).
+  ok('installer ships arc.ps1 — PowerShell must NOT reach the runner through cmd.exe',
+    ps.includes("'arc.ps1'") && /\@args/.test(ps));
+  ok('...and it passes args to node directly (never through a batch %* command line)',
+    /\$runnerPs1 = .*arc-runner\.js.*@args/.test(ps));
+  // The .cmd stays for cmd.exe — removing it would break a human's terminal.
+  ok('...while arc.cmd stays for cmd.exe, and the POSIX shim for Bash',
+    ps.includes("'arc.cmd'") && /\$runnerSh/.test(ps));
+
   ok('installer publishes the peer skill at the shared agent path',
     ps.includes("'.agents\\skills'") && ps.includes("'skills\\peers\\*'"));
   // the merged skill superseded two others — a stale copy would keep teaching the old split
