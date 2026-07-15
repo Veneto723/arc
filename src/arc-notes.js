@@ -473,7 +473,18 @@ function badge(session, cwd) {
 // Hook output is capped at 10,000 characters, so this MUST be a ranked digest, never
 // a dump: high-priority first, then newest, bodies clipped, overflow summarised.
 const INJECT_MAX = 4000;      // well under the 10k cap, leaving board for the frame
-const BODY_CLIP = 400;
+// TWO CLIPS, because two kinds of note are not the same thing.
+// A note ADDRESSED TO YOU is your WORK — the packet IS the deliverable, and a clipped packet makes
+// you do the wrong job with no idea you were shorted. Caught live: `code` sent research a 1400-char
+// review request and it arrived as 400, cut mid-sentence — 4 of the 5 questions never reached it.
+// It answered anyway (only because it had FORKED the caller's context and could read the original
+// command there). A REVIVED peer has no such inheritance and would have answered 29% of a question,
+// confidently. So a directed note is delivered whole.
+// A BROADCAST is ambient FYI addressed to nobody in particular; that is what a preview is for.
+// Either way, a clip now SAYS SO and names the command that shows the rest — an ellipsis is not a
+// warning, and silent truncation reads exactly like a peer who answered badly.
+const BODY_CLIP = 400;        // broadcasts: a preview is the point
+const DIRECT_CLIP = 3500;     // notes to YOU: the packet, bounded only so one note cannot eat the frame
 
 function injection(session, cwd) {
   try {
@@ -490,7 +501,13 @@ function injection(session, cwd) {
     const sup = R.supersededMap(board, allNotes);
 
     const rowFor = (n) => {
-      const body = n.body.length > BODY_CLIP ? n.body.slice(0, BODY_CLIP) + '…' : n.body;
+      // Directed at ME = my work, delivered whole. A broadcast = ambient, previewed. See the
+      // constants above for why this distinction is load-bearing rather than cosmetic.
+      const limit = n.to === role ? DIRECT_CLIP : BODY_CLIP;
+      const over = n.body.length - limit;
+      const body = over > 0
+        ? n.body.slice(0, limit) + `…\n      ⚠ CLIPPED — ${over} more chars you have NOT seen. Read it whole before acting:  arc notes all`
+        : n.body;
       const kind = n.kind && n.kind !== 'info' ? `  <${n.kind}>` : '';
       const thread = n.replyTo ? `  ↩ re #${n.replyTo}` : '';
       const dead = sup.get(n.seq);

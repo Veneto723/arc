@@ -342,6 +342,9 @@ const PIDSTART_CACHE = path.join(os.homedir(), '.claude', 'cache', 'arc-pidstart
 const PIDSTART_TTL = 30000;
 const FILETIME_EPOCH = 11644473600000;   // ms from 1601-01-01 (FILETIME) to 1970-01-01 (unix)
 const CLAIM_SKEW_MS = 2000;              // absorb rounding only; a recycled pid is off by hours
+// Printed LAST by the probe. Its presence is what proves the enumeration RAN — the exit code
+// cannot, because SilentlyContinue still exits 1 when any pid in the batch has died.
+const PROBE_OK = 'arc-probe-ok';
 let pidStartMemo = null;                 // per-process memo, so one hook run pays at most once
 
 // pid -> start time (epoch ms), null if no such process. Returns null ENTIRELY if the OS cannot
@@ -362,15 +365,35 @@ function procStarts(pids) {
     // on this UTC+8 box a process started 02:54:21Z reports as 10:54:21Z: every genuine claim would
     // look like it predated its own process by 8 hours and EVERY peer would read as dead. Verified
     // against a process whose real start time was known before this was trusted.
+    // A DONE MARKER, not the exit code. `-ErrorAction SilentlyContinue` suppresses the error
+    // MESSAGE but NOT the exit status: ask about a batch where any pid has since died and
+    // powershell prints perfect output for the survivors and still exits 1. The old guard
+    // (`status !== 0 -> return null`) then threw that good answer away and FAILED OPEN, voiding
+    // the impostor check for the WHOLE BATCH.
+    //
+    // And it voided it exactly where it was built to work: a squatter is BY DEFINITION a
+    // transient process, so it is the likeliest thing in the batch to exit mid-probe — the check
+    // disabled itself in its own reason for existing. (Found by the research peer, reproduced
+    // here: live+dead pid => status 1, stdout correct. My own notes even warn that SilentlyContinue
+    // does not clear the exit code; I wrote the guard anyway.)
+    //
+    // But the exit code cannot simply be IGNORED either, or the two failures become one: "every
+    // pid is gone" and "powershell could not run at all" both give empty stdout + nonzero status.
+    // Reading the second as the first would mark every peer an impostor — fail-CLOSED, the far
+    // worse direction (it invites a second session into an occupied chair). So the pipeline prints
+    // a marker LAST: see it and the enumeration provably ran, so a pid missing from stdout is
+    // genuinely gone; miss it and we could not ask, so fail open.
     let r;
     try {
       r = spawnSync('powershell.exe', ['-NoProfile', '-Command',
-        `Get-Process -Id ${need.join(',')} -ErrorAction SilentlyContinue | %{ "$($_.Id) $($_.StartTime.ToFileTimeUtc())" }`],
+        `Get-Process -Id ${need.join(',')} -ErrorAction SilentlyContinue | %{ "$($_.Id) $($_.StartTime.ToFileTimeUtc())" }; "${PROBE_OK}"`],
       { encoding: 'utf8', timeout: 5000 });
     } catch { return null; }
-    if (!r || r.error || r.status !== 0) return null;      // only status 0 is an answer (status is
-    const seen = {};                                       // null on BOTH timeout and ENOENT)
-    for (const line of String(r.stdout || '').split('\n')) {
+    if (!r || r.error) return null;                        // could not spawn/timed out — cannot ask
+    const out = String(r.stdout || '');
+    if (!out.includes(PROBE_OK)) return null;              // it never finished — cannot ask
+    const seen = {};
+    for (const line of out.split('\n')) {
       const m = line.trim().match(/^(\d+)\s+(\d+)$/);
       if (m) seen[m[1]] = Number(m[2]) / 10000 - FILETIME_EPOCH;
     }

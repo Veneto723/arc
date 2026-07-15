@@ -2571,6 +2571,43 @@ try {
       drift < 5000, `drift ${Math.round(drift / 1000)}s — .Ticks instead of .ToFileTimeUtc()?`);
   } else ok('procStarts agrees with our OWN start time', true, '(skipped: OS could not be asked)');
 
+  // THE BUG THE PEER FOUND, and the reason this check nearly never ran. `-ErrorAction
+  // SilentlyContinue` suppresses the error MESSAGE but NOT the exit status: probe a batch where
+  // any pid has since died and powershell prints perfect output for the survivors and STILL exits
+  // 1. The old guard read `status !== 0` as "cannot ask" and failed open — voiding the impostor
+  // check for the whole batch, in exactly the case it exists for (a squatter is by definition a
+  // transient process, so it is the likeliest thing to exit mid-probe).
+  // A LIVE pid batched with a DEAD one must still resolve. This is the regression guard, and it
+  // MUST run cold: procStarts memoises in-process AND caches to disk, so an in-process call here
+  // answers from cache and never probes — the first version of this test passed with the bug
+  // reintroduced, proving only that the cache worked. Fresh process, cache deleted.
+  const probeJs = `const fs=require('fs'),os=require('os'),path=require('path');
+    try{fs.unlinkSync(path.join(os.homedir(),'.claude','cache','arc-pidstart.json'))}catch{}
+    const R=require(${JSON.stringify(path.join(SRC, 'arc-board.js'))});
+    const mixed=R.procStarts([process.pid,999999]);
+    const allDead=R.procStarts([999998,999997]);
+    process.stdout.write(JSON.stringify({
+      liveResolved: !!mixed && typeof mixed[process.pid]==='number',
+      deadIsGone:   !!mixed && mixed[999999]===null,
+      allDeadIsAnswer: !!allDead && allDead[999998]===null && allDead[999997]===null,
+    }));`;
+  let cold = {};
+  try { cold = JSON.parse(spawnSync(process.execPath, ['-e', probeJs], { encoding: 'utf8' }).stdout || '{}'); } catch {}
+  ok('a batch containing a pid that DIED mid-probe still resolves the survivors',
+    cold.liveResolved === true,
+    'powershell exits 1 here — judging by exit code fails OPEN and voids the whole check');
+  ok('...and the dead pid reads as gone, not as "cannot ask"', cold.deadIsGone === true);
+  // ...while a batch of ONLY dead pids is still an ANSWER (they are gone), not a failure.
+  ok('a batch where EVERY pid is gone is an answer ("gone"), never mistaken for "cannot ask"',
+    cold.allDeadIsAnswer === true);
+  // The marker is what separates those two: "every pid gone" and "powershell never ran" both
+  // give empty stdout + nonzero status. Reading the second as the first would mark every peer an
+  // impostor — fail-CLOSED, which invites a second session into an occupied chair.
+  const boardSrc = fs.readFileSync(path.join(SRC, 'arc-board.js'), 'utf8');
+  ok('the probe proves it RAN with a marker, never with the exit code',
+    /PROBE_OK/.test(boardSrc) && /out\.includes\(PROBE_OK\)/.test(boardSrc)
+    && !/r\.status !== 0/.test(boardSrc));
+
   // FAIL OPEN when the OS cannot be asked. Reading a LIVE peer as dead is the worse error — it
   // invites a second session into an occupied chair, where two peers share one cursor and eat
   // each other's notes. Unsure must mean "behave exactly as arc always did".
@@ -2788,6 +2825,31 @@ try {
   ok('digest stays far under the 10k hook cap', inj.text.length < 10000);
   ok('injection marks them read — delivered exactly once', F.injection('sb', repo2) === null);
   ok('but the notes stay on the board (rd()-only)', R2.noteCount(board2) === countBeforeInject);
+
+  // A NOTE ADDRESSED TO YOU IS YOUR WORK — deliver it whole. Caught live: `code` sent research a
+  // 1400-char review request; it arrived clipped to 400, cut mid-sentence, and 4 of the 5 questions
+  // never reached it. It answered anyway ONLY because it had forked the caller's context and could
+  // read the original command there — a REVIVED peer has no such inheritance and would have
+  // confidently answered 29% of a question. The packet IS the deliverable; clipping it makes the
+  // peer do the wrong job with no idea it was shorted.
+  R2.markRead(board2, 'coding');
+  const longPacket = 'PACKET ' + 'x'.repeat(1200) + ' TAIL-MARKER-SURVIVED';
+  R2.appendNote(board2, { from: 'research', to: 'coding', kind: 'request', body: longPacket });
+  const injLong = F.injection('sb', repo2);
+  ok('a long note ADDRESSED TO YOU is delivered whole (the packet is the work)',
+    !!injLong && injLong.text.includes('TAIL-MARKER-SURVIVED'));
+  ok('...and is NOT clipped at the broadcast preview length',
+    !!injLong && !/⚠ CLIPPED/.test(injLong.text));
+
+  // A BROADCAST is ambient FYI — a preview is the point, but the clip must ANNOUNCE itself. An
+  // ellipsis is not a warning: silent truncation reads exactly like a peer who answered badly.
+  R2.markRead(board2, 'coding');
+  R2.appendNote(board2, { from: 'research', to: null, body: 'BCAST ' + 'y'.repeat(900) + ' NEVER-SEEN' });
+  const injB = F.injection('sb', repo2);
+  ok('a long BROADCAST is previewed, not delivered whole (ambient, not addressed to you)',
+    !!injB && !injB.text.includes('NEVER-SEEN'));
+  ok('...and the clip SAYS SO, with the command that shows the rest',
+    !!injB && /⚠ CLIPPED — \d+ more chars/.test(injB.text) && /arc notes all/.test(injB.text));
 
   // a burst must be ranked + summarised, never dumped (the 10k cap is a hard limit)
   for (let i = 0; i < 80; i++) R2.appendNote(board2, { from: 'research', to: 'coding', body: 'filler '.repeat(40) + i });
