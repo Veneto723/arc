@@ -1,7 +1,7 @@
 name: CI
 
-# cl-kit is Windows 11 only. The suite runs the platform-neutral core (account
-# switching, per-account credential isolation, trash, usage, the fridge) plus the
+# arc is Windows 11 only. The suite runs the platform-neutral core (account
+# switching, per-account credential isolation, trash, usage, the board) plus the
 # Windows key path (a real DPAPI round-trip) on a windows-latest runner. It uses a
 # throwaway HOME and no interactive `claude`.
 

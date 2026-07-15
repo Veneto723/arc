@@ -95,10 +95,10 @@ try {
     version: 1, defaultAccount: 'sub', switchOrder: ['sub', 'gw'],
     accounts: [
       { id: 'sub', type: 'oauth', label: 'SUB' },
-      { id: 'gw', type: 'api', label: 'GW', baseUrl: 'https://gw.example.com', apiKeyEnv: 'CLKIT_TEST_KEY', modelMap: { opus: 'big', sonnet: 'mid' } },
+      { id: 'gw', type: 'api', label: 'GW', baseUrl: 'https://gw.example.com', apiKeyEnv: 'ARC_TEST_KEY', modelMap: { opus: 'big', sonnet: 'mid' } },
     ],
   });
-  process.env.CLKIT_TEST_KEY = 'sk-test-123';
+  process.env.ARC_TEST_KEY = 'sk-test-123';
   C = require(path.join(SRC, 'arc-config.js'));
   const cfg = C.loadConfig();
   ok('loadConfig returns both accounts', cfg.accounts.length === 2);
@@ -113,7 +113,7 @@ try {
 
   // ---- per-account env: a gateway serving a FOREIGN model needs harness accommodations,
   // and those must not survive a switch back to a normal account.
-  const gwx = { id: 'gwx', type: 'api', baseUrl: 'https://x.example.com', apiKeyEnv: 'CLKIT_TEST_KEY',
+  const gwx = { id: 'gwx', type: 'api', baseUrl: 'https://x.example.com', apiKeyEnv: 'ARC_TEST_KEY',
     modelMap: { opus: 'gpt-x' }, env: { ENABLE_TOOL_SEARCH: 'false', CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '3' } };
   const xenv = C.accountEnv(gwx, {});
   ok('accountEnv applies an account\'s env map (harness accommodations)',
@@ -131,7 +131,7 @@ try {
     && back.ARC_ACCOUNT_ENV_KEYS === undefined);
 
   // A proxy serving a FOREIGN model pins the primary model outright (the documented lever).
-  const claudex = { id: 'cx', type: 'api', baseUrl: 'https://proxy.local', apiKeyEnv: 'CLKIT_TEST_KEY',
+  const claudex = { id: 'cx', type: 'api', baseUrl: 'https://proxy.local', apiKeyEnv: 'ARC_TEST_KEY',
     model: 'gpt-5.6-sol', modelMap: { opus: 'gpt-5.6-sol', sonnet: 'gpt-5.6-sol' } };
   const cxenv = C.accountEnv(claudex, {});
   ok('an account with `model` pins ANTHROPIC_MODEL (a foreign model behind an Anthropic API)',
@@ -526,9 +526,9 @@ try {
   ok('resolveApiKey round-trips the DPAPI blob', C.resolveApiKey(acc) === 'sk-dpapi-42');
 
   // the portable sources are still first-class on Windows.
-  process.env.CLKIT_KEY_TEST = 'sk-from-env';
-  ok('resolveApiKey reads apiKeyEnv', C.resolveApiKey({ id: 'e', type: 'api', apiKeyEnv: 'CLKIT_KEY_TEST' }) === 'sk-from-env');
-  delete process.env.CLKIT_KEY_TEST;
+  process.env.ARC_KEY_TEST = 'sk-from-env';
+  ok('resolveApiKey reads apiKeyEnv', C.resolveApiKey({ id: 'e', type: 'api', apiKeyEnv: 'ARC_KEY_TEST' }) === 'sk-from-env');
+  delete process.env.ARC_KEY_TEST;
   const kf = path.join(TMP, 'key.txt'); fs.writeFileSync(kf, 'TOKEN=sk-from-file\n');
   ok('resolveApiKey reads apiKeyFrom {file,regex}',
     C.resolveApiKey({ id: 'f', type: 'api', apiKeyFrom: { file: kf, regex: 'TOKEN=(\\S+)' } }) === 'sk-from-file');
@@ -3152,7 +3152,7 @@ try {
   // account env routing: a claudex account points Claude Code at the LOCAL translator and
   // must NEVER leak the real gateway key into Claude Code's env.
   const Ccfg = require(path.join(SRC, 'arc-config.js'));
-  const cxAcc = { id: 'gpt', type: 'api', baseUrl: 'https://gw.example.com', apiKeyEnv: 'CLKIT_TEST_KEY', model: 'gpt-5.6-sol', proxy: { port: 8791 } };
+  const cxAcc = { id: 'gpt', type: 'api', baseUrl: 'https://gw.example.com', apiKeyEnv: 'ARC_TEST_KEY', model: 'gpt-5.6-sol', proxy: { port: 8791 } };
   const cxEnv = Ccfg.accountEnv(cxAcc, {});
   ok('claudex account: ANTHROPIC_BASE_URL points at the LOCAL translator, not the gateway',
     cxEnv.ANTHROPIC_BASE_URL === 'http://127.0.0.1:8791' && cxEnv.ANTHROPIC_MODEL === 'gpt-5.6-sol');
@@ -3161,7 +3161,7 @@ try {
 
   // MULTI-MODEL: a modelMap maps tiers to GPT models so /model switches among them; when a map
   // is present, ANTHROPIC_MODEL is NOT pinned (else the picker is stuck on one).
-  const multiAcc = { id: 'gpt2', type: 'api', baseUrl: 'https://gw.example.com', apiKeyEnv: 'CLKIT_TEST_KEY', proxy: { port: 8792 }, model: 'gpt-5.6-sol', modelMap: { opus: 'gpt-5.6-sol', sonnet: 'gpt-5.6-terra', haiku: 'gpt-5.6-luna' } };
+  const multiAcc = { id: 'gpt2', type: 'api', baseUrl: 'https://gw.example.com', apiKeyEnv: 'ARC_TEST_KEY', proxy: { port: 8792 }, model: 'gpt-5.6-sol', modelMap: { opus: 'gpt-5.6-sol', sonnet: 'gpt-5.6-terra', haiku: 'gpt-5.6-luna' } };
   const multiEnv = Ccfg.accountEnv(multiAcc, {});
   ok('claudex multi-model: tiers map to GPT models (/model opus|sonnet|haiku switches in-session)',
     multiEnv.ANTHROPIC_DEFAULT_OPUS_MODEL === 'gpt-5.6-sol' && multiEnv.ANTHROPIC_DEFAULT_SONNET_MODEL === 'gpt-5.6-terra' && multiEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL === 'gpt-5.6-luna');
