@@ -1772,8 +1772,11 @@ try {
     spawn: (b, a) => { spawnedFork = a; return { status: 0 }; }, hasWt: true,
     ensureTrusted: () => ({ ok: true, already: true }), hasTranscript: () => false,
   });
+  // Birth REMOVED the constraint this test was built for: staffing no longer needs the caller to
+  // own a conversation at all, so a peer tree needs no bridge. The bridge still matters — a peer's
+  // own convId is what a later REVIVE resumes — but it can no longer block staffing.
   ok('...so a STAFFED peer can staff another in turn (a peer tree, not a one-level star)',
-    okInv.ok === true && spawnedFork.join(' ').includes('--resume fork-conv-9999'));
+    okInv.ok === true && !spawnedFork.join(' ').includes('--fork-session'));
 
   // The CLAIM was written before the id was knowable, so it carries null — and role adoption on
   // restart matches a vacant claim BY CONVERSATION. That peer would silently lose its role.
@@ -2084,8 +2087,13 @@ try {
   ok('staffing launches via SYNC PowerShell: a wt tab in the CURRENT window at the repo root',
     okr.ok === true && spawned && spawned.bin === 'powershell.exe'
     && /wt -w 0 new-tab/.test(psOf()) && psOf().includes(`-d '${vrepo}'`));
-  ok('...running a FORK of the caller\'s conversation (no "frontend" has ever worked here)',
-    /--resume conv-abc-123 --fork-session/.test(psOf()));
+  // BORN, NOT CLONED. It used to launch --resume <CALLER's conv> --fork-session, and that was the
+  // bug that made revival impossible: a forked session leaves NO resumable transcript, so the
+  // moment it closed there was nothing to bring back (measured: hasTranscript false for a peer
+  // that had just worked an hour). Passing NO conversation makes it an ordinary managed session,
+  // and arc-runner mints one with --session-id — which does persist.
+  ok('a NEW peer is BORN with its own conversation — never a fork of the caller',
+    !/--fork-session/.test(psOf()) && !/--resume/.test(psOf()));
   ok('...whose opening prompt is the arc:role sentinel, quote-nested to survive PS->wt->cmd',
     psOf().includes(`'"arc:role frontend"'`));
   // The SESSION's name, which is not the tab title. Claude Code names a session after the project,
@@ -2094,8 +2102,12 @@ try {
   // hand was guesswork. (Caught live: the tab said "arc: research", the session still said "arc".)
   ok('...and the session is NAMED for its role (else the --resume picker is a list of "arc")',
     /--name frontend/.test(psOf()));
-  ok('...and the confirmation says WHY it forked (it starts knowing the project)',
-    /staffing a new "frontend" peer/.test(okr.message) && /FORKS this conversation/.test(okr.message));
+  ok('...and the confirmation does not promise a context it will not have',
+    /staffing a new "frontend" peer/.test(okr.message)
+    && /starts FRESH with its OWN conversation/.test(okr.message)
+    && !/FORKS this conversation/.test(okr.message));
+  ok('...naming the two things it DOES learn the job from: its duty file and the board',
+    /roles\/frontend\.md and the board/.test(okr.message));
 
   // ---- REVIVE vs FORK: the whole reason one verb can cover a closed peer ----------------
   // A vacant claim remembers the CONVERSATION of the session that held the role. If that
@@ -2124,9 +2136,8 @@ try {
   // The convId is a LEAD, not a guarantee: the conversation may have been deleted or purged, and
   // `--resume <gone>` dies with "No conversation found" — a tab that opens only to fail.
   const gone = I.staffRole(VS, 'ghost', { spawn: rec, hasWt: true, hasTranscript: () => false });
-  ok('a vacant claim whose TRANSCRIPT IS GONE falls back to a fork (never resumes into a corpse)',
-    gone.ok === true && gone.revived === false
-    && /--resume conv-abc-123 --fork-session/.test(psOf()));
+  ok('a vacant claim whose TRANSCRIPT IS GONE is BORN fresh (never resumes into a corpse)',
+    gone.ok === true && gone.revived === false && !/--resume/.test(psOf()));
   RM3.releaseRole(vboard, 'ghost', 999999);
 
   // Account pinning: conversations live in per-account profiles — a tab that auto-selected a
@@ -2134,8 +2145,10 @@ try {
   const oldAcct = process.env.ARC_RUNTIME_ACCOUNT;
   process.env.ARC_RUNTIME_ACCOUNT = 'veneto';
   I.staffRole(VS, 'backend', NOHIST);
-  ok('staffing PINS the caller\'s account (the transcript only exists in that profile)',
-    /arc --account veneto\b/.test(psOf()) && /--resume conv-abc-123/.test(psOf()));
+  // The account still pins: a REVIVE resumes a conversation that only exists in that profile, and
+  // a birth must land in the profile whose hooks/settings the caller is already running under.
+  ok('staffing PINS the caller\'s account (a revive resumes a conv that exists only there)',
+    /arc --account veneto\b/.test(psOf()) && /--name backend/.test(psOf()));
   if (oldAcct === undefined) delete process.env.ARC_RUNTIME_ACCOUNT; else process.env.ARC_RUNTIME_ACCOUNT = oldAcct;
 
   // No wt: fall back to a fresh console window via `start`.
@@ -2269,8 +2282,15 @@ try {
   // No conversation id: nothing to fork.
   const VS2 = 'invite-noconv-' + process.pid;
   fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${VS2}.json`), JSON.stringify({ pid: process.pid, cwd: vrepo }));
-  ok('staffing refuses when the conversation has no id yet (nothing to fork)',
-    /nothing to fork/.test(I.staffRole(VS2, 'frontend', NOHIST).message));
+  // THIS REFUSAL IS GONE, and its absence is the fix. Staffing used to need the CALLER to own a
+  // saved conversation, because it forked one — so a caller whose id was not yet knowable could
+  // not staff anyone. A peer is now BORN with its own conversation, so the caller's id is
+  // irrelevant to whether a peer can exist.
+  spawned = null;
+  const noConv = I.staffRole(VS2, 'frontend', NOHIST);
+  ok('a caller with NO conversation of its own can still staff a peer (birth needs nothing of yours)',
+    noConv.ok === true && !/nothing to fork/.test(noConv.message || ''));
+  spawned = null;   // that one legitimately spawned
   ok('no refusal ever spawned anything', spawned === null);
 
   // The runner-side enabler: a FORK must skip the duplicate-conversation guard AND must not

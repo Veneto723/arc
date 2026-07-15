@@ -127,9 +127,27 @@ const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // anything that is not its own flag, so a switched or restarted peer keeps its name.
 // (No conflict with the tab title: --name also sets the terminal title, but the wt tab is pinned
 // by --suppressApplicationTitle, so "arc: <role>" still wins there.)
-function buildLaunch(wt, account, conv, role, root, fork) {
+// `conv` = the role's OWN conversation to REVIVE, or null to be BORN.
+//
+// A NEW PEER IS BORN, NOT CLONED. It used to launch `--resume <CALLER's conv> --fork-session`,
+// which looked like a gift (it starts knowing the project) and was actually the bug that made
+// revival impossible: a forked session leaves NO resumable transcript, so the moment it closed
+// there was nothing to bring back — measured, `hasTranscript` was false for a peer that had just
+// worked for an hour, and staffing silently forked a stranger instead of reviving it. Birth
+// destroyed revival. Passing no conversation at all makes it an ordinary MANAGED session, and
+// arc-runner already does the right thing for those: it mints a convId and launches
+// `--session-id`, which DOES persist. Verified end-to-end: minted -> closed -> `--resume`
+// answered from its own memory.
+//
+// And the caller's context was never what a peer needed. Its job comes from its DUTY FILE (what
+// it owns) and the BOARD (the work) — the two things that outlive any session. Inheriting the
+// caller's transcript only ever handed it a false identity (BUG-4: a fork addressing the caller's
+// human as if it were the caller), which the `peers` skill then had to talk it out of.
+function buildLaunch(wt, account, conv, role, root) {
   const acct = account ? ` --account ${account}` : '';
-  const inner = `arc${acct} --name ${role} --resume ${conv}${fork ? ' --fork-session' : ''} '"arc:role ${role}"'`;
+  // REVIVE resumes the role's own conversation; BIRTH passes nothing and lets the runner mint one.
+  const resume = conv ? ` --resume ${conv}` : '';
+  const inner = `arc${acct} --name ${role}${resume} '"arc:role ${role}"'`;
   if (wt) {
     // --suppressApplicationTitle is what makes the title STICK. Without it the tab shows "arc"
     // like every other tab: Claude Code sets the terminal title from the project folder, and an
@@ -194,11 +212,10 @@ function staffRole(session, role, opts) {
   // trusted once the transcript is confirmed on disk. Otherwise: fork the caller.
   const vacant = R.vacantClaimForRole(board, role);
   const revive = !!(vacant && (o.hasTranscript || hasTranscript)(vacant.convId));
-  const conv = revive ? vacant.convId : N.sessionConv(session);
-  if (!conv) {
-    return { ok: false, message:
-      'this conversation has no saved id yet, so there is nothing to fork from — send one message first, then try again.' };
-  }
+  // BIRTH needs no conversation — the runner mints one. Only a REVIVE names one, and it names the
+  // ROLE's own, never the caller's. (The old "nothing to fork" refusal died with the fork: a peer
+  // no longer needs the caller to have a saved conversation in order to exist.)
+  const conv = revive ? vacant.convId : null;
   const account = (process.env.ARC_RUNTIME_ACCOUNT || '').trim() || null;
 
   // LAUNCH IN THE CALLER'S OWN PATH STRING, not board.root. board.root is CANONICAL (lowercased)
@@ -226,7 +243,7 @@ function staffRole(session, role, opts) {
   // Only status === 0 is success. And the timeout must stay SHORT: this runs inside the
   // UserPromptSubmit hook, so a wedged launcher stalls the user's own prompt. wt's COM handoff
   // takes ~0.5s.
-  const psCmd = buildLaunch(wt, account, conv, role, launchDir, !revive);
+  const psCmd = buildLaunch(wt, account, conv, role, launchDir);
   let r;
   try {
     r = doSpawn('powershell.exe', ['-NoProfile', '-Command', psCmd], { timeout: 5000 });
@@ -244,8 +261,9 @@ function staffRole(session, role, opts) {
         + `  it resumes ${role}'s OWN conversation, so it comes back as itself: everything it\n`
         + `  learned before, still there. It re-adopts the role and arms its own listener.\n`
       : `✓ staffing a new "${role}" peer — new ${wt ? 'tab in this window' : 'console window'}.\n`
-        + `  no ${role} has worked here before, so it FORKS this conversation's context — it starts\n`
-        + `  knowing the project. It claims "${role}" and arms its own listener.\n`) +
+        + `  no ${role} has worked here before, so it starts FRESH with its OWN conversation — it\n`
+        + `  learns the job from .arc/roles/${role}.md and the board, not from your context.\n`
+        + `  That is what makes it revivable later: it will have a history of its own.\n`) +
     (trust.seeded
       ? `  (trusted "${launchDir}" for this account so the new tab isn't stopped by the trust\n` +
         `   dialog it cannot answer — the same folder you are already working in. Backup:\n` +
