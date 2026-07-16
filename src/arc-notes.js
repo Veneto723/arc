@@ -644,7 +644,24 @@ function clipBody(body, limit) {
 }
 
 const BODY_CLIP = 400;        // broadcasts: a preview is the point
-const DIRECT_CLIP = 3500;     // notes to YOU: the packet, bounded only so one note cannot eat the frame
+// A DIRECTED PACKET IS WORK — it is NEVER truncated. It delivers WHOLE inline up to DIRECT_CLIP,
+// kept safely under the 10k hook cap with frame room (the old 3500 was far below the cap and
+// truncated real packets — four of mine in one day, each ~3600 chars, lost their tail). Above
+// DIRECT_CLIP a packet cannot go inline without risking the cap, so — exactly as the hook cap does
+// itself — we SPILL the whole packet to a file and hand the path, with a large inline preview for
+// the ~40% who won't open a referenced file (the 60% rule). Raising the constant alone would just
+// recreate the truncation at a bigger size (research #126); the spill backstop is what removes it.
+const DIRECT_CLIP = 7000;     // notes to YOU: delivered WHOLE inline up to here
+const DIRECT_PREVIEW = 2500;  // over DIRECT_CLIP -> spill to a file, preview this much inline
+function spillPath(board, seq) { return path.join(board.planDir, `spill-${seq}.txt`); }
+function directBody(n, board, spills) {
+  const s = String(n.body);
+  if (s.length <= DIRECT_CLIP) return s;                          // fits whole — deliver it, no clip
+  const file = spillPath(board, n.seq);
+  try { fs.writeFileSync(file, s, 'utf8'); if (spills) spills.push(file); } catch {}
+  return s.slice(0, DIRECT_PREVIEW).trimEnd()
+    + `…\n      ⚠ FULL ${s.length}-char packet — this is your WORK, read ALL of it before acting:  ${file}`;
+}
 
 function injection(session, cwd) {
   try {
@@ -660,11 +677,12 @@ function injection(session, cwd) {
     const allNotes = R.allNotes(board);
     const sup = R.supersededMap(board, allNotes);
 
+    const spills = [];
     const rowFor = (n) => {
-      // Directed at ME = my work, delivered whole. A broadcast = ambient, previewed. See the
-      // constants above for why this distinction is load-bearing rather than cosmetic.
-      const limit = n.to === role ? DIRECT_CLIP : BODY_CLIP;
-      const body = clipBody(n.body, limit);
+      // Directed at ME = my work, delivered whole (spilled to a file if it cannot fit inline, never
+      // truncated). A broadcast = ambient, previewed. See the constants above for why this
+      // distinction is load-bearing rather than cosmetic.
+      const body = n.to === role ? directBody(n, board, spills) : clipBody(n.body, BODY_CLIP);
       const kind = n.kind && n.kind !== 'info' ? `  <${n.kind}>` : '';
       const thread = n.replyTo ? `  ↩ re #${n.replyTo}` : '';
       const dead = sup.get(n.seq);
@@ -698,6 +716,7 @@ function injection(session, cwd) {
     const rank = (n) => R.KIND_RANK[n.kind || R.DEFAULT_KIND] ?? 5;
     const display = [...picked].sort((a, b) =>
       (b.priority === 'high') - (a.priority === 'high') || rank(a) - rank(b) || a.seq - b.seq);
+    spills.length = 0;   // the accounting pass above also called rowFor; collect spills from the SHOWN rows only
 
     // A question you ASKED a peer that was never answered used to just scroll away.
     const open = R.openRequests(board, role).filter((n) => n.from === role);
@@ -720,7 +739,7 @@ function injection(session, cwd) {
       `\`arc notes all\` shows the whole board.)`;
 
     R.writeCursor(board, role, newCursor);   // advance ONLY over what we delivered — lossless
-    return { text, count: u.count, role, board: board.name, shown: picked.length };
+    return { text, count: u.count, role, board: board.name, shown: picked.length, spills };
   } catch { return null; }    // the board must NEVER wedge a prompt
 }
 

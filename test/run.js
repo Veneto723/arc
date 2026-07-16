@@ -3289,14 +3289,31 @@ try {
   // read the original command there — a REVIVED peer has no such inheritance and would have
   // confidently answered 29% of a question. The packet IS the deliverable; clipping it makes the
   // peer do the wrong job with no idea it was shorted.
+  // FIXTURE MUST EXCEED THE LIMIT or the test is decoration (research #126): the old fixture was
+  // 1,228 chars against DIRECT_CLIP — it could not fail for the invariant it names, and passed GREEN
+  // while a real 3,685-char packet lost its only instruction. This one is ~5,000: over the OLD 3,500
+  // limit (so it fails against the truncating code) and under the current one (so it delivers whole).
   R2.markRead(board2, 'coding');
-  const longPacket = 'PACKET ' + 'x'.repeat(1200) + ' TAIL-MARKER-SURVIVED';
+  const longPacket = 'PACKET ' + 'x'.repeat(5000) + ' TAIL-MARKER-SURVIVED';
   R2.appendNote(board2, { from: 'research', to: 'coding', kind: 'request', body: longPacket });
   const injLong = F.injection('sb', repo2);
   ok('a long note ADDRESSED TO YOU is delivered whole (the packet is the work)',
     !!injLong && injLong.text.includes('TAIL-MARKER-SURVIVED'));
-  ok('...and is NOT clipped at the broadcast preview length',
-    !!injLong && !/⚠ CLIPPED/.test(injLong.text));
+  ok('...and is NOT clipped nor spilled — a packet under the ceiling arrives intact inline',
+    !!injLong && !/⚠ CLIPPED/.test(injLong.text) && !/packet —/.test(injLong.text));
+
+  // OVER the inline ceiling a directed packet is NEVER silently truncated — it SPILLS to a file and
+  // hands the path, so the peer reads the WHOLE thing before acting. A bigger constant alone would
+  // just move this failure; the spill is what removes it.
+  R2.markRead(board2, 'coding');
+  const hugePacket = 'HUGE ' + 'q'.repeat(9000) + ' TAIL-IN-FILE';
+  R2.appendNote(board2, { from: 'research', to: 'coding', kind: 'request', body: hugePacket });
+  const injHuge = F.injection('sb', repo2);
+  ok('an over-ceiling directed packet ANNOUNCES a spill, never a silent cut',
+    !!injHuge && /this is your WORK, read ALL of it/.test(injHuge.text) && !/⚠ CLIPPED/.test(injHuge.text));
+  ok('...and the spilled file exists and carries the WHOLE packet, tail intact',
+    !!injHuge && injHuge.spills && injHuge.spills.length === 1
+    && fs.existsSync(injHuge.spills[0]) && fs.readFileSync(injHuge.spills[0], 'utf8').includes('TAIL-IN-FILE'));
 
   // A BROADCAST is ambient FYI — a preview is the point, but the clip must ANNOUNCE itself. An
   // ellipsis is not a warning: silent truncation reads exactly like a peer who answered badly.
