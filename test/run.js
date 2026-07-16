@@ -2520,8 +2520,10 @@ try {
   // folder, so without --suppressApplicationTitle both tabs read "arc" and you cannot tell the
   // caller from the peer it spawned.
   I.staffRole(VS, 'titled', NOHIST);
+  // The bare role, no "arc: " badge — the human reads tabs by role, and the prefix pushed the
+  // one word that matters off a narrow tab (their call, 2026-07-16).
   ok('the peer tab is titled by ROLE and keeps it (--suppressApplicationTitle)',
-    /--title 'arc: titled' --suppressApplicationTitle/.test(psOf()));
+    /--title 'titled' --suppressApplicationTitle/.test(psOf()));
 
   // ---- the trust dialog: the invited tab has NO HUMAN to answer it -------------------
   // Claude Code asks "Do you trust the files in this folder?" per PROJECT PATH, per account
