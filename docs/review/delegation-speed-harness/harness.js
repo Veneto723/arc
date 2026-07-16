@@ -83,11 +83,12 @@ function reset(rg) {
 }
 
 // ---- a VOID must never leave a spawn behind -------------------------------------------------------
-// A TIMEOUT OBSERVES THE WATCHER, NOT THE WORLD (arc learned this once already: eb53c3c). The launcher
-// can spawn LATE, so "chair never filled in 60s" means "not yet" — never "nobody". At void time the
-// claim usually does not exist yet, so reaping once is not enough: keep watching through a grace
-// window and reap the late arrival. An orphan holding a task packet is not idle — it WORKS, and its
-// work is indistinguishable from a real worker's.
+// A TIMEOUT OBSERVES THE WATCHER, NOT THE WORLD (arc learned this once already: eb53c3c). "Chair never
+// filled" means "not yet" — never "nobody" — because the thing being raced is the session's first turn,
+// not the spawn (see CLAIM_DEADLINE_MS: the process is always up in ~7s; it is the model that can take
+// 76s to speak). So at void time the peer is typically ALIVE with no claim yet, and reaping once finds
+// nothing: keep watching through a grace window and reap the arrival. An orphan holding a task packet
+// is not idle — it WORKS, and its work is indistinguishable from a real worker's.
 const VOID_GRACE_MS = 90000;
 function claimedRoles(rg) {
   try { return fs.readdirSync(peerDir(rg)).filter((f) => /^claim-(worker|owner-).*\.json$/.test(f)); }
@@ -147,6 +148,15 @@ const OWNER_WARM = (role) =>
 
 // Poll for a role's claim file + a live pid (code #67: never trust a delegate ok:true; CONFIRM the
 // chair actually filled — a detached launch that timed out may have spawned anyway or not at all).
+//
+// WHAT THIS DEADLINE ACTUALLY RACES — measured, not assumed. It is NOT process spawn: spawn latency
+// across 15 trials was 4.6-11.8s (median 7.1) and NEVER failed. The claim only lands once the session
+// runs its first `arc role` command, so this races MODEL FIRST-TURN LATENCY: median 8.8s, but a 31.1s
+// scored trial and a 76.0s one (zombie 9fa28d80, voided trial 4) sit in the tail. The old 60s deadline
+// cut that tail — it declared "chair never filled" 16s before the worker spoke, and the orphan then
+// fabricated both N=3 data points. Polling returns the instant the chair fills, so a generous deadline
+// costs nothing on the happy path and a tight one costs a corrupted trial.
+const CLAIM_DEADLINE_MS = 180000;
 function waitClaim(rg, role, deadlineMs) {
   const f = path.join(peerDir(rg), `claim-${role}.json`);
   const end = Date.now() + deadlineMs;
@@ -172,12 +182,12 @@ function warmStart(rg, areas, trial) {
   reset(rg); claimDispatch(rg);
   for (const a of areas) birthOwnerWarm(rg, AREAS[a].owner);
   for (const a of areas) {
-    if (!waitClaim(rg, AREAS[a].owner, 90000)) voidExit(rg, `owner ${AREAS[a].owner} chair NEVER FILLED`);
+    if (!waitClaim(rg, AREAS[a].owner, CLAIM_DEADLINE_MS)) voidExit(rg, `owner ${AREAS[a].owner} chair NEVER FILLED`);
   }
   sleepMs(25000);   // let owners arm `arc join` + go idle before the worker delegates
   const t_start = new Date().toISOString();
   birthWorker(rg, areas);
-  if (!waitClaim(rg, 'worker', 60000)) voidExit(rg, 'worker chair NEVER FILLED');
+  if (!waitClaim(rg, 'worker', CLAIM_DEADLINE_MS)) voidExit(rg, 'worker chair NEVER FILLED');
   fs.writeFileSync(stateFile(rg), JSON.stringify({ regime: rg, mode: 'warm', N: areas.length, trial: Number(trial), areas, t_start, t_done: null }, null, 1));
   pushLoad(rg);   // load sample at t_start
   log(`[${rg}] WARM N=${areas.length} [${areas.join(',')}] trial ${trial} STARTED at ${t_start} (owners pre-live)`);
@@ -190,7 +200,7 @@ function start(rg, areasCsv, trial) {
   claimDispatch(rg);
   const t_start = new Date().toISOString();
   birthWorker(rg, areas);
-  if (!waitClaim(rg, 'worker', 60000)) voidExit(rg, 'worker chair NEVER FILLED');   // code #67
+  if (!waitClaim(rg, 'worker', CLAIM_DEADLINE_MS)) voidExit(rg, 'worker chair NEVER FILLED');   // code #67
   fs.writeFileSync(stateFile(rg), JSON.stringify({ regime: rg, mode: rg === 'self' ? 'self' : 'cold', N: areas.length, trial: Number(trial), areas, t_start, t_done: null }, null, 1));
   pushLoad(rg);   // load sample at t_start
   log(`[${rg}] ${rg === 'self' ? 'SELF' : 'COLD'} N=${areas.length} [${areas.join(',')}] trial ${trial} STARTED at ${t_start}`);
