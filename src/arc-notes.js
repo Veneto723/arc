@@ -595,9 +595,23 @@ function badge(session, cwd) {
 // into the kitchen, never while you're asleep. That's not a limitation of this
 // design; it is the design.
 //
-// Hook output is capped at 10,000 characters, so this MUST be a ranked digest, never
-// a dump: high-priority first, then newest, bodies clipped, overflow summarised.
-const INJECT_MAX = 4000;      // well under the 10k cap, leaving board for the frame
+// VERIFIED 2026-07-16 against the docs, because this number sets every other number here and was
+// nothing but a comment: "Hook output strings, including additionalContext, systemMessage, and
+// plain stdout, are capped at 10,000 characters" — https://code.claude.com/docs/en/hooks. True,
+// characters (not bytes/tokens), and it covers the field we inject through.
+//
+// AND THE OVERFLOW BEHAVIOUR IS THE REAL REASON TO CLIP, which nobody had written down. Exceeding
+// 10k does NOT truncate: the harness SAVES THE OUTPUT TO A FILE and hands the model a preview plus
+// a path — the same way a large tool result is handled. So nothing would be lost by dumping. What
+// would be lost is the READING: the spill turns a note into a file the agent must choose to open,
+// and we MEASURED that choice — a referenced duty file was opened 5 times out of 8 (the paths-vs-
+// owns run, docs/review/paths-nudge-results-2026-07-15.md). An inline digest is seen every time.
+// So the clip does not defend the data; it defends the DELIVERY, which is the only thing a board
+// exists to do. The 60% is also why `--ref`-style pointers are for EVIDENCE, never for the ask.
+//
+// The docs do NOT settle whether the cap is per-field or per-output-object; 4000 has headroom
+// under either reading, which is why it stays conservative rather than tuned.
+const INJECT_MAX = 4000;      // well under the 10k cap, leaving room for the frame
 // TWO CLIPS, because two kinds of note are not the same thing.
 // A note ADDRESSED TO YOU is your WORK — the packet IS the deliverable, and a clipped packet makes
 // you do the wrong job with no idea you were shorted. Caught live: `code` sent research a 1400-char
