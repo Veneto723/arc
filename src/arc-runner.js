@@ -1425,6 +1425,15 @@ async function main() {
     process.stdout.write(String(r.message).replace(/arc:role/g, 'arc role').replace(/arc:note/g, 'arc note') + '\n');
     process.exit(r.ok ? 0 : 1);
   }
+  // `arc close <role>` — end a peer YOU spawned. The counterpart to `delegate`, and it exists
+  // because hand-rolling it is a trap: the claim pid is the arc-runner, in the MIDDLE of
+  // pwsh -> node -> claude. Kill claude and the runner respawns it; kill the runner and claude is
+  // orphaned. A harness that killed the claim pid leaked sixteen consoles learning that.
+  if (userArgs[0] === 'close') {
+    const r = require('./arc-invite').requestClose(process.env.ARC_SESSION || '', userArgs.slice(1).join(' '), process.cwd());
+    process.stdout.write(String(r.message) + '\n');
+    process.exit(r.ok ? 0 : 1);
+  }
   if (userArgs[0] === 'role' || userArgs[0] === 'note' || userArgs[0] === 'notes') {
     const board = require('./arc-notes');
     const session = process.env.ARC_SESSION || '';

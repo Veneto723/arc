@@ -598,6 +598,14 @@ function staffRole(session, role, opts) {
     return { ok: false, message: `could not open the new tab (${why}) — no peer was started.` };
   }
 
+  // RECORD WHO MADE IT, at the only moment anyone knows. A newborn cannot report its own parent —
+  // it is a fresh conversation holding a birth prompt — so if the spawner does not write this down
+  // here, nothing ever can, and the peer becomes unreapable: indistinguishable from a standing
+  // team member, cleanable only by a human who recognises the name. That was five leaks in one day.
+  // Written even for an UNVERIFIED spawn: if a peer did boot from a timed-out launch, it is exactly
+  // the one nobody is coming to look for.
+  R.recordBirth(board, role, from || (o.sessionConv || N.sessionConv)(session));
+
   // SAY THAT WE DID NOT SEE IT LAND. An unverified spawn must not wear the same ✓ as a verified
   // one — that is how a lie gets believed twice.
   const unsure = timedOut
@@ -703,4 +711,52 @@ function requestDelegate(session, arg, cwd, opts) {
              : `\n  ${role} is live: its listener will wake it within seconds.`) };
 }
 
-module.exports = { staffRole, requestDelegate, buildLaunch, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, spawnQuiet, spawnWindow };
+// ---- arc close <role> — the counterpart to delegate -------------------------------------------
+// SPAWNING WITHOUT CLOSING IS A LEAK, and arc had no verb for the other half. Every peer opened
+// today outlived its usefulness until a human named it: three test peers, sixteen orphan consoles,
+// one ghost holding a chair after its caller was told it never started. "Close them when they are
+// done" is not a human's job — it is the job of whoever opened them, and they need a verb.
+//
+// YOU MAY ONLY CLOSE WHAT YOU SPAWNED. Not tidiness — a board is shared, and `arc close research`
+// from a stranger would end a session someone else is mid-conversation with, silently, with its
+// context still on disk but its human staring at a dead tab. Parentage is checked against the
+// CONVERSATION, so your own respawn does not lock you out of your own peers.
+function requestClose(session, arg, cwd, opts) {
+  const o = opts || {};
+  if (!session) return { ok: false, message: 'NOT under the arc wrapper (launch with `arc`).' };
+  const board = R.resolveBoard(N.resolveCwd(session, cwd));
+  const role = String(arg || '').trim().split(/\s+/)[0].toLowerCase();
+  if (!role) return { ok: false, message: 'usage: arc close <role>   — ends a peer YOU spawned.' };
+  const me = N.getRole(session, board);
+  const myConv = (o.sessionConv || N.sessionConv)(session);
+
+  const born = R.readBirth(board, role);
+  if (!born) {
+    return { ok: false, message:
+      `arc has no record of spawning "${role}" from this board, so it will not close it.\n` +
+      `  Only the session that OPENED a peer may close it — a board is shared, and ending someone\n` +
+      `  else's peer mid-conversation is not yours to do. If it is genuinely an orphan, its own\n` +
+      `  spawner is gone and arc will reap it; if you are sure, close its window by hand.` };
+  }
+  if (born.bornOf && myConv && born.bornOf !== myConv) {
+    return { ok: false, message:
+      `"${role}" was not spawned by you — another session opened it, and it is theirs to close.\n` +
+      `  Leave it a note instead:  arc note ${role} "<text>"` };
+  }
+  if (role === me) return { ok: false, message: `"${role}" is YOU. Closing yourself is /exit, not arc close.` };
+
+  // OWED WORK IS A REASON TO STOP, NOT A REASON TO REFUSE — say it, then do as asked. The agent
+  // may know the answer no longer matters; arc does not. But a silent kill of a peer mid-answer
+  // would lose work nobody knew was in flight.
+  const owed = R.openRequests(board, role).filter((n) => n.to === role);
+  const r = (o.close || R.closePeer)(board, role, o);
+  const what = r.killed.length ? r.killed.map((k) => `${k.what} (${k.pid})`).join(', ') : 'nothing running';
+  return { ok: true, role, killed: r.killed, message:
+    `✓ closed "${role}" — killed ${what}; its chair is free.\n` +
+    (owed.length ? `  ⚠ it still owed ${owed.length} unanswered request(s) (#${owed.map((n) => n.seq).join(', #')}).\n`
+                 + `    Those are now unanswerable. If the answer mattered, revive it: arc delegate ${role} "<packet>"\n`
+                 + `    — its conversation is still on disk, so it comes back knowing everything it learned.\n` : '') +
+    `  Its transcript is untouched: a closed peer is REVIVABLE, not deleted.` };
+}
+
+module.exports = { staffRole, requestDelegate, requestClose, buildLaunch, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, spawnQuiet, spawnWindow };

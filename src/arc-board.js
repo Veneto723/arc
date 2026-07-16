@@ -506,10 +506,100 @@ function liveRoles(board) {
   return claims.filter((l) => isHolder(l, starts));
 }
 
+// ---- PARENTAGE: who spawned this peer -------------------------------------------------------
+// arc knew a peer EXISTED and never knew who MADE it, so nothing could ever reap one: a leaked
+// probe was indistinguishable from a standing team member. Every cleanup was a human recognising
+// a name they had watched an agent type. In one session that cost five leaks — three test peers a
+// human had to name, sixteen orphan consoles from a harness whose kill hit the wrong process, and
+// a peer that survived a spawn its own caller was told had failed.
+//
+// The record is written by the SPAWNER at birth, not by the peer: a newborn cannot know who made
+// it (it is a fresh conversation with a birth prompt), and asking it to self-report parentage
+// would be trusting the thing being tracked. `bornOf` is the spawner's CONVERSATION, never its
+// session id or pid — those are handles that change on a respawn, and this repo has now been
+// bitten three separate times by treating one as an identity (a recycled pid squatting a chair; a
+// peer wearing its caller's session; a session refused its own role after a restart).
+const birthPath = (board, role) => path.join(board.planDir, `born-${role}.json`);
+function recordBirth(board, role, bornOf) {
+  if (!bornOf) return null;   // a caller with no conversation to name: cold birth, unparented
+  try { atomicWriteJson(birthPath(board, role), { role, bornOf, at: Date.now() }); return { role, bornOf }; }
+  catch { return null; }      // parentage is bookkeeping — it must never break a spawn
+}
+function readBirth(board, role) {
+  try { return JSON.parse(fs.readFileSync(birthPath(board, role), 'utf8')); } catch { return null; }
+}
+function clearBirth(board, role) {
+  try { fs.unlinkSync(birthPath(board, role)); } catch {}
+}
+// Every role THIS conversation spawned, live or not. Keyed by conv so it survives your own respawn.
+function spawnsOf(board, conv) {
+  if (!conv) return [];
+  const out = [];
+  try {
+    for (const f of fs.readdirSync(board.planDir)) {
+      const m = /^born-(.+)\.json$/.exec(f);
+      if (!m) continue;
+      const b = readBirth(board, m[1]);
+      if (b && b.bornOf === conv) out.push(b);
+    }
+  } catch {}
+  return out;
+}
+
 function releaseRole(board, role, pid) {
   for (const p of [claimPath(board, role), legacyClaimPath(board, role)]) {
     try { if (JSON.parse(fs.readFileSync(p, 'utf8')).pid === pid) fs.unlinkSync(p); } catch {}
   }
+}
+
+// ---- CLOSING A PEER: kill the TREE, in the only order that works ----------------------------
+// THE CLAIM PID IS THE MIDDLE OF THE TREE, and that is the whole trap:
+//     pwsh (the shell that outlives claude)  ->  node arc-runner  <-- THE CLAIM PID  ->  claude.exe
+// Kill claude and arc-runner's `for(;;)` RESPAWNS IT — which is exactly why a harness's kill left
+// sixteen orphan consoles alive, and why my own probe pids kept changing under me while I killed
+// the same peer four times. Kill only the runner and claude is orphaned but still burning quota.
+// So: RUNNER FIRST (it can no longer respawn), then claude, then the parent shell.
+//
+// Best-effort by design: a peer that is already half-dead must still end up fully dead and the
+// claim must still be released. A close that refuses because one pid was already gone would leave
+// exactly the mess it exists to clear.
+function closePeer(board, role, opts) {
+  const o = opts || {};
+  const claim = roleClaim(board, role);
+  const kill = o.kill || ((pid) => { try { process.kill(pid, 'SIGKILL'); return true; } catch { return false; } });
+  const tree = o.tree || treeOf;
+  const killed = [];
+  if (claim && claim.pid) {
+    const t = tree(claim.pid);                       // { parent, children }
+    // ORDER IS LOAD-BEARING — see above.
+    if (kill(claim.pid)) killed.push({ pid: claim.pid, what: 'runner' });
+    for (const c of t.children) if (kill(c)) killed.push({ pid: c, what: 'claude' });
+    if (t.parent && kill(t.parent)) killed.push({ pid: t.parent, what: 'shell' });
+  }
+  // The claim goes regardless: a chair held by a corpse is worse than an empty one — nothing may
+  // staff it, and `arc delegate` will keep refusing with "already held by a LIVE session".
+  try { fs.unlinkSync(claimPath(board, role)); } catch {}
+  clearBirth(board, role);
+  return { role, killed, hadClaim: !!claim };
+}
+
+// The pids around a runner: its parent shell and its claude child. Windows-only (WMI), and it must
+// never throw — a close that dies on a query leaves the tree alive.
+function treeOf(pid) {
+  const out = { parent: null, children: [] };
+  try {
+    const q = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if($p){ "P:"+$p.ParentProcessId };` +
+      `Get-CimInstance Win32_Process -Filter "ParentProcessId=${pid}" | ForEach-Object { "C:"+$_.ProcessId }`],
+      { encoding: 'utf8', timeout: 8000 });
+    for (const line of String(q.stdout || '').split(/\r?\n/)) {
+      const m = /^([PC]):(\d+)$/.exec(line.trim());
+      if (!m) continue;
+      if (m[1] === 'P') out.parent = parseInt(m[2], 10);
+      else out.children.push(parseInt(m[2], 10));
+    }
+  } catch {}
+  return out;
 }
 
 module.exports = {
@@ -520,4 +610,5 @@ module.exports = {
   readCursor, writeCursor, unreadFor, markRead,
   isAlive, isHolder, procStarts, roleClaim, claimRole, releaseRole, liveRoles, vacantClaimForRole,
   atomicWriteJson, withLock, vacantClaimForConv,
+  recordBirth, readBirth, clearBirth, spawnsOf, closePeer, treeOf,
 };

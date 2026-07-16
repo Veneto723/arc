@@ -131,6 +131,52 @@ function run(raw) {
     return 'request';
   }
 
+  // 2b. YOU OPENED PEERS AND LEFT THEM RUNNING. Spawning without closing is a leak, and until now
+  //     arc had no way to notice: a claim recorded that a peer EXISTED, never who MADE it, so a
+  //     forgotten probe was indistinguishable from a standing team member and only a human
+  //     recognising a name ever cleaned one up. That cost five leaks in a single session — three
+  //     test peers named by hand, sixteen orphan consoles from a harness that killed the wrong
+  //     pid, and a ghost holding a chair after its caller was told it never started.
+  //
+  //     THIS IS THE FIX, and the auto-reaper is only the safety net: every one of those leaks had
+  //     a LIVE spawner that simply did not tidy up. No orphan rule catches that — the parent is
+  //     right there. Only the parent can know the work is done, and this is the one moment it is
+  //     both about to forget and still able to act.
+  //
+  //     NAG, NEVER KILL. A peer with an armed listener is idle BY DESIGN — that is a standing team
+  //     member waiting for work, and silently reaping it would make `arc delegate` a trap where
+  //     your team evaporates between turns. So: name them, offer the verb, and let the agent
+  //     decide. Only ones that OWE NOTHING are mentioned; a peer mid-answer is working.
+  try {
+    const R = require('./arc-board');
+    const N = require('./arc-notes');
+    const board = R.resolveBoard(N.resolveCwd(session, null));
+    const myConv = N.sessionConv(session);
+    const mine = R.spawnsOf(board, myConv);
+    if (mine.length) {
+      const live = R.liveRoles(board);
+      // Idle = live, and owes me nothing. Anything still holding an unanswered request is working.
+      const idle = mine.filter((b) => live.some((l) => l.role === b.role)
+        && !R.openRequests(board, b.role).some((n) => n.to === b.role));
+      if (idle.length) {
+        const list = idle.map((b) => `  arc close ${b.role}`).join('\n');
+        out({
+          decision: 'block',
+          reason: `[arc] You spawned ${idle.length} peer(s) that are still running and owe you nothing:\n`
+            + `${idle.map((b) => `  "${b.role}"`).join(', ')}\n\n`
+            + `Each holds a chair nobody else can staff and burns its own quota while it idles. `
+            + `Closing what you opened is YOUR job, not your human's — they should never have to `
+            + `notice a peer you forgot.\n${list}\n\n`
+            + `A closed peer is REVIVABLE, not deleted: its conversation stays on disk, so `
+            + `\`arc delegate <role>\` brings it back knowing everything it learned. If one is a `
+            + `standing teammate you want waiting for work, say so and leave it — you will not be `
+            + `asked about these again this turn.`,
+        });
+        return 'spawns';
+      }
+    }
+  } catch { /* bookkeeping must never block a turn */ }
+
   // 3. Nothing pending — but you HOLD A ROLE, so a peer can address you at any time, and you
   //    are about to become unreachable. Both automatic delivery points need a TURN: the
   //    UserPromptSubmit injection needs a human prompt, and this hook needs a turn to end.

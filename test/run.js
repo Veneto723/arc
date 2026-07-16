@@ -1623,6 +1623,72 @@ try {
   ok('...and a non-request note is told it keeps for whoever claims the role next',
     /It keeps:/.test(info.message));
 
+  // ---- parentage + arc close: spawning without closing is a leak --------------------------
+  // arc knew a peer EXISTED and never who MADE it, so nothing could reap one — a leaked probe was
+  // indistinguishable from a standing team member. Five leaks in one session: three test peers a
+  // human had to name, sixteen orphan consoles from a harness that killed the wrong pid, and a
+  // ghost holding a chair after its caller was told it never started.
+  const CI = require(path.join(SRC, 'arc-invite.js'));
+  {
+    const BRD = RM7.resolveBoard(drepo);
+    RM7.recordBirth(BRD, 'kid', 'dc');            // VS's conv — I spawned it
+    RM7.recordBirth(BRD, 'stranger', 'someone-elses-conv');
+    ok('a birth records WHO spawned the peer (the newborn cannot know its own parent)',
+      RM7.readBirth(BRD, 'kid').bornOf === 'dc');
+    ok('...and spawnsOf lists only MINE, keyed by conversation so my own respawn keeps them',
+      RM7.spawnsOf(BRD, 'dc').map((b) => b.role).join() === 'kid');
+
+    // THE ORDER IS THE WHOLE BUG. claim pid = arc-runner, the MIDDLE of pwsh -> node -> claude.
+    // Kill claude and the runner's for(;;) RESPAWNS it (that is why a harness leaked 16 consoles
+    // and why my own probe pids kept changing while I killed the same peer four times).
+    // A REAL pid, because closePeer reads roleClaim — which returns a claim ONLY when its holder is
+    // GENUINE (alive, and started before the claim was written). That inherited guard is why close
+    // cannot murder a RECYCLED pid: Windows reuses numbers, so a dead peer's pid may belong to some
+    // innocent process by now, and "kill whatever the claim says" would end it. Nothing is really
+    // killed here — the kill is injected; only the ORDER is under test.
+    RM7.claimRole(BRD, 'kid', process.pid, 'kid-sess', 'kid-conv');
+    const order = [];
+    const closed = RM7.closePeer(BRD, 'kid', {
+      tree: () => ({ parent: 1111, children: [9999] }),
+      kill: (pid) => { order.push(pid); return true; },
+    });
+    ok('arc close kills the RUNNER FIRST — else the runner respawns the claude you just killed',
+      order[0] === process.pid);
+    ok('...then claude, then the parent shell — the whole tree, not the one pid the claim names',
+      order.join(',') === `${process.pid},9999,1111`);
+    ok('...and frees the chair: a claim held by a corpse blocks staffing forever',
+      !RM7.roleClaim(BRD, 'kid') && !RM7.readBirth(BRD, 'kid'));
+    ok('...reporting what it actually killed, by role in the tree',
+      closed.killed.map((k) => k.what).join() === 'runner,claude,shell');
+
+    // A DEAD PEER'S PID MAY BELONG TO A STRANGER BY NOW. Windows recycles pids, and this repo has
+    // already been bitten by treating one as an identity (d7fae3a: a stranger squatting a closed
+    // peer's chair). close inherits roleClaim's genuine-holder check, so it kills NOTHING when the
+    // claim points at a pid it cannot prove is the peer — and still frees the chair, which is the
+    // part that matters. A claim held by a corpse blocks staffing forever.
+    RM7.claimRole(BRD, 'ghost', 999999, 'ghost-sess', 'ghost-conv');   // not a running process
+    let touched = 0;
+    const g = RM7.closePeer(BRD, 'ghost', { tree: () => ({ parent: 5, children: [6] }), kill: () => { touched++; return true; } });
+    ok('close kills NOTHING when the claim names an unprovable pid (it may be a stranger now)',
+      touched === 0 && g.killed.length === 0);
+    ok('...but STILL frees the chair — a claim held by a corpse blocks staffing forever',
+      !RM7.roleClaim(BRD, 'ghost') && !fs.existsSync(path.join(BRD.planDir, 'claim-ghost.json')));
+  }
+  // YOU MAY ONLY CLOSE WHAT YOU SPAWNED — a board is shared, and ending someone else's peer
+  // mid-conversation is not yours to do. Checked by CONVERSATION, not session id: a respawn must
+  // not lock you out of your own peers (the same trap that made arc blame a caller as a rival).
+  {
+    const noRec = CI.requestClose(AS, 'neverborn', drepo);
+    ok('close refuses a peer arc has no record of spawning', noRec.ok === false && /no record of spawning/.test(noRec.message));
+    const theirs = CI.requestClose(AS, 'stranger', drepo);
+    ok('...and refuses SOMEONE ELSE\'S peer — theirs to close, not yours',
+      theirs.ok === false && /not spawned by you/.test(theirs.message));
+    RM7.recordBirth(RM7.resolveBoard(drepo), 'mine', 'dc');
+    const mine = CI.requestClose(AS, 'mine', drepo, { close: () => ({ role: 'mine', killed: [{ pid: 1, what: 'runner' }], hadClaim: true }) });
+    ok('...but closes YOUR OWN, and says a closed peer is REVIVABLE, not deleted',
+      mine.ok === true && /REVIVABLE, not deleted/.test(mine.message));
+  }
+
   // ---- quiet spawn: the only launch that cannot take the foreground -----------------------
   // A stolen foreground is not a papercut during a MEASUREMENT: the human's Ctrl+C lands in a
   // worker, which voids a trial, and voids whose cause tracks human activity are not random —
