@@ -1623,6 +1623,48 @@ try {
   ok('...and a non-request note is told it keeps for whoever claims the role next',
     /It keeps:/.test(info.message));
 
+  // ---- --board: the ONE hole in the filesystem isolation ----------------------------------
+  // Built for an observed pain, not a hypothetical: a session dogfooding arc in ANOTHER repo
+  // learns things about arc that belong on arc's board, and the only channel was a human
+  // copy-pasting between two windows a few times a week. Every assertion below guards a
+  // restriction, because the restrictions are the design — the flag itself is three lines.
+  const xrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'xboard-'));
+  fs.mkdirSync(path.join(xrepo, '.git'), { recursive: true });
+  const XB = RM7.resolveBoard(xrepo);
+
+  const cross = F8.requestNote(AS, `code --board ${xrepo} "your stop hook fires twice"`, drepo);
+  ok('a note CROSSES to another repo\'s board when --board names it', cross.ok === true);
+  ok('...and lands THERE, not here',
+    RM7.allNotes(XB).some((n) => /fires twice/.test(n.body))
+    && !RM7.allNotes(RM7.resolveBoard(drepo)).some((n) => /fires twice/.test(n.body)));
+  // A stranger's `code` MUST NOT be indistinguishable from the reader's OWN `code`. Same class of
+  // bug as a recycled pid wearing a peer's name — this file learned that one the hard way.
+  ok('...QUALIFIED as <board>/<role>, so a stranger cannot wear the reader\'s own role name',
+    RM7.allNotes(XB).some((n) => n.from === `${path.basename(RM7.resolveBoard(drepo).root)}/android`));
+  ok('...and the confirmation names the board it ACTUALLY landed on, and says one-way',
+    new RegExp(`on the "${XB.name}" board`).test(cross.message) && /CROSS-BOARD/.test(cross.message));
+
+  // THE RESTRICTIONS. A cross-board request would owe an answer that has no channel home — the
+  // unanswerable-request bug, except the sender cannot even retract it from over there.
+  const xreq = F8.requestNote(AS, `code --board ${xrepo} --kind request "can you check X?"`, drepo);
+  ok('a cross-board REQUEST is refused (they could never deliver the answer)',
+    xreq.ok === false && /cannot be --kind request/.test(xreq.message));
+  // A seq is a LINE NUMBER in one ledger: #1 names a different note on each side.
+  const xrep = F8.requestNote(AS, `code --board ${xrepo} --reply-to 1 "re: that"`, drepo);
+  ok('...and --reply-to/--supersedes are refused (a seq means a different note on each board)',
+    xrep.ok === false && /do not cross boards/.test(xrep.message));
+  const xself = F8.requestNote(AS, `research --board ${drepo} "pointless"`, drepo);
+  ok('...and --board at your OWN board is refused rather than silently posting locally',
+    xself.ok === false && /points at THIS board/.test(xself.message));
+  const nonrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'xnorepo-'));
+  const xbad = F8.requestNote(AS, `code --board ${nonrepo} "nowhere"`, drepo);
+  ok('...and a target that is not a git repo has no board to post to',
+    xbad.ok === false && /not a git repository/.test(xbad.message));
+  // The offer to `arc delegate` is not actionable across a boundary — do not print advice the
+  // reader cannot follow on a board that is not theirs to staff.
+  ok('...an empty chair THERE says the note keeps, and does NOT offer to staff their board',
+    /NOBODY HOLDS "code" on/.test(cross.message) && !/arc delegate code/.test(cross.message));
+
   // A live target must stay silent — the warning has to be rare or it is noise.
   const BS = 'duty-live-' + process.pid;
   fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${BS}.json`),

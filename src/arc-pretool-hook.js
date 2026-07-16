@@ -51,6 +51,11 @@
 // closed or unknown one spawns a session. One verb, two costs, and the gate must tell them apart
 // or it would prompt on every note (noise) or on none (a session spawned unasked).
 const RX_DELEGATE = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+delegate\s+([a-z][a-z0-9_-]*)/i;
+// A note carrying --board leaves THIS repo and lands on another one's ledger. That is the only
+// way anything crosses the filesystem isolation a board is built on, so it is the only arc command
+// that asks in EVERY stance — including active. The dial governs how much an agent may do on ITS
+// OWN board; it was never a mandate to speak on someone else's.
+const RX_CROSS_BOARD = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+note\s+[^\n]*--board[=\s]+(\S+)/i;
 
 const MAX_PEERS_AUTO = 3;   // beyond this, even ACTIVE asks first
 
@@ -73,6 +78,21 @@ function run(raw) {
   const tool = String(hook.tool_name || '');
   if (!/^(Bash|PowerShell)$/i.test(tool)) return null;            // not a shell call — defer
   const cmd = String((hook.tool_input && hook.tool_input.command) || '');
+
+  // CROSS-BOARD FIRST, and unconditionally. Checked before the stance dial is even read: posting
+  // onto another repo's board is not a thing a stance can pre-authorise, because the person who
+  // owns that board is not necessarily the person who set this one's dial. Cheap, no board reads.
+  const xb = cmd.match(RX_CROSS_BOARD);
+  if (xb) {
+    out('ask',
+      `[arc] cross-board note → ${xb[1]}`,
+      'arc: this note LEAVES this repo and lands on another board\'s ledger — the one thing that\n'
+      + `  crosses the filesystem isolation peers are built on. Target: ${xb[1]}\n`
+      + '  It arrives as an ANNOUNCEMENT from "<this board>/<your role>", one-way: they cannot\n'
+      + '  reply to you there. Approve only if that board\'s people want to hear this.');
+    return 'ask-cross-board';
+  }
+
   const m = cmd.match(RX_DELEGATE);
   if (!m) return null;                                            // not a delegate — defer, silently
 

@@ -289,8 +289,9 @@ function requestNote(session, arg, cwd, opts) {
   // OPTIONAL structure. A bare `arc note all "build is broken"` must stay exactly as cheap as
   // it always was — these only matter when the note is a request, an answer, or a retraction.
   let rest = m[2];
-  let kind = null, replyTo, supersedes, mm;
+  let kind = null, replyTo, supersedes, boardArg, mm;
   for (;;) {
+    if ((mm = rest.match(/^--board[=\s]+(\S+)\s*/i))) { boardArg = mm[1]; rest = rest.slice(mm[0].length); continue; }
     if ((mm = rest.match(/^--kind[=\s]+(\S+)\s*/i))) { kind = mm[1].toLowerCase(); rest = rest.slice(mm[0].length); continue; }
     if ((mm = rest.match(/^--reply-to[=\s]+#?(\d+)\s*/i))) { replyTo = parseInt(mm[1], 10); rest = rest.slice(mm[0].length); continue; }
     if ((mm = rest.match(/^--supersedes[=\s]+#?(\d+)\s*/i))) { supersedes = parseInt(mm[1], 10); rest = rest.slice(mm[0].length); continue; }
@@ -301,15 +302,61 @@ function requestNote(session, arg, cwd, opts) {
   if (kind && !R.KINDS.includes(kind)) {
     return { ok: false, message: `unknown --kind "${kind}" — one of: ${R.KINDS.join(' · ')}` };
   }
+
+  // ---- --board: THE TUNNEL, and it is deliberately one-way ---------------------------------
+  // A board is a repo, and that isolation is the design: the FILESYSTEM decides who is a peer,
+  // not a config field. This is the ONE hole in it, and it exists for a real, observed reason —
+  // a session dogfooding arc in ANOTHER repo learns things about arc that belong on arc's board,
+  // and the only channel today is a human copy-pasting between two windows, a few times a week.
+  //
+  // WHY IT IS ONLY AN ANNOUNCEMENT. A cross-board `request` would create a debt the receiver has
+  // no channel to pay: their reply lands on THEIR board, which the asker never reads. That is
+  // exactly the unanswerable-request bug this file already had (a retracted request stayed owed
+  // forever) — and a cross-board one cannot even be retracted by the sender. `--reply-to` and
+  // `--supersedes` are worse: a seq is a LINE NUMBER in one board's ledger, so #55 names a
+  // different note on each side. Threading across boards is not a flag, it is another data model.
+  // So: one-way, info only. If a real conversation is needed, that is what the human is for.
+  //
+  // The sender is QUALIFIED (`whalephone/code`). Unqualified, a stranger's `code` would be
+  // indistinguishable from the reader's OWN `code` — a peer wearing your name is the same class
+  // of bug as a pid being reused, and this file learned that one the hard way.
+  let target = board, crossFrom = null;
+  if (boardArg) {
+    const wanted = path.resolve(String(boardArg).replace(/^["']|["']$/g, ''));
+    if (!fs.existsSync(wanted)) return { ok: false, message: `--board "${wanted}" does not exist.` };
+    const tb = R.resolveBoard(wanted);
+    if (tb.root === board.root) {
+      return { ok: false, message: `--board points at THIS board ("${board.name}") — drop the flag and post normally.` };
+    }
+    if (!fs.existsSync(path.join(tb.root, '.git'))) {
+      return { ok: false, message: `"${tb.root}" is not a git repository, so there is no board there to post to.` };
+    }
+    if (kind && kind !== 'info') {
+      return { ok: false, message:
+        `a cross-board note cannot be --kind ${kind} — only an announcement.\n` +
+        `  "${tb.name}" would owe you an answer it has no way to deliver: its reply lands on ITS\n` +
+        `  board, which you never read. Say it as info, or ask your human to carry the question.` };
+    }
+    if (replyTo !== undefined || supersedes !== undefined) {
+      return { ok: false, message:
+        `--reply-to/--supersedes do not cross boards: a seq is a line number in ONE ledger, so\n` +
+        `  #${replyTo || supersedes} names a different note on "${tb.name}" than it does here. Post it as a fresh note.` };
+    }
+    target = R.ensureBoard(tb);
+    crossFrom = `${board.name}/${me}`;
+  }
   // A dangling reference would be a lie: better to refuse than to point at nothing.
-  const latest = R.latestSeq(board);
+  const latest = R.latestSeq(target);
   for (const [flag, v] of [['--reply-to', replyTo], ['--supersedes', supersedes]]) {
     if (v !== undefined && (v < 1 || v > latest)) return { ok: false, message: `${flag} #${v} does not exist (the board has ${latest} note(s)).` };
   }
-  if (to && to === me) return { ok: false, message: `you are "${me}" — a note to yourself would never be read (you never see your own notes).` };
+  // Only on YOUR OWN board is "to === me" a self-note. Across boards, "arc/code" and
+  // "whalephone/code" are two different sessions that merely share a role NAME — which is the
+  // whole reason the sender is qualified.
+  if (!crossFrom && to && to === me) return { ok: false, message: `you are "${me}" — a note to yourself would never be read (you never see your own notes).` };
 
-  const note = R.appendNote(board, { from: me, to, body, kind, replyTo, supersedes });
-  const seq = R.latestSeq(board);
+  const note = R.appendNote(target, { from: crossFrom || me, to, body, kind: crossFrom ? 'info' : kind, replyTo, supersedes });
+  const seq = R.latestSeq(target);
   const extra = [
     note.kind !== 'info' ? `kind: ${note.kind}` : '',
     note.replyTo ? `answers #${note.replyTo}` : '',
@@ -328,7 +375,14 @@ function requestNote(session, arg, cwd, opts) {
   // a real feature, not a leak, so refusing would destroy something useful. What was missing was
   // the truth, out loud, at the only moment it can be acted on.
   let chair = '';
-  if (to && !R.liveRoles(board).some((l) => l.role === to)) {
+  // ACROSS A BOARD, the empty-chair OFFER is not yours to take: `arc delegate` acts on YOUR board,
+  // so telling a whalephone peer to revive arc's `frontend` would be advice it cannot follow. Say
+  // the true half (nobody is there, the note keeps) and stop.
+  if (crossFrom && to && !R.liveRoles(target).some((l) => l.role === to)) {
+    chair = `\n  ⚠ NOBODY HOLDS "${to}" on "${target.name}" right now — the note waits in an empty chair.\n`
+      + `    It keeps: whoever claims "${to}" there next reads it in full. You cannot staff their\n`
+      + `    board from here, and should not try — that is their side's call.\n`;
+  } else if (!crossFrom && to && !R.liveRoles(board).some((l) => l.role === to)) {
     const duty = require('./arc-duty').readDuty(board, to);
     // AN EMPTY CHAIR IS NOT ONE STATE. A role that has WORKED here keeps its own conversation in
     // a vacant claim, so it can come back AS ITSELF — everything it learned, still there. That is
@@ -361,8 +415,13 @@ function requestNote(session, arg, cwd, opts) {
           + `    waiting on it — ${revivable ? `revive ${to} now (one command)` : 'staff it now'}, or do the work yourself/with a subagent.`
         : `    It keeps: whoever claims "${to}" next reads it in full.`);
   }
+  // Name the board it ACTUALLY landed on. Reporting the sender's own board for a cross-board post
+  // would be the same class of lie as the staffing message that promised "starts FRESH" a commit
+  // after birth began forking: a confirmation that describes something other than what happened.
   return { ok: true, message:
-    `✓ note #${seq} posted for ${to || 'everyone'} (from "${me}", on the "${board.name}" board)\n` +
+    `✓ note #${seq} posted for ${to || 'everyone'} (from "${crossFrom || me}", on the "${target.name}" board)\n` +
+    (crossFrom ? `  ⇄ CROSS-BOARD: this left "${board.name}" and landed on "${target.name}". One-way — they\n`
+               + `    cannot reply to you here. Anything you need BACK goes through your human.\n` : '') +
     (extra ? `  ${extra}\n` : '') +
     `  "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"\n` +
     (chair ? chair : `  they'll see it when they next take a turn.`) };
@@ -372,9 +431,12 @@ const NOTE_USAGE =
   // NB the examples teach `--reply-to 8`, NOT `#8`: this usage ALSO surfaces on the terminal
   // path (arc note …), where `#` starts a comment in BOTH sh and PowerShell — the rest of the
   // line silently vanishes and a garbage note posts "successfully". The parser accepts both.
-  'usage: arc:note <role|all> [--kind <k>] [--reply-to N] [--supersedes N] <text>\n' +
+  'usage: arc:note <role|all> [--kind <k>] [--reply-to N] [--supersedes N] [--board <path>] <text>\n' +
   '  plain:    arc:note coding "P-014 spec changed"          (kind defaults to info)\n' +
   '  ask:      arc:note research --kind request "can you check X?"\n' +
+  '  another board: arc note code --board E:/arc "arc\'s stop hook fires twice when …"\n' +
+  '            ← one-way ANNOUNCEMENT to a DIFFERENT repo\'s board; asks your human first, arrives\n' +
+  '              as "<thisboard>/<yourrole>". No requests, no replies: they cannot answer you there.\n' +
   '  answer:   arc:note android --reply-to 8 "DONE — here is what I found"   (kind: result)\n' +
   '  retract:  arc:note android --supersedes 13 "CORRECTION — I was wrong because…"\n' +
   `  kinds: ${R.KINDS.join(' · ')}   (blocker + correction are auto-HIGH priority)\n` +
