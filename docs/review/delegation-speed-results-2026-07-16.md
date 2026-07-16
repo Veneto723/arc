@@ -79,6 +79,39 @@ Tests `code`'s follow-up hypothesis (board #94): route on cheap *location* (whic
 - **Amortization (code's marginal 28.2s/task at N=3):** directionally real as a wall-clock (warm N=1 133 → N=3 189.4, n=2) but its *attribution* to worker-side comprehension amortizing is **unverified** — the N=3 warm worker transcript (`bc99ddc4`) shows **no `arc delegate`/note-to-owner command**, only role/notes/join/orient; the 3 owners were pre-parked warm and received tasks by a path the worker transcript does not show. So 189.4 may reflect **3 pre-parked owners running in parallel** (owner-side), not one worker comprehending three tasks. The lever dies more cleanly on **axis 3 at N=1 (proven)** than on this N=3 arithmetic.
 - **H2 (owner re-orient ∝ packet digestion):** **underpowered and one point contradicts** — n=3 owner re-orients are 0 / 8 / 47.8s, and the *slow* 47.8s owner received the *most* digested packet (the 665-char `backoff.js` diagnosis). The fast 0/8s re-orients are consistent with digestion helping, but no correlation survives n=3 with a contrary outlier. Logged as not-supported, not as refuted.
 
+## THE ANSWER: where the 1.78× actually lives (2026-07-16, boards #113–#118, independently reproduced)
+
+The gap is **not** comprehension, **not** the peers-skill stall, **not** locate. Decomposing warm money (103.9s) against self money (50.6s) — a 53.3s gap:
+
+| half | cost | what it is |
+|---|---|---|
+| **router overhead** | **+28.5s** | the worker's phase to the hand-off (79.1s) exceeds the self-fixer's **entire job** (50.6s). The router **surveys** (`Get-ChildItem -Recurse src`) where the fixer **aims** (`Grep withTax`), reads deeper, and **authors a packet** (17s vs a 9s Edit). |
+| **hand-off** | **+24.8s** | owner wake 21.7s + report 3.1s — paid only by delegation. |
+
+**The wake splits half-and-half** (delegate→owner turn = arc; turn→first tool = model):
+
+| bug | ARC | MODEL | total |
+|---|---|---|---|
+| retry | **86.1s** | 6.8s | 92.9s |
+| money | 6.7s | 15.1s | 21.7s |
+| parse | 8.3s | 8.7s | 17.0s |
+| **median** | **8.3s** | **8.7s** | 17.0s |
+
+So ~9s is **irreducible model latency** and ~8s is **arc's, and fixable** — but the 92.9s outlier is **86.1s of arc**, 10× the median.
+
+**What each fix buys (pre-registered by `code` before building; arithmetic verified):**
+
+| fix | median ratio |
+|---|---|
+| nothing | 2.05× |
+| skill stall only | **2.04×** — moves 0.01× |
+| arc wake only | **1.92×** |
+| both arc fixes | **1.51×** — real, and *not* a collapse |
+
+**The real product of the study — arc's overhead is a FAT TAIL, not a big mean.** Skill stall 0.5→48.3s (**97×**); arc wake 6.7→86.1s (**13×**). Both medians are single-digit-to-low-teens; both tails are catastrophic. That is why delegation *feels* unreliable and why every average hid it. The build is therefore **variance work, not speed work**: a cost you can predict is budgetable; a 97× tail is not.
+
+**The floor.** Even with *perfect* arc (zero stall, zero arc wake), delegation still pays a router that must explore and read enough to route, plus ~9s of irreducible model wake. Median lands **1.51×** and never reaches parity — though the best case (parse) reaches **1.04×**, i.e. parity within noise, so the floor is a *slope*, not a wall. **Scope it honestly:** this holds for **N=1, on a task one agent can do, with a ~0–9s solve**. N>1 is unmeasured (ghost data); expensive-solve is untested. Those are the only unexplored escapes, and both are different claims.
+
 ## Verdict for arc
 
 - **Delegation loses for cheap tasks at every N tested.** Do not nudge a caller toward handing off small fixes — the ~60s boot/hand-off tax dominates and self-fix amortizes its own boot.
