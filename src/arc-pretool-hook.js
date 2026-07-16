@@ -21,12 +21,17 @@
 //   role EMPTY, balanced→ ASK    (the default) the permission prompt IS the confirmation.
 //   role EMPTY, active  → ALLOW  auto-approved: you asked for an agent that staffs its own peers.
 //
-// BALANCED'S "ASK" IS ONLY AS REAL AS THE PROMPT. Under Claude Code's auto-accept mode (⏵⏵), the
-// harness answers permission prompts for you, so `ask` is approved without a human ever seeing it
-// and balanced behaves exactly like active. Observed the first time a peer was staffed this way.
-// KNOWN AND ACCEPTED — the user runs auto mode deliberately and likes it; passive is then the
-// meaningful restraint. Do NOT "fix" this by escalating balanced to DENY: that would break the
-// default mode for everyone to re-create a confirmation the user has already opted out of.
+// BALANCED'S "ASK" IS ONLY AS REAL AS THE PROMPT — and since Claude Code 2.1.210 it is real
+// everywhere. Under older builds, auto-accept mode (⏵⏵) answered permission prompts itself, so
+// `ask` was approved without a human ever seeing it and balanced silently behaved like active
+// (observed the first time a peer was staffed that way; for a while that was documented here as
+// KNOWN AND ACCEPTED, with passive as the only real restraint). 2.1.210 changed the contract: a
+// hook's `ask` now FLOORS the decision at a prompt, auto mode or not. Live-fired on 2.1.211
+// (2026-07-16, the cross-board gate below): the prompt reached the human in auto mode. So every
+// `ask` in this file — balanced's confirmation, the runaway guard, the cross-board gate — now
+// actually reaches a person, and balanced is meaningfully distinct from active again. Still do
+// NOT escalate balanced to DENY: it was a bad idea when ask was broken (it would have re-created
+// a confirmation the user opted out of) and it is pointless now that ask works.
 //
 // RUNAWAY GUARD: even under ACTIVE it drops to ASK once several peers are live. Each is a session
 // burning its own quota, and "spawn a helper" is exactly the move that looks locally reasonable
