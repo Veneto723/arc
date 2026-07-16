@@ -1647,6 +1647,21 @@ try {
     !/\bwt -w 0\b/.test(qw(true)) && /\bwt -w 0\b/.test(qw(false)));
   ok('...and it is OFF by default — an invisible peer is an invisible failure',
     QI.spawnQuiet() === false && !/Start-Process/.test(qw(false)));
+
+  // ---- ARC_SPAWN_WINDOW: which wt window a peer's tab joins ------------------------------
+  // `-w 0` is NOT "the caller's window" — our own comment claimed that for months. wt documents it
+  // as the MOST RECENTLY USED window, so it follows the HUMAN: delegate while they type in another
+  // terminal and the peer lands in THEIRS. Confirmed live by the research peer (two tabs with a
+  // fixed name went to one separate window; the human's was untouched).
+  const winOf = (w) => QI.buildLaunch(true, 'v', null, 'w', 'E:/arc', 'pwsh', null, () => 'C:/T/p.txt', false, w);
+  ok('a peer tab joins the MRU window by default (-w 0) — right when a human IS the spawner',
+    /^wt -w 0 new-tab/.test(winOf('0')) && QI.spawnWindow() === '0');
+  ok('...and ARC_SPAWN_WINDOW pins every peer to ONE named window instead, off the human\'s',
+    /^wt -w arc-trials new-tab/.test(winOf('arc-trials')));
+  ok('...read from the env so a harness can ask and an interactive human never has to',
+    (() => { const prev = process.env.ARC_SPAWN_WINDOW; process.env.ARC_SPAWN_WINDOW = 'arc-trials';
+      const w = QI.spawnWindow(); if (prev === undefined) delete process.env.ARC_SPAWN_WINDOW; else process.env.ARC_SPAWN_WINDOW = prev;
+      return w === 'arc-trials'; })());
   ok('...opt-in via ARC_SPAWN_QUIET, so a harness can ask and a human never has to',
     (() => { const prev = process.env.ARC_SPAWN_QUIET; process.env.ARC_SPAWN_QUIET = '1';
       const on = QI.spawnQuiet(); if (prev === undefined) delete process.env.ARC_SPAWN_QUIET; else process.env.ARC_SPAWN_QUIET = prev;

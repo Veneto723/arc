@@ -319,7 +319,19 @@ const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // that posts a note and stops). So the tabs stay for people, and the harness turns them off.
 function spawnQuiet() { return /^(1|true|yes)$/i.test(String(process.env.ARC_SPAWN_QUIET || '').trim()); }
 
-function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, quiet) {
+// WHICH wt WINDOW a peer's tab joins. Default '0' — and '0' does NOT mean "the caller's window",
+// which is what our own comment claimed for months. wt documents it as the MOST RECENTLY USED
+// window, so it follows the HUMAN: delegate while they are typing in another terminal and the peer
+// lands in THEIR window. Confirmed live by the research peer — two tabs with a fixed name went to
+// one separate window and the human's was untouched.
+//
+// Kept as the default anyway, because for an INTERACTIVE delegate the MRU window usually IS the
+// human's and that is where they want to watch their peer appear. It is only wrong when nobody is
+// attached to the caller — a harness — and then the most-recent window is a stranger's.
+// ARC_SPAWN_WINDOW=<name> pins every peer to one named window instead. Any string wt accepts.
+function spawnWindow() { return String(process.env.ARC_SPAWN_WINDOW || '').trim() || '0'; }
+
+function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, quiet, win) {
   const acct = account ? ` --account ${account}` : '';
   const sh = shell || launchShell();
   const pre = shellPrefix(sh);
@@ -413,7 +425,7 @@ function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, qu
     // like every other tab: Claude Code sets the terminal title from the project folder, and an
     // application title escape overrides wt's --title. With two identical "arc" tabs you cannot
     // tell the caller from the peer it spawned — so the peer's tab is pinned to its ROLE.
-    return `wt -w 0 new-tab --title ${psQuote('arc: ' + role)} --suppressApplicationTitle -d ${psQuote(root)} ${pre} ${inner}`;
+    return `wt -w ${win || '0'} new-tab --title ${psQuote('arc: ' + role)} --suppressApplicationTitle -d ${psQuote(root)} ${pre} ${inner}`;
   }
   // QUIET: Start-Process -WindowStyle Minimized. A minimised window has no foreground to take, so
   // this is not a workaround for focus-steal — it is the absence of the thing that steals. wt has
@@ -468,6 +480,7 @@ function staffRole(session, role, opts) {
   // is no quiet wt to ask for. A quiet spawn is a minimised console instead of a tab — a real
   // trade (you lose the visible peer), taken only when something asks for it out loud.
   const quiet = o.quiet !== undefined ? o.quiet : spawnQuiet();
+  const win = o.win !== undefined ? o.win : spawnWindow();
   const wt = quiet ? false : (o.hasWt !== undefined ? o.hasWt : hasWt());
 
   // The board, the launch dir and the trusted folder ALL anchor to the session's own recorded
@@ -533,7 +546,7 @@ function staffRole(session, role, opts) {
   const from = revive ? null : (o.sessionConv || N.sessionConv)(session);
   // o.writeScript lets a test capture the birth prompt as DATA instead of grepping it out of a
   // command line — which is the whole point of the change: it is not on the command line any more.
-  const psCmd = buildLaunch(wt, account, conv, role, launchDir, o.shell, from, o.writeScript, quiet);
+  const psCmd = buildLaunch(wt, account, conv, role, launchDir, o.shell, from, o.writeScript, quiet, win);
   let r;
   try {
     r = doSpawn('powershell.exe', ['-NoProfile', '-Command', psCmd], { timeout: 5000, env: birthEnv() });
@@ -642,4 +655,4 @@ function requestDelegate(session, arg, cwd, opts) {
              : `\n  ${role} is live: its listener will wake it within seconds.`) };
 }
 
-module.exports = { staffRole, requestDelegate, buildLaunch, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, spawnQuiet };
+module.exports = { staffRole, requestDelegate, buildLaunch, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, spawnQuiet, spawnWindow };
