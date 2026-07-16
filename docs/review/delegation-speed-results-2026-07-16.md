@@ -2,9 +2,13 @@
 
 **Protocol:** [`delegation-speed-protocol-2026-07-16.md`](delegation-speed-protocol-2026-07-16.md) (+ Amendments 1–2). Harness: [`delegation-speed-harness/`](delegation-speed-harness/). Run: round 2, load-controlled, hidden spawn, 15 caller trials, **3 void/censored**. Round 1 was voided for a machine-load confound (Amendment 2); this is the clean pass on an audited clock.
 
-## Headline
+## ⚠ RETRACTION 2026-07-16 (board #99, verified by research #100): warm N=3 is GHOST DATA
 
-**Delegation does NOT finish faster — at N=1 *or* N=3 — and the gap widens with N.** `code`'s prediction holds, now on a clean clock. But the deeper finding is *why there is no crossover*, and it is a design fact neither pre-registration wrote down.
+**The N=3 warm-delegation numbers below (189.4s median, "2.6× slower", "curves diverge") are INVALID and retracted.** Verified from transcripts: **both N=3 warm workers issued NO delegation at all** (`WORKER_ROUTED=NO`; the N=1 workers all routed at real timestamps). The owner edits scored into those trials were not caused by this worker routing — they are a harness leak: warm owners **outlive a trial**, `reset --hard` wipes their edits, and the oracle (a **state** check — "tests pass" — not a **causal** one) stamps `t_done` when the files are green regardless of *who* fixed them or *when they started*. The self arm is immune (the agent dies with its trial), so only the deleg arm rotted. **What is retracted:** warm N=3 = 189.4s, the ~2.6× at N=3, and "the curves diverge." **Delegation at N>1 is UNMEASURED, not measured-and-slow.** **What SURVIVES (clean):** warm N=1 133.0s vs self N=1 74.6s → **1.78× at N=1 stands**; self-flat (one agent, 3 bugs at N=1 cost, 74.6→73.7) stands on verified edits; the axis-3 / re-profile findings are N=1-based and stand. **Harness fix owed before any N=3 re-run:** causal attribution — count only an edit whose author *started after* `t_start` (the same `procStart < claim.at` genuineness test arc already uses for chairs).
+
+## Headline (as originally written — N=3 clauses now retracted, see banner above)
+
+**Delegation does NOT finish faster at N=1** (1.78×, clean). ~~and the gap widens with N~~ — retracted; N>1 unmeasured. The deeper finding — *why* a lone agent is hard to beat — survives via the self arm, not the warm arm.
 
 ## Tallies (verified wall-clock, seconds; delegated = worker made 0 edits & an owner did)
 
@@ -14,11 +18,11 @@
 | **warm delegate** (live ● owner) | 250.2 / 103.9 / 133.0 | **133.0** | 161.6 / 217.2 / (void) | **~190** |
 | **cold delegate** (closed ○ owner) | *censored* / 84.5 / *censored* | — | not run | — |
 
-Delegation is **~1.8× slower at N=1** (133 vs 74.6 median) and **~2.6× slower at N=3** (190 vs 73.7). No crossover in range; the curves *diverge*.
+Delegation is **~1.8× slower at N=1** (133 vs 74.6 median). ~~and **~2.6× slower at N=3** (190 vs 73.7); the curves *diverge*~~ — **RETRACTED (ghost data, see banner): warm N=3 measured no worker delegation. N>1 is unmeasured.**
 
 ## The real finding: self-fix doesn't scale with N, so there is nothing for parallelism to beat
 
-**Self-fix N=3 (~74s) ≈ self-fix N=1 (~67s).** One worker fixing *three* seeded bugs took about the same wall-clock as fixing *one*. Because these fixes are cheap (~7s of edit each) and **boot+orientation dominates (~57s)**, a single agent amortizes its *one* boot across all N tasks. Delegation, by contrast, pays a wake/hand-off cost **per owner**, so it *grows* with N. The crossover the study set out to find **exists only when per-task WORK is large relative to boot/hand-off** — i.e. for *expensive* tasks. For quick fixes it does not exist: a lone agent's single amortized boot always wins.
+**Self-fix N=3 (~74s) ≈ self-fix N=1 (~67s).** One worker fixing *three* seeded bugs took about the same wall-clock as fixing *one*. Because these fixes are cheap (~7s of edit each) and **boot+orientation dominates (~57s)**, a single agent amortizes its *one* boot across all N tasks. Delegation, by contrast, pays a wake/hand-off cost **per owner**, so it *grows* with N. ~~[the N=3 measurement of this is ghost data — RETRACTED; the "grows with N" claim is now a prediction, not a result]~~ The crossover the study set out to find **exists only when per-task WORK is large relative to boot/hand-off** — i.e. for *expensive* tasks. For quick fixes it does not exist: a lone agent's single amortized boot always wins.
 
 **Design consequence for arc:** "delegate above N independent tasks" is the wrong rule. The rule is **"delegate when each task's work dwarfs the ~60s boot+hand-off, regardless of N."** Ownership-nudging a caller toward delegation on a batch of small fixes makes the work *slower*.
 
