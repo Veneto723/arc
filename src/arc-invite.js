@@ -735,8 +735,10 @@ function requestClose(session, arg, cwd, opts) {
     return { ok: false, message:
       `arc has no record of spawning "${role}" from this board, so it will not close it.\n` +
       `  Only the session that OPENED a peer may close it — a board is shared, and ending someone\n` +
-      `  else's peer mid-conversation is not yours to do. If it is genuinely an orphan, its own\n` +
-      `  spawner is gone and arc will reap it; if you are sure, close its window by hand.` };
+      `  else's peer mid-conversation is not yours to do. Nothing reaps automatically: arc cannot\n` +
+      `  tell an abandoned peer from a standing team member waiting for work, and a wrong guess\n` +
+      `  kills real work in flight. If you are sure it is dead weight, close its window by hand\n` +
+      `  or take it to your human.` };
   }
   if (born.bornOf && myConv && born.bornOf !== myConv) {
     return { ok: false, message:

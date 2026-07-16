@@ -138,10 +138,18 @@ function run(raw) {
   //     test peers named by hand, sixteen orphan consoles from a harness that killed the wrong
   //     pid, and a ghost holding a chair after its caller was told it never started.
   //
-  //     THIS IS THE FIX, and the auto-reaper is only the safety net: every one of those leaks had
-  //     a LIVE spawner that simply did not tidy up. No orphan rule catches that — the parent is
-  //     right there. Only the parent can know the work is done, and this is the one moment it is
-  //     both about to forget and still able to act.
+  //     THIS NAG IS THE FIX — the whole fix. There is deliberately NO auto-reaper behind it (an
+  //     earlier draft promised one; nothing was ever built, and it should not be): every one of
+  //     those leaks had a LIVE spawner that simply did not tidy up, and no orphan rule catches
+  //     that — the parent is right there. Worse, the rule itself is unwritable: under the
+  //     standing-duty doctrine a peer is SUPPOSED to outlive its spawner, so "parent gone" is the
+  //     design working, not orphanhood — and telling "dead" from "not yet" is the exact judgment
+  //     this project measured itself getting wrong six times in one day (the zombie that did two
+  //     trials' work after its trial was voided; eb53c3c). A reaper's mistake kills accumulated
+  //     context, the one asset a peer exists to hold; the leak it would prevent is an idle
+  //     process — cheap, visible in the roster, and named right here every turn. Only the parent
+  //     can know the work is done, and this is the one moment it is both about to forget and
+  //     still able to act.
   //
   //     NAG, NEVER KILL. A peer with an armed listener is idle BY DESIGN — that is a standing team
   //     member waiting for work, and silently reaping it would make `arc delegate` a trap where
