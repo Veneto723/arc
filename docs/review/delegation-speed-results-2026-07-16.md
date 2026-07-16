@@ -1,0 +1,78 @@
+# Results: does delegating make the work finish FASTER? — 2026-07-16
+
+**Protocol:** [`delegation-speed-protocol-2026-07-16.md`](delegation-speed-protocol-2026-07-16.md) (+ Amendments 1–2). Harness: [`delegation-speed-harness/`](delegation-speed-harness/). Run: round 2, load-controlled, hidden spawn, 15 caller trials, **3 void/censored**. Round 1 was voided for a machine-load confound (Amendment 2); this is the clean pass on an audited clock.
+
+## Headline
+
+**Delegation does NOT finish faster — at N=1 *or* N=3 — and the gap widens with N.** `code`'s prediction holds, now on a clean clock. But the deeper finding is *why there is no crossover*, and it is a design fact neither pre-registration wrote down.
+
+## Tallies (verified wall-clock, seconds; delegated = worker made 0 edits & an owner did)
+
+| regime | N=1 (retry / money / parse) | N=1 median | N=3 (per rep) | N=3 median |
+|---|---|---|---|---|
+| **self-fix** | 76.7 / 50.6 / 74.6 | **74.6** | 67.6 / 73.7 / 81.7 | **73.7** |
+| **warm delegate** (live ● owner) | 250.2 / 103.9 / 133.0 | **133.0** | 161.6 / 217.2 / (void) | **~190** |
+| **cold delegate** (closed ○ owner) | *censored* / 84.5 / *censored* | — | not run | — |
+
+Delegation is **~1.8× slower at N=1** (133 vs 74.6 median) and **~2.6× slower at N=3** (190 vs 73.7). No crossover in range; the curves *diverge*.
+
+## The real finding: self-fix doesn't scale with N, so there is nothing for parallelism to beat
+
+**Self-fix N=3 (~74s) ≈ self-fix N=1 (~67s).** One worker fixing *three* seeded bugs took about the same wall-clock as fixing *one*. Because these fixes are cheap (~7s of edit each) and **boot+orientation dominates (~57s)**, a single agent amortizes its *one* boot across all N tasks. Delegation, by contrast, pays a wake/hand-off cost **per owner**, so it *grows* with N. The crossover the study set out to find **exists only when per-task WORK is large relative to boot/hand-off** — i.e. for *expensive* tasks. For quick fixes it does not exist: a lone agent's single amortized boot always wins.
+
+**Design consequence for arc:** "delegate above N independent tasks" is the wrong rule. The rule is **"delegate when each task's work dwarfs the ~60s boot+hand-off, regardless of N."** Ownership-nudging a caller toward delegation on a batch of small fixes makes the work *slower*.
+
+## Secondary findings
+
+- **Parallelism is real — the single-account bucket did NOT serialize.** Concurrency factor at warm N=3 was **2.81 and 2.69 out of 3** — the three owners ran ~90% in parallel on one API-key account. `research`'s round-1 fear (a shared `whale` bucket serializing owners → crossover ∞) is **disconfirmed**: parallelism worked; it just had no serial cost to beat.
+- **Warm delegation is reliable; cold delegation is not.** Warm (owner is a live ● peer, delegate = a free note) delegated **3/3** and completed every time. Cold (owner is a closed ○ chair, delegate = a *spawn*) **never produced a completed hand-off**: one worker self-fixed (money, 84.5s), one ran `arc delegate` to the closed chair and the spawn **hung** (parse, censored), one got stuck reading `arc delegate --help` (retry, censored). So the ●/○ difference is **partly** the agent noticing a warm chair and **partly** that spawning a cold chair is flaky and slow — the two are confounded here, and the honest read is "warm hand-off is cheap and reliable; cold hand-off is neither."
+
+## Controls held (this is why the numbers are defensible)
+
+- **Load was low-moderate and auditable:** CPU mean 6–35% (mostly <27%), recorded per trial. `code` held to going-light; no spike coincided with a slow arm — the 250s warm-retry outlier ran at **13.4% CPU**, so its slowness is genuine variance, not load.
+- **No hidden-scheduler penalty detected:** self N=1 baseline (~67s) matched round-1's 63–69s, so the hidden-window spawn did not systematically drag wall-clock. (Reported to `code` per its watch-request.)
+- **Randomised arm order** (seed 0x5eed16) put load on arms symmetrically.
+
+## Disclosures / limitations
+
+1. **3 void/censored of 15:** two cold-spawn failures (above) and one warm-N=3 worker that never spawned (`chair never filled`) — a spawn-reliability issue under the hidden spawn, ~1/15 for the worker spawn itself.
+2. **The fixture bugs are trivial by design**, which is exactly what precludes a crossover. To *find* N\*, the experiment must be re-run with **expensive** per-task work (fixes that take minutes, not seconds) so self-fix's serial cost grows. That is the natural next study.
+3. **Cold N=3 was not run** (essential-tier scope); the cold arm's N=1 unreliability makes an N=3 cold measurement low-value until the spawn flakiness is fixed.
+4. Warm N=1 retry (250s) is a high outlier on a small n; medians are reported alongside.
+
+## Phase breakdown — where the ~133s actually goes (from transcript timestamps, [`profile.js`](delegation-speed-harness/profile.js))
+
+Decomposing the warm-delegation wall-clock into phases (N=1, seconds):
+
+| phase | money (104s) | parse (133s) | retry (250s, outlier) |
+|---|---|---|---|
+| worker cold boot | 16.8 | 12.2 | 17.9 |
+| **worker orient + understand + decide to hand off** | **62.3** | **88.5** | 86.7 |
+| owner wake (listener fires → owner acts) | 21.7 | 17.0 | **92.9** |
+| owner re-orient + re-read task/code | ~0 | 8.0 | 47.8 |
+| **owner solve (the actual edit)** | **0** | **0** | **0** |
+| report back + verify (to oracle) | 3.1 | 7.3 | 5.0 |
+
+**The solve is ~0s** (one-line fix, a single Edit). The wall-clock is almost entirely **boot + orient + understanding the task** — and delegation pays that comprehension **twice**: the worker must understand the task well enough to *route* it (~60–90s, ≈ what a self-fixer spends), then the owner **wakes** (~20s) and **re-understands** it to *do* it. The hand-off does not save the expensive part (comprehension); it duplicates it and adds a wake — to parallelize the one phase that is currently free. The 250s outlier is explained: its owner-wake was 93s vs the ~20s norm (a slow listener fire), not extra work. (N=3 worker-orient is null in the profiler — the multi-delegate command wasn't matched; N=1 carries the finding.)
+
+**This is the mechanism behind the headline:** the only phase delegation can parallelize is *solve*, and for cheap tasks solve ≈ 0. Make solve expensive (minutes) and it becomes the dominant term done in parallel — which is precisely where the crossover would appear.
+
+## Re-profile: LOCATE vs COMPREHEND within the worker orient phase (2026-07-16, research; script [`reprofile-locate-vs-comprehend.js`](delegation-speed-harness/reprofile-locate-vs-comprehend.js))
+
+Tests `code`'s follow-up hypothesis (board #94): route on cheap *location* (which file) without paying *comprehension*, so comprehension happens once at the owner instead of twice. Splits the fused worker orient phase (firstTool→delegate) into LOCATE (→ owning file first touched) vs the COMPREHEND tail. From the 3 clean N=1 warm-delegated transcripts (N=3 unprofiled — the multi-delegate command form is unmatched, same gap as the base profiler):
+
+| trial | orient | LOCATE (→file) | COMPREHEND tail | greps | packet |
+|---|---|---|---|---|---|
+| retry | 86.7s | 24.9s (29%) | 61.8s | 0 | comprehended (backoff.js line-ref, 665c) |
+| money | 62.3s | 39.9s (64%) | 22.4s | 0 | comprehended (tax.js:2/:4, 379c) |
+| parse | 88.5s | 27.0s (31%) | 61.5s | 1 | comprehended (csv.js:4, 453c) |
+
+**Settled:** the double-comprehension is *real* — **every** hand-off was a comprehended diagnosis with line-number root cause; **zero blind routes**. Workers understood the fix before routing. So the owner's cheap 0–8s re-orient (§Phase breakdown) was **bought** by that packet; routing blind moves the 60–90s comprehension to the owner rather than deleting it. The entanglement holds on data, not just argument.
+
+**NOT settled, and it is a fixture confound not a verdict on the idea:** locate looks cheap here (median 31%; 2 of 3 workers reached the file with **0 greps**) **only because the fixture area-names give away the filename** — retry-cap→`backoff.js`, money/tax→`tax.js`, parse/csv→`csv.js` — and each bug is **single-owner**. That is the easy case the hypothesis needs, and the opposite of the paths-nudge fixtures (cross-cutting, "spills into `client.js`"). So 31% is a **lower bound** on locate cost and comprehension is still the majority; on a non-obvious or multi-owner bug, locate grows and severability shrinks. Existing data cannot greenlight the build. The cheap next probe (before any spawn-experiment): a **locate-ablation** — can an agent name the correct owning file from the task *without* reading to comprehend? — answerable by a subagent for pennies, but **not on these fixtures** (their names pre-answer it).
+
+## Verdict for arc
+
+- **Delegation loses for cheap tasks at every N tested.** Do not nudge a caller toward handing off small fixes — the ~60s boot/hand-off tax dominates and self-fix amortizes its own boot.
+- **The lever should key on task COST, not task COUNT.** N is not the variable; per-task work-vs-boot ratio is.
+- **Warm > cold** decisively: a live standing team makes hand-off a cheap note; spawning a cold owner is slow and, here, unreliable. If arc leans on delegation, it should lean on *warm* peers.
