@@ -25,6 +25,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# THIS WINDOW IS NOT ALWAYS A wt TAB, and that decides whether arc is readable in it. A quiet spawn
+# (Start-Process, minimised) lands in a legacy conhost console whose output code page defaults to
+# the machine's OEM one — 437, 936, whatever the box was installed as — not UTF-8. A Windows
+# Terminal tab gets UTF-8 for free; a raw console does not, and nothing in the chain sets it.
+#
+# arc's output is UTF-8 and LEANS on it: the roster is ● live / ◑ revivable / ○ closed, unread is
+# 📌, an empty chair is ⚠, and every hint has a →. Without this line they arrive as mojibake in
+# exactly the window a human opens in order to read them — and ◑ vs ○ is not decoration, it is the
+# difference between "revive this peer, it remembers everything" and "this chair is empty".
+#
+# Set on the CONSOLE (SetConsoleOutputCP under the hood), so it applies to the whole window — not
+# just PowerShell's own writes, but node's and claude's too, since they share this console.
+try {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }   # a redirected/headless console can refuse; never let cosmetics kill a peer's birth
+
 # FAIL LOUDLY, IN THE TAB. A peer that boots with no instruction is the worst failure this launcher
 # has: it claims the role, so nothing else may staff it, and then answers nothing — a chair that is
 # occupied and deaf. Better an obvious red line in a window than a silent impostor on the board.
