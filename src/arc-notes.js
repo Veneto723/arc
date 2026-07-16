@@ -388,8 +388,9 @@ function requestNote(session, arg, cwd, opts) {
   const seq = R.latestSeq(target);
   const extra = [
     note.kind !== 'info' ? `kind: ${note.kind}` : '',
-    note.replyTo ? `answers #${note.replyTo}` : '',
-    note.supersedes ? `RETRACTS #${note.supersedes} — readers of it are now warned` : '',
+    // Echo the SEQ they typed, not the id we stored — the id is machinery, the number is theirs.
+    note.replyTo ? `answers #${replyTo}` : '',
+    note.supersedes ? `RETRACTS #${supersedes} — readers of it are now warned` : '',
     note.priority === 'high' ? 'priority: HIGH' : '',
   ].filter(Boolean).join(' · ');
   // THE EMPTY CHAIR. Posting to a role nobody holds used to return a cheerful ✓ and nothing
@@ -485,10 +486,10 @@ function requestNotes(session, arg, cwd) {
     if (!all.length) return { ok: true, plain: true, message: `${head}\n  (the board is empty)` };
     const sup = R.supersededMap(board, all);
     const rows = all.map((n) => {
-      const dead = sup.get(n.seq);
+      const dead = sup.get(n.id);      // keyed by ID: a retraction must survive a merge
       return `  #${String(n.seq).padStart(3)}  ${ago(n.ts).padStart(4)} ago  ${n.from} → ${n.to || 'all'}` +
         `${n.kind && n.kind !== 'info' ? `  <${n.kind}>` : ''}${n.priority === 'high' ? '  [!]' : ''}` +
-        `${n.replyTo ? `  ↩ re #${n.replyTo}` : ''}${n.supersedes ? `  ⤺ retracts #${n.supersedes}` : ''}` +
+        `${n.replyTo ? `  ↩ re #${R.refSeq(all, n.replyTo) ?? '?'}` : ''}${n.supersedes ? `  ⤺ retracts #${R.refSeq(all, n.supersedes) ?? '?'}` : ''}` +
         (dead ? `\n        ⚠ RETRACTED by #${dead.seq} — do NOT act on this` : '') +
         `\n        ${n.body.replace(/\n/g, '\n        ')}` +
         (n.refs ? `\n        refs: ${JSON.stringify(n.refs)}` : '');
@@ -504,12 +505,13 @@ function requestNotes(session, arg, cwd) {
     return { ok: true, plain: true, message:
       `${head}\n  you are "${me}" · peers: ${peers(board, me)}\n  nothing new on the board (${u.total} note(s) total)` };
   }
+  const allU = R.allNotes(board);   // the WHOLE ledger: a reply may point at a note already read
   const supU = R.supersededMap(board);
   const rows = u.notes.map((n) => {
-    const dead = supU.get(n.seq);
+    const dead = supU.get(n.id);     // keyed by ID: a retraction must survive a merge
     return `  #${String(n.seq).padStart(3)}  ${ago(n.ts).padStart(4)} ago  from ${n.from}${n.to ? '' : '  (broadcast)'}` +
       `${n.kind && n.kind !== 'info' ? `  <${n.kind}>` : ''}${n.priority === 'high' ? '  [!]' : ''}` +
-      `${n.replyTo ? `  ↩ re #${n.replyTo}` : ''}${n.supersedes ? `  ⤺ retracts #${n.supersedes}` : ''}` +
+      `${n.replyTo ? `  ↩ re #${R.refSeq(allU, n.replyTo) ?? '?'}` : ''}${n.supersedes ? `  ⤺ retracts #${R.refSeq(allU, n.supersedes) ?? '?'}` : ''}` +
       (dead ? `\n        ⚠ RETRACTED by #${dead.seq} (${dead.from}) — do NOT act on this; read #${dead.seq}` : '') +
       `\n        ${n.body.replace(/\n/g, '\n        ')}` +
       (n.refs ? `\n        refs: ${JSON.stringify(n.refs)}` : '');
@@ -684,13 +686,13 @@ function injection(session, cwd) {
       // distinction is load-bearing rather than cosmetic.
       const body = n.to === role ? directBody(n, board, spills) : clipBody(n.body, BODY_CLIP);
       const kind = n.kind && n.kind !== 'info' ? `  <${n.kind}>` : '';
-      const thread = n.replyTo ? `  ↩ re #${n.replyTo}` : '';
-      const dead = sup.get(n.seq);
+      const thread = n.replyTo ? `  ↩ re #${R.refSeq(allNotes, n.replyTo) ?? '?'}` : '';
+      const dead = sup.get(n.id);      // keyed by ID: a retraction must survive a merge
       // A note whose author RETRACTED it must never be actionable. Say so before the body.
       const retracted = dead ? `\n      ⚠ RETRACTED by #${dead.seq} (${dead.from}) — do NOT act on this; read #${dead.seq} instead.` : '';
       return `  #${n.seq}${kind}  from ${n.from}${n.to ? '' : ' (broadcast)'}${n.priority === 'high' ? '  [!]' : ''}${thread}${retracted}\n` +
         `      ${body.replace(/\n/g, '\n      ')}` +
-        (n.supersedes ? `\n      ⤺ this RETRACTS #${n.supersedes}` : '') +
+        (n.supersedes ? `\n      ⤺ this RETRACTS #${R.refSeq(allNotes, n.supersedes) ?? '?'}` : '') +
         (n.refs ? `\n      refs: ${JSON.stringify(n.refs).slice(0, 200)}` : '');
     };
 

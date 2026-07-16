@@ -3209,12 +3209,19 @@ try {
     plain.kind === 'info' && plain.replyTo === undefined && plain.supersedes === undefined);
   ok('an unknown kind degrades to info rather than throwing',
     R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'nonsense', body: 'x' }).kind === 'info');
+  // A REFERENCE STORES THE TARGET'S ID, NOT ITS POSITION. The caller still says `--reply-to 1`
+  // (the seq it read); what lands in the ledger is the id that seq resolved to. This asserts the
+  // thing that actually matters — it points at the RIGHT NOTE — which "=== 1" never did: a
+  // position is only true in one file on one machine, and after a merge the same `replyTo:1`
+  // named a different note on each clone.
   ok('--reply-to INFERS kind:result; --supersedes INFERS kind:correction',
-    sn2.kind === 'result' && sn2.replyTo === 1 && sn3.kind === 'correction' && sn3.supersedes === 2);
+    sn2.kind === 'result' && sn2.replyTo === sn1.id && sn3.kind === 'correction' && sn3.supersedes === sn2.id);
   ok('a correction (and a blocker) is auto-HIGH priority — a retraction is never routine',
     sn3.priority === 'high' && R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'blocker', body: 'db down' }).priority === 'high');
+  // Keyed by the retracted note's ID — a retraction must keep pointing at the same note after a
+  // merge reorders the ledger, which a position cannot do.
   ok('supersededMap derives which note was RETRACTED, and by whom',
-    R2.supersededMap(sboard).get(2).seq === 3 && !R2.supersededMap(sboard).has(1));
+    R2.supersededMap(sboard).get(sn2.id).seq === 3 && !R2.supersededMap(sboard).has(sn1.id));
   ok('openRequests finds a request with NO reply, and ignores an answered one',
     (() => { const o = R2.openRequests(sboard).map((n) => n.seq); return o.includes(4) && !o.includes(1); })());
   // A RETRACTED request is not owed. Found by using the board, not by reading it: a request I

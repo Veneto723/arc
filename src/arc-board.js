@@ -17,19 +17,36 @@
 //  * APPEND-ONLY, never consumed. Linda tuple spaces distinguish rd() (read, tuple
 //    stays) from in() (take, tuple removed). This is rd()-only: a note is never
 //    removed, only a per-role CURSOR advances. "Done" facts stay auditable forever.
-//  * NO seq FIELD. A note's seq IS its 1-based line number. Two peers appending
-//    concurrently would both compute "last+1" and collide; a line's position cannot
-//    collide. Cursor = how many lines that role has read.
-//  * NO LOCKING, NO GIT CAS. Peers share one working directory, so they share
-//    one file on one filesystem: single-line O_APPEND writes are atomic between
-//    processes. (git compare-and-swap only mattered for writers in different
-//    clones/worktrees — which are, by definition, different boards.)
+//  * NO seq FIELD. A note's seq IS its 1-based line number, assigned at READ time.
+//    Two peers appending concurrently would both compute "last+1" and collide; a
+//    line's position cannot collide. Cursor = how many lines that role has read.
+//    ^ TRUE ON ONE FILESYSTEM, AND ONLY THERE. A position is not an identity: it is
+//    an accident of arrival order. The moment a board is SHARED ACROSS MACHINES via
+//    git (the human's call, 2026-07-16), two clones append different lines to the
+//    same offsets and every positional reference silently re-points. PROVEN with two
+//    real clones: a plain merge writes "<<<<<<< HEAD" INTO the ledger (unparseable —
+//    the board wedges); a merge=union driver merges clean and is WORSE — the same
+//    note `replyTo:4` resolved to "HOME-1" on one machine and "OFFICE-1" on the
+//    other. Same file, same history, two meanings, no error. So a shared board needs
+//    an identity that travels: see `id` below. seq survives as a LOCAL DISPLAY INDEX
+//    only — never as a reference.
+//  * STABLE ID, position-independent: `id` = "<origin>:<token>". The origin is this
+//    machine (.peer/origin.json, never committed); the token is RANDOM, never a
+//    counter — "count what's there and add one" is the exact race the positional
+//    design was built to avoid, and reintroducing it here would undo that. Notes
+//    written before ids exist are a FROZEN prefix, so they map 1:1 onto synthetic
+//    ids "~:<position>" and their old numeric replyTo keeps meaning what it meant.
+//  * NO LOCKING, NO GIT CAS. Peers on one machine share one working directory, so
+//    they share one file on one filesystem: single-line O_APPEND writes are atomic
+//    between processes. Across machines git is the transport and `merge=union` the
+//    merge; correctness there comes from ids + a per-origin cursor, not from locking.
 //  * SELF-IGNORING. .peer/.gitignore is "*", so the board never enters the
 //    project's history and the project's own .gitignore never learns it exists.
 'use strict';
 
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const path = require('path');
 
@@ -65,6 +82,15 @@ const GITIGNORE_BODY =
   "# the project's own .gitignore never needs to know it exists. Its sibling\n" +
   '# .arc/roles/ is NOT ignored: a role\'s duty is a project fact and commits.\n' +
   '*\n';
+// Governs notes.jsonl if the board is ever shared (git's default merge corrupts an append-only
+// ledger by writing conflict markers into it). Lives beside the ledger so a board carries its own
+// merge rule wherever it is cloned — no repo-root file to remember, nothing to configure.
+const GITATTRIBUTES_BODY =
+  '# The ledger is APPEND-ONLY: every line is a whole note and no line is ever edited.\n' +
+  '# git\'s default merge would write <<<<<<< markers INTO it and the board would stop\n' +
+  '# parsing. `union` keeps both sides\' lines instead. Merge-safety also needs notes to\n' +
+  '# be referenced by `id`, never by line position — see the design note in arc-board.js.\n' +
+  'notes.jsonl merge=union\n';
 
 // ---- board resolution ---------------------------------------------------------
 // Canonicalise so E:\WhalePhone, e:\whalephone and a junction all name one board.
@@ -123,6 +149,14 @@ function ensureBoard(board) {
   fs.mkdirSync(board.planDir, { recursive: true });
   const gi = path.join(board.planDir, '.gitignore');
   if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE_BODY);
+  // The board declares its OWN merge, next to the file it governs — the same self-contained move as
+  // the .gitignore above, and it costs nothing while the board stays ignored. It matters the moment
+  // anyone shares one: git's DEFAULT merge on an append-only ledger writes conflict markers straight
+  // INTO it (proven with two clones — the board stops parsing). `union` is built in, needs no
+  // config on either machine, and keeps both sides' lines. It is only half of merge-safety; the
+  // other half is that nothing references a note by position. See `id` and `ord`.
+  const ga = path.join(board.planDir, '.gitattributes');
+  if (!fs.existsSync(ga)) fs.writeFileSync(ga, GITATTRIBUTES_BODY);
   return board;
 }
 
@@ -168,17 +202,82 @@ function normalizeKind(k) {
 }
 const asSeq = (v) => { const n = parseInt(v, 10); return Number.isInteger(n) && n > 0 ? n : undefined; };
 
+// ---- references: what `replyTo`/`supersedes` POINT AT --------------------------
+// A reference used to be a position ("note 4"), which is only meaningful in one file on one
+// machine. Proven to break the moment a board is shared: after a union merge the SAME `replyTo:4`
+// meant "HOME-1" on one clone and "OFFICE-1" on the other — a thread that re-parents itself
+// depending on who is reading. So a reference now stores the target's ID, which cannot drift.
+//
+// BOTH FORMS ARE READ, FOREVER. Every note already on every board stores a NUMBER, and the ledger
+// is append-only — there is no rewrite pass and there must never be one. A number means "the note
+// at that position in the frozen pre-id prefix", which is exactly what it meant when it was
+// written, and that prefix cannot move.
+const refKey = (ref) => {
+  if (typeof ref === 'string') return ref;                     // an id: already stable
+  const n = asSeq(ref);
+  return n === undefined ? undefined : legacyId(n);            // legacy position -> its frozen id
+};
+// Callers hand us whatever the agent typed — usually the DISPLAY seq it just read ("--reply-to 127").
+// Resolve that to the target's id at WRITE time, so what lands in the ledger is stable. Falls back
+// to the raw value when the target cannot be found, so a reference to a not-yet-synced note is kept
+// rather than dropped: better a dangling pointer we can still see than a silent deletion.
+// The inverse, for DISPLAY: an id is what we store, a seq is what a human reads. Renders the
+// LOCAL number of whatever a reference points at. Returns null when the target is not on this
+// board yet (a reply that arrived before the note it answers — possible the instant a board is
+// shared), so callers can say so instead of printing a raw id at a human.
+function refSeq(all, ref) {
+  const key = refKey(ref);
+  if (!key) return null;
+  const hit = all.find((n) => n.id === key);
+  return hit ? hit.seq : null;
+}
+function resolveRef(board, ref, all) {
+  if (ref === undefined || ref === null || ref === '') return undefined;
+  if (typeof ref === 'string' && ref.includes(':')) return ref;  // already an id
+  const seq = asSeq(ref);
+  if (seq === undefined) return undefined;
+  const hit = (all || allNotes(board)).find((n) => n.seq === seq);
+  return hit ? hit.id : legacyId(seq);
+}
+
+// ---- origin: WHICH MACHINE wrote a note ---------------------------------------
+// Machine-local and NEVER committed (.peer/.gitignore is "*"), so each clone keeps its own —
+// which is the point: it is what makes two machines' notes distinguishable after a union merge.
+// Generated once, then stable forever; if it is ever lost, notes written after simply belong to a
+// new origin. That degrades cleanly (a cursor re-shows that origin's notes once) and never
+// corrupts: an id already written into the ledger is immutable.
+const originPath = (board) => path.join(board.planDir, 'origin.json');
+function boardOrigin(board) {
+  try { const o = JSON.parse(fs.readFileSync(originPath(board), 'utf8')).id; if (o) return o; } catch {}
+  const id = crypto.randomBytes(4).toString('hex');
+  try { ensureBoard(board); atomicWriteJson(originPath(board), { id, at: Date.now() }); } catch {}
+  return id;
+}
+// RANDOM, not a counter. See the design note at the top: reading the ledger to compute "last+1"
+// is the collision the positional scheme existed to prevent, and it would come back the moment two
+// local peers appended in the same tick. 48 random bits per note need no coordination at all.
+function mintId(board) { return `${boardOrigin(board)}:${crypto.randomBytes(6).toString('hex')}`; }
+// Notes written before ids existed: a FROZEN prefix (everything new carries an id), so their line
+// position is stable and doubles as their identity. ZERO-PADDED because ids are compared as strings
+// and "~:10" sorts before "~:2" — which would silently reorder the very prefix whose order the old
+// numeric replyTo depends on. Width 6 outlives any realistic board.
+const LEGACY_ORIGIN = '~';
+const LEGACY_W = 6;
+const legacyId = (pos) => `${LEGACY_ORIGIN}:${String(pos).padStart(LEGACY_W, '0')}`;
+const noteOrigin = (n) => String(n.id || `${LEGACY_ORIGIN}:`).split(':')[0];
+
 function appendNote(board, note) {
   ensureBoard(board);
   const rec = {
+    id: mintId(board),                           // stable identity — survives any merge or reorder
     ts: new Date().toISOString(),
     from: String(note.from || 'unknown'),
     to: note.to ? String(note.to) : null,      // null = broadcast to the whole flat
     kind: normalizeKind(note.kind),
     priority: note.priority === 'high' ? 'high' : 'normal',
     body: String(note.body || ''),
-    replyTo: asSeq(note.replyTo),              // this note ANSWERS that note (a thread)
-    supersedes: asSeq(note.supersedes),        // this note RETRACTS/replaces that note
+    replyTo: resolveRef(board, note.replyTo),        // this note ANSWERS that note (a thread)
+    supersedes: resolveRef(board, note.supersedes),  // this note RETRACTS/replaces that note
     refs: note.refs && typeof note.refs === 'object' ? note.refs : undefined, // {sha, files, tests}
   };
   // A correction/result almost always names its target; if the caller gave one but no kind,
@@ -197,10 +296,12 @@ function appendNote(board, note) {
 
 // seq -> the note that RETRACTED it (or undefined). Derived from the ledger, so it cannot lie
 // and needs no back-writing: history stays append-only.
+// Keyed by the target's ID, never its position — a retraction must keep retracting the same note
+// after a merge reorders the ledger. Callers look up by `note.id`.
 function supersededMap(board, all) {
   const notes = all || allNotes(board);
   const m = new Map();
-  for (const n of notes) if (n.supersedes) m.set(n.supersedes, n);   // last writer wins
+  for (const n of notes) if (n.supersedes) m.set(refKey(n.supersedes), n);   // last writer wins
   return m;
 }
 
@@ -214,23 +315,48 @@ function supersededMap(board, all) {
 // it was unanswerable (I had told the peer not to reply) kept showing as owed anyway.
 function openRequests(board, role) {
   const all = allNotes(board);
-  const answered = new Set(all.filter((n) => n.replyTo).map((n) => n.replyTo));
+  const answered = new Set(all.filter((n) => n.replyTo).map((n) => refKey(n.replyTo)));
   const retracted = supersededMap(board, all);
-  return all.filter((n) => n.kind === 'request' && !answered.has(n.seq) && !retracted.has(n.seq)
+  return all.filter((n) => n.kind === 'request' && !answered.has(n.id) && !retracted.has(n.id)
     && (!role || n.from === role || n.to === role || n.to == null));
 }
 
-// Every note answering `seq`, oldest first — the thread under a request.
-function repliesTo(board, seq, all) {
-  return (all || allNotes(board)).filter((n) => n.replyTo === seq);
+// Every note answering `ref`, oldest first — the thread under a request. Takes a display seq (what
+// a human types) or an id; both resolve to the same thread.
+function repliesTo(board, ref, all) {
+  const notes = all || allNotes(board);
+  const target = typeof ref === 'string' && ref.includes(':') ? ref : (notes.find((n) => n.seq === asSeq(ref)) || {}).id;
+  return target ? notes.filter((n) => n.replyTo && refKey(n.replyTo) === target) : [];
 }
 
+// `seq` stays exactly what it was: the note's PHYSICAL line number. It is the number a human reads
+// and types, and it is LOCAL — after a merge the same note sits at a different line on each machine,
+// so seq is a display index and NOTHING may reference a note by it across machines. That is what
+// `id` is for. (Deliberately NOT re-sorted into a machine-independent order: seq is the physical
+// position on purpose — a torn line must leave its gap so the cursor can advance past it exactly
+// once — and a stable display number buys nothing once references are ids.)
+// The one addition: notes written before ids get a synthetic one. They are a FROZEN set (everything
+// new carries an id), so their position cannot move and "~:<pos>" maps 1:1 onto the numeric replyTo
+// they already carry.
 function allNotes(board) {
   let raw; try { raw = fs.readFileSync(notesPath(board), 'utf8'); } catch { return []; }
   const out = [];
+  let legacy = 0;
+  const ord = {};
   raw.split('\n').forEach((line, i) => {
     if (!line.trim()) return;
-    try { out.push({ seq: i + 1, ...JSON.parse(line) }); } catch { /* skip a torn line */ }
+    let n; try { n = JSON.parse(line); } catch { return; }        // skip a torn line
+    if (!n.id) n.id = legacyId(++legacy);                         // frozen prefix -> stable synthetic id
+    const org = noteOrigin(n);
+    // ORD: this note's index among ITS OWN origin's notes, counted at READ time. The same trick the
+    // positional design already relies on, narrowed to the one scope where it still holds: a
+    // position across writers is an accident, but a position WITHIN one writer's stream is that
+    // writer's own append order, and git's union merge concatenates each side's lines without
+    // reordering them — so every machine counts the same ordinal for the same note. This is what
+    // the cursor advances on. It needs no counter at write time (that race is why seq is positional
+    // at all) and, unlike a timestamp, it cannot tie: notes written in the same millisecond still
+    // have distinct ordinals.
+    out.push({ seq: i + 1, ord: (ord[org] = (ord[org] || 0) + 1), ...n });
   });
   return out;
 }
@@ -249,13 +375,42 @@ function latestSeq(board) {
 // ---- cursors (rd()-only: nothing is consumed, the cursor just advances) --------
 // Keyed by ROLE, not session id — a restarted terminal gets a new session id but is
 // still "coding in this board", and must resume where it left off, not re-read all.
-function readCursor(board, role) {
+// A CURSOR CANNOT BE A POSITION ON A SHARED BOARD. "I have read 5 notes" is a claim about MY line
+// order, and the other machine's notes interleave by timestamp — so a note that arrives from the
+// office bearing an OLDER ts sorts BEHIND a home cursor and is marked read having never been shown.
+// Silent, and the exact failure the whole rd()-only design exists to prevent. So the cursor is a
+// HIGH-WATER PER ORIGIN: "everything origin X wrote up to here". An origin's own notes are appended
+// in ts order on its own machine, so (ts,id) is monotonic within an origin, and nothing another
+// machine does can move it. `seq` is still recorded — for the fail-open check below, and because a
+// human debugging a cursor wants the number they saw.
+const noteKey = (n) => n.ord;                      // ordinal WITHIN its origin — see allNotes
+function highWater(notes) {
+  const o = {};
+  for (const n of notes) {
+    const org = noteOrigin(n);
+    if (!o[org] || n.ord > o[org]) o[org] = n.ord;
+  }
+  return o;
+}
+function readCursor(board, role) {                 // legacy scalar view — kept for callers/tests
   try { return JSON.parse(fs.readFileSync(cursorPath(board, role), 'utf8')).seq || 0; }
   catch { return 0; }
 }
+function readCursorMap(board, role, all) {
+  let rec; try { rec = JSON.parse(fs.readFileSync(cursorPath(board, role), 'utf8')); } catch { return {}; }
+  // FAIL-OPEN, unchanged in spirit: a cursor past the end means the ledger was truncated or
+  // rewritten (it is supposed to be append-only). Re-read from the start rather than silently
+  // skipping — a duplicate note is noise; a missed one is the bug this design exists to prevent.
+  if (rec.seq && rec.seq > latestSeq(board)) return {};
+  if (rec.o && typeof rec.o === 'object') return rec.o;
+  // A cursor written before origins existed: "I read the first N". Every note it covers is from the
+  // frozen prefix, so its high-water converts exactly.
+  return highWater((all || allNotes(board)).filter((n) => n.seq <= (rec.seq || 0)));
+}
 function writeCursor(board, role, seq) {
   ensureBoard(board);
-  atomicWriteJson(cursorPath(board, role), { seq, at: Date.now() });
+  const covered = allNotes(board).filter((n) => n.seq <= seq);
+  atomicWriteJson(cursorPath(board, role), { o: highWater(covered), seq, at: Date.now() });
   return seq;
 }
 
@@ -299,14 +454,10 @@ function withLock(board, name, fn) {
 function unreadFor(board, role) {
   const all = allNotes(board);
   const latest = latestSeq(board);
-  let cursor = readCursor(board, role);
-  // FAIL-OPEN: a cursor past the end means the ledger was truncated or rewritten
-  // (it is supposed to be append-only). Re-read from the start rather than silently
-  // skipping notes — a duplicate note is noise; a missed one is the bug this whole
-  // design exists to prevent.
-  if (cursor > latest) cursor = 0;
+  const cur = readCursorMap(board, role, all);      // per-origin high-water (fail-open handled inside)
+  const cursor = readCursor(board, role);           // reported for debugging, never used to filter
   const notes = all.filter(
-    (n) => n.seq > cursor && n.from !== role && (n.to == null || n.to === role));
+    (n) => n.ord > (cur[noteOrigin(n)] || 0) && n.from !== role && (n.to == null || n.to === role));
   const senders = [...new Set(notes.map((n) => n.from))];
   return { cursor, count: notes.length, notes, senders, latest, total: all.length };
 }
@@ -607,7 +758,8 @@ module.exports = {
   canonical, repoRoot, resolveBoard, ensureBoard,
   notesPath, appendNote, allNotes, noteCount, latestSeq,
   KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo,
-  readCursor, writeCursor, unreadFor, markRead,
+  readCursor, readCursorMap, writeCursor, unreadFor, markRead,
+  boardOrigin, noteOrigin, noteKey, refKey, resolveRef, refSeq, legacyId,
   isAlive, isHolder, procStarts, roleClaim, claimRole, releaseRole, liveRoles, vacantClaimForRole,
   atomicWriteJson, withLock, vacantClaimForConv,
   recordBirth, readBirth, clearBirth, spawnsOf, closePeer, treeOf,
