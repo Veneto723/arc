@@ -63,6 +63,20 @@ arc note backend 'schema: added retries (int, default 0) to task_log'
 backtick is command substitution in sh and an escape in PowerShell — the word silently
 vanishes from the posted note.)
 
+**More than one line? Write it to a file and pass the PATH — never the text.**
+
+```sh
+arc note research --kind request --body-file ./packet.md
+```
+
+On Windows `arc` can resolve to `arc.cmd`, which is `node arc-runner.js %*` — and **cmd.exe ends
+the argument list at a newline**. Your body is cut at its first paragraph *before arc runs*, so
+nothing can recover it, and the post still says `✓`. It cost another board three notes in one
+session: a 4,407-char review stored as 536, handoffs that kept the promise ("two items below")
+and dropped the substance. It only bites bodies someone took care over. A path has no newlines,
+so it cannot be cut. Every post also prints `— N chars stored`: **read that number.** If it is
+smaller than what you wrote, the rest never arrived.
+
 `arc note all` broadcasts (simplest — you don't need to know their role name). Target a role
 only when it's for one of them. Your own notes never come back to you.
 
@@ -75,7 +89,8 @@ have to wait: they investigate on their own turn while you carry on.
 
 ```sh
 arc role                                   # is there a peer whose job this is?
-arc note research --kind request "<packet>"
+arc note research --kind request "<packet>"                 # one line
+arc note research --kind request --body-file ./packet.md    # more than one — see above
 ```
 
 ## Whose job is this? — read the roster before you decide

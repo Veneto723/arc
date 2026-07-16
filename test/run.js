@@ -1875,6 +1875,16 @@ try {
 
   // And in the protocol doc, so it survives beyond the birth turn.
   const skill2 = fs.readFileSync(path.join(ROOT, 'skills', 'peers', 'SKILL.md'), 'utf8');
+  // A FIX NOBODY CAN FIND IS NOT A FIX. --body-file exists because arc.cmd is `node ... %*` and
+  // cmd.exe ends the argument list at a NEWLINE, so a multi-line body is cut before arc runs
+  // (whalephone #129: a 4,407-char review stored as 536). But agents learn `arc note` from THIS
+  // file, not from NOTE_USAGE — and it taught the inline form for `--kind request "<packet>"`,
+  // which is precisely the long note that gets eaten. Shipping the flag while the manual still
+  // pointed at the hazard would have left the bug fully live for every agent that reads this.
+  ok('the peers skill teaches --body-file for multi-line bodies, where an agent will actually meet it',
+    /--body-file/.test(skill2) && /more than one line/i.test(skill2)
+    && /cmd\.exe ends\s*\n?the argument list at a newline/i.test(skill2.replace(/\*\*/g, ''))
+    && /chars stored/.test(skill2));
   ok('the peers skill states who you serve, and what a FORKED peer must not assume',
     /WHO YOU SERVE/.test(skill2) && /Answer where you were asked/i.test(skill2)
     && /FORKED/.test(skill2) && /did not do the work you can see above/i.test(skill2));
