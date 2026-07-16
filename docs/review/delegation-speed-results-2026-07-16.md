@@ -21,7 +21,33 @@ A revived owner skips all three arc taxes **by construction** — skill already 
 
 **The open question, and it cuts both ways:** a revived peer resumes a *large* conversation and therefore pays **prefill over all of it**. Revive trades *comprehension* cost for *context* cost, and **we have measured neither**. If prefill is cheap, revive collapses the hand-off tax and the reuse design wins outright. If prefill scales with history, **a peer gets slower the more it knows** — and "reuse beats spawn" has a ceiling nobody has seen, with the ugly corollary that arc's most experienced peers would be its slowest. (Plausible modifier, **unmeasured, do not assume**: prompt-cache TTL may make revive *bimodal* — cheap within the cache window, full prefill after — which would fit the fat-tail pattern below rather than contradict it.)
 
-**Everything below stands, scoped to: N=1, fresh→fresh delegation, on a task one agent can do with a ~0–9s solve.**
+### And it is worse: we measured an **anti-pattern**, not just the wrong regime (board #123)
+
+The human's doctrine is a decision tree, not a preference:
+
+1. **COMMON** — the main session finds a duty **separable from its own** → **asks the human** → spawns a peer that **persists as the project grows**. *A peer is a **standing duty**, not a worker.*
+2. **RARE, AND WRONG** — an agent fires a session at a small job. Wrong by construction: *within its duty* → **subagent**; *not its duty, companion exists* → read the roster, **delegate to the companion**; *no companion + temp job* → **stop and ponder — probably out of scope, probably noise.**
+
+**Our harness is scenario 2, twice per trial:** `dispatch` fires a **worker session** at a one-line fix, and that worker fires **owner sessions** at one-line fixes — where the fix is a **~7–9s Edit**, i.e. squarely the *"within its duty → subagent"* branch.
+
+**And arc's own header predicted the result before either of us ran a trial** ([`arc-invite.js:13-15`](../../src/arc-invite.js)): *"accumulated context is the **entire reason** a peer beats a subagent… **hand the role's NAME to a session with none of its MEMORY**."* Our warm arm gave the peer **zero** accumulated context and then charged it the **full arc ceremony** (17KB skill, board backlog, claim, wake). **A fresh-born peer is a subagent with extra steps** — none of the benefit, all of the tax. Of course it lost 1.78×.
+
+**Four cells. We measured the two nobody should be in:**
+
+| cell | arc tax | context | wall | status |
+|---|---|---|---|---|
+| **self-fix** | none | own | **74.6s** | ✅ baseline |
+| **SUBAGENT** | **none** | none | — | ❌ **never measured** — the doctrine's answer for (2) |
+| **FRESH PEER** | **full** | **none** | **133.0s** | ✅ **the anti-pattern** |
+| **REVIVED PEER** | ~none | **full** | — | ❌ **never measured** — the doctrine's answer for (1) |
+
+**Consequences:**
+- **The right baseline for "is a peer worth it" is SUBAGENT, not self-fix** — it pays no skill, no board, no claim, no wake. Free to measure; nobody has.
+- **Prefill is promoted from edge case to steady state.** Under the doctrine a peer is long-lived *by design*, so its conversation is **large by design**. And a standing duty is revived across hours and days — i.e. **mostly outside any prompt-cache window**, which makes the cache-TTL bimodality *more* load-bearing, not less. Still a hypothesis. Still measure it.
+
+> ⚠ **THIS DOC MUST NEVER BE READ AS "PEERS ARE SLOW."** It is a **receipt for an anti-pattern**: using a peer as a one-off worker costs 1.78–2.05×. A peer used as designed — a standing duty with accumulated context, revived as itself — **has never been measured here at all**.
+
+**Everything below stands, scoped to: N=1, fresh→fresh delegation, on a task one agent can do with a ~0–9s solve — a use the design itself calls wrong.**
 
 ## ⚠ RETRACTION 2026-07-16 (board #99, verified by research #100): warm N=3 is GHOST DATA
 
