@@ -610,6 +610,17 @@ function isHolder(claim, starts) {
   // branch above (fail OPEN) on purpose — there the OS could not be asked at all; here it answered,
   // and the answer excludes this pid.
   if (t == null) return false;
+  // KNOWN ACCEPTED RACE (audit #152), documented so the record does not overclaim: `t` may be a
+  // CACHED start, up to PIDSTART_TTL (30s) old and NOT re-probed. So within that window a claimed
+  // pid that DIED and was recycled onto another live process reads its DEAD predecessor's start,
+  // which still passes this check — the chair reads genuinely held for ≤30s. This is the FAIL-SAFE
+  // direction: a dead peer looks briefly alive, so a revive is momentarily REFUSED and then
+  // self-heals at TTL; it never admits a SECOND session into an occupied chair (the dangerous
+  // direction). a0c93bb closed the COLD-cache door (a protected pid probes to null → vacant); this
+  // warm-cache door is left open on purpose — Windows does not recycle a pid onto a chosen number
+  // within 30s, so the probability is low and the outcome transient. If pid-reuse ever gets faster
+  // or PIDSTART_TTL grows, this window grows with it — re-probe for an isAlive-but-cache-fresh pid
+  // in the impostor path if that ever changes.
   return claim.at >= t - CLAIM_SKEW_MS;
 }
 
