@@ -1325,13 +1325,11 @@ async function maybeOfferUpdate(originalArgs) {
     if (!process.stdin.isTTY || process.env.ARC_RUNTIME_ACCOUNT) return;
     const U = require('./arc-update');
     const info = await U.checkForUpdate({ timeoutMs: 1500 });
-    if (!info.available || info.declined) return;
-    const rel = await U.latestRelease(1500);
-    if (!rel || !rel.tarball) return;
+    if (!info.available || info.declined || !info.tarball) return;   // tarball comes from the check now (no re-fetch)
     const yes = await promptYesNo(`\x1b[36m[arc]\x1b[0m a newer arc is available: ${info.installed} → ${info.latest}. Upgrade now? [y/N] `);
     if (!yes) { U.recordDecline(info.latest); return; }
     process.stdout.write(`[arc] upgrading to ${info.latest}…\n`);
-    const r = U.downloadAndInstall(rel.tag, rel.tarball);
+    const r = U.downloadAndInstall(info.latest, info.tarball);
     process.stdout.write(`[arc] ${r.message}\n`);
     if (r.ok) {
       const re = spawnSync(process.execPath, [process.argv[1], ...(originalArgs || [])], { stdio: 'inherit', env: process.env });
@@ -1345,10 +1343,9 @@ async function cmdUpdate() {
   process.stdout.write('[arc] checking for a newer release…\n');
   const info = await U.checkForUpdate({ force: true, timeoutMs: 4000 });
   if (!info.available) { process.stdout.write(`[arc] up to date (installed ${info.installed}${info.latest ? `, latest ${info.latest}` : ''}).\n`); return; }
-  const rel = await U.latestRelease(4000);
-  if (!rel || !rel.tarball) { process.stderr.write('[arc] could not resolve the release tarball.\n'); process.exit(1); }
+  if (!info.tarball) { process.stderr.write('[arc] could not resolve the release tarball.\n'); process.exit(1); }
   process.stdout.write(`[arc] upgrading ${info.installed} → ${info.latest}…\n`);
-  const r = U.downloadAndInstall(rel.tag, rel.tarball);
+  const r = U.downloadAndInstall(info.latest, info.tarball);
   process.stdout.write(`[arc] ${r.ok ? '✓ ' : 'FAILED — '}${r.message}\n`);
   process.exit(r.ok ? 0 : 1);
 }

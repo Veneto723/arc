@@ -93,19 +93,20 @@ async function checkForUpdate(opts = {}) {
   try { cache = JSON.parse(fs.readFileSync(cp, 'utf8')) || {}; } catch {}
   const fresh = !opts.force && cache.checkedAt && now - cache.checkedAt < CHECK_TTL_MS;
   let latest = cache.latest || null;
+  let tarball = cache.tarball || null;   // returned so callers don't re-fetch (audit #199 Q1)
   if (!fresh) {
     let got = null;
     try { got = await fetch(); } catch {}
     if (got && got.tag) {
-      latest = got.tag;
-      writeCache(cp, { ...cache, checkedAt: now, latest, tarball: got.tarball });
+      latest = got.tag; tarball = got.tarball || null;
+      writeCache(cp, { ...cache, checkedAt: now, latest, tarball });
     } else {
       // A failed check must not retry on every single launch — stamp the attempt, keep the old tag.
       writeCache(cp, { ...cache, checkedAt: now });
     }
   }
   const available = !!latest && cmpVer(latest, installed) > 0;
-  return { available, latest, installed, declined: cache.declined === latest };
+  return { available, latest, installed, tarball, declined: cache.declined === latest };
 }
 
 function writeCache(cp, obj) {
@@ -172,8 +173,10 @@ function doRelease(bump, opts = {}) {
   const remote = (git(['remote', 'get-url', 'origin']).stdout || '').trim();
   // Strict: origin must be Veneto723/arc (https OR ssh both contain "Veneto723/arc"). The release
   // itself is pushed to REPO explicitly via `gh --repo`, so releasing from a fork's clone would send
-  // it somewhere the working tree isn't — refuse rather than surprise.
-  if (!/Veneto723[/:]arc(\.git)?(\b|$)/.test(remote)) {
+  // it somewhere the working tree isn't — refuse rather than surprise. ANCHOR to end (audit #199):
+  // a trailing \b let "Veneto723/arc-fork" and "…/arc-experiments" pass (\b sits between 'c' and '-'),
+  // so a same-owner differently-named clone would publish the WRONG tree to the real repo. `$` shuts it.
+  if (!/Veneto723[/:]arc(\.git)?$/.test(remote)) {
     return { ok: false, message: `origin is "${remote}", expected ${REPO} — refusing to release the wrong repo` };
   }
   if ((git(['status', '--porcelain']).stdout || '').trim()) return { ok: false, message: 'working tree is dirty — commit or stash before releasing' };

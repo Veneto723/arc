@@ -4011,9 +4011,14 @@ try {
   const wrong = mkrepo('https://github.com/someone/other.git', '1.0.0');
   ok('...refuses the WRONG origin (a fork would push the release elsewhere than the tree)',
     U.doRelease('patch', { cwd: wrong, dryRun: true }).ok === false && /refusing to release the wrong repo|expected/.test(U.doRelease('patch', { cwd: wrong, dryRun: true }).message));
+  // audit #199 Q4: a trailing \b let a SAME-OWNER, differently-named clone slip through, then cut a
+  // release to the REAL repo (gh --repo) from the wrong tree — irreversible. The anchor ($) shuts it.
+  const fork = mkrepo('https://github.com/Veneto723/arc-fork.git', '1.0.0');
+  ok('...and refuses a same-owner DIFFERENTLY-NAMED clone (Veneto723/arc-fork must NOT pass; the real arc.git did, above)',
+    U.doRelease('patch', { cwd: fork, dryRun: true }).ok === false);
   ok('downloadAndInstall refuses with no tarball url (never a half-install)',
     U.downloadAndInstall('v9', null).ok === false);
-  for (const d of [good, wrong]) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of [good, wrong, fork]) fs.rmSync(d, { recursive: true, force: true });
 } catch (e) { ok('arc-update', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- arc-stop-hook (auto-feed at TURN END, no human keystroke) ---------------
