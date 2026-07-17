@@ -6,6 +6,7 @@ not me: deciding what arc should become (that is the human's call), investigatio
         hand to a `research` peer instead of grinding on alone, or REVIEWING MY OWN test
         results — every measured claim goes to the `audit` chair before it enters the record
         (standing rule from the human, 2026-07-16; authors do not mark their own homework)
+paths: src/** test/** install.ps1 skills/** bundles/** mcp/** pool/**
 
 Notes for whoever sits here next:
 
