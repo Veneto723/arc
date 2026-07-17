@@ -3946,6 +3946,8 @@ try {
   ok('the peers skill teaches: a result is terminal, receipts are automatic, don\'t send "received"',
     /do not acknowledge a result/i.test(skillR) && /receipt/i.test(skillR)
     && /seen by research/.test(skillR) && /delivered into their context, not read-and-agreed/i.test(skillR));
+  ok('...and the STRICTER cut: a delegated decision closes on receipt — don\'t report a call nobody awaits',
+    /closes on receipt/i.test(skillR) && /your call/i.test(skillR) && /Don't post the decision twice/i.test(skillR));
 
   for (const r of ['a', 'b', 'c']) { try { fs.unlinkSync(path.join(cache, `arc-state-${S(r)}.json`)); } catch {} try { fs.unlinkSync(path.join(cache, `arc-role-${S(r)}.json`)); } catch {} }
   fs.rmSync(rroot, { recursive: true, force: true });

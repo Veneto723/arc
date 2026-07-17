@@ -220,6 +220,15 @@ nothing — the loop was already closed by the result — and if that session wa
 Reply only when you carry *substance* — a correction, a follow-up, a new ask. A note sticks to the
 board when it carries something; **silence is the default.**
 
+And a stricter cut, because even a *substantive-looking* reply can be waste: **a result that hands
+you the decision closes on receipt.** When a verdict delegates the call — *"your call"*, *"low
+severity, ship it"* — the loop is closed the moment it reaches you; the choice is now yours to make
+**silently.** Reporting back *what you decided* tells the other session the outcome of a call they
+already handed away. So reply only if they **asked** you to report, if your decision creates a **new
+action** for them, or if you are **overriding** their advice and they would act on the stale state.
+Otherwise say nothing: the record of what you did already lives in the commit — which announces
+itself to the board and names the finding it answers. Don't post the decision twice.
+
 You don't need the ack, because arc already shows you the receipt. Run `arc notes` and your recent
 sent notes carry it — derived from the reader's cursor, no note of its own, no ping to anyone:
 
