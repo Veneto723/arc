@@ -487,6 +487,135 @@ try {
   }
 } catch (e) { ok('arc-sync --dest works', false, e.message); }
 
+// ---- arc-sync — the board travels (export stages .arc, import merges it) --------
+section('arc-sync (board export/import: the ledger merge + the audit-signed binning)');
+try {
+  const sync = require(path.join(SRC, 'arc-sync.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
+
+  // -- mergeLedgers: the whole feature's correctness lives here --------------------
+  const J = (o) => JSON.stringify(o);
+  const noid1 = J({ from: 'a', body: 'legacy one' }), noid2 = J({ from: 'b', body: 'legacy two' });
+  const idA = J({ id: 'org1:aa', from: 'a', body: 'A' }), idB = J({ id: 'org1:bb', from: 'b', body: 'B' });
+  const idC = J({ id: 'org2:cc', from: 'c', body: 'C' });
+  const led = (...ls) => ls.join('\n') + '\n';
+
+  ok('merge: identical ledgers are a no-op (added 0)',
+    (() => { const m = sync.mergeLedgers(led(noid1, idA), led(noid1, idA)); return m.ok && m.added === 0 && m.text === led(noid1, idA); })());
+  ok('merge: archive ahead — new id-bearing notes append in archive order',
+    (() => { const m = sync.mergeLedgers(led(noid1, idA), led(noid1, idA, idB, idC));
+      return m.ok && m.added === 2 && m.text === led(noid1, idA, idB, idC); })());
+  ok('merge: local ahead — local kept byte-identical, nothing added',
+    (() => { const m = sync.mergeLedgers(led(noid1, idA, idB), led(noid1, idA)); return m.ok && m.added === 0 && m.text === led(noid1, idA, idB); })());
+  ok('merge: both sides new — union by id, local order first, archive-only appended',
+    (() => { const m = sync.mergeLedgers(led(idA, idB), led(idA, idC)); return m.ok && m.added === 1 && m.text === led(idA, idB, idC); })());
+  ok('merge: the LONGER id-less prefix wins whole (same synthetic ids on both machines)',
+    (() => { const m = sync.mergeLedgers(led(noid1, idA), led(noid1, noid2, idA));
+      return m.ok && m.added === 1 && m.text === led(noid1, noid2, idA); })());
+  ok('merge: DIVERGENT id-less prefixes REFUSE, naming the first diverging line',
+    (() => { const m = sync.mergeLedgers(led(noid1, idA), led(noid2, idA));
+      return m.ok === false && m.line === 1 && m.local === noid1 && m.archive === noid2 && /diverge/.test(m.reason); })());
+  ok('merge: a torn archive tail line (no id) is never imported',
+    (() => { const m = sync.mergeLedgers(led(idA), led(idA, idB) + '{"from":"x","bo'); return m.ok && m.added === 1 && m.text === led(idA, idB); })());
+  ok('merge: a fresh destination takes the whole archive',
+    (() => { const m = sync.mergeLedgers('', led(noid1, idA)); return m.ok && m.added === 2 && m.text === led(noid1, idA); })());
+
+  // -- E2E: export a repo's board, import it twice (same repo merge; --dest fresh) --
+  if (has('tar', ['--version'])) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'brd-'));
+    const repoA = path.join(base, 'repoA');
+    fs.mkdirSync(path.join(repoA, '.git'), { recursive: true });
+    const bA = RM.resolveBoard(repoA); RM.ensureBoard(bA);
+    const cidA = '99999999-aaaa-bbbb-cccc-111111111111';
+    // the ledger: two frozen id-less lines, then two id-bearing
+    fs.writeFileSync(path.join(bA.planDir, 'notes.jsonl'), led(noid1, noid2, idA, idB));
+    // claims: one whose conversation travels (WITH a pid — export must strip it), one orphan
+    fs.writeFileSync(path.join(bA.planDir, 'claim-alpha.json'), J({ role: 'alpha', pid: 999999, sessionId: 'a-sess', convId: cidA, at: 7000 }));
+    fs.writeFileSync(path.join(bA.planDir, 'claim-ghost.json'), J({ role: 'ghost', pid: 999998, sessionId: 'g-sess', convId: 'no-such-conv-anywhere', at: 7000 }));
+    // cursors: alpha's session travels; cursor-notes is the OTHER machine's human — must stay home
+    fs.writeFileSync(path.join(bA.planDir, 'cursor-alpha.json'), J({ o: { x: 2 }, seq: 4, at: 9000 }));
+    fs.writeFileSync(path.join(bA.planDir, 'cursor-notes.json'), J({ o: { x: 1 }, seq: 1, at: 9000 }));
+    fs.writeFileSync(path.join(bA.planDir, 'seen-alpha.json'), J({ seq: 4, at: 9000 }));
+    // machine identity + transients — none of these may enter the archive
+    fs.writeFileSync(path.join(bA.planDir, 'origin.json'), J({ id: 'deadbeef', at: 1 }));
+    fs.writeFileSync(path.join(bA.planDir, 'anchor-state.json'), J({ lastHead: 'abc123' }));
+    fs.writeFileSync(path.join(bA.planDir, 'born-alpha.json'), J({ at: 1 }));
+    fs.writeFileSync(path.join(bA.planDir, 'spill-3.txt'), 'delivery cache');
+    fs.mkdirSync(path.join(repoA, '.arc', 'roles'), { recursive: true });
+    fs.writeFileSync(path.join(repoA, '.arc', 'roles', 'alpha.md'), '# alpha\nowns: x\n');
+    // the session whose launch cwd names this repo
+    const projA = sync.encodeProject(repoA);
+    const pdA = path.join(CLAUDE, 'projects', projA); fs.mkdirSync(pdA, { recursive: true });
+    fs.writeFileSync(path.join(pdA, cidA + '.jsonl'),
+      JSON.stringify({ type: 'user', cwd: repoA, message: { content: 'hi' }, timestamp: '2026-07-01T10:00:00.000Z' }) + '\n');
+
+    const tgz = path.join(base, 'board.tgz');
+    const ex = sync.doExport('brd-sess', `${projA} --out "${tgz}"`);
+    ok('export succeeds and reports the board riding along', ex.ok === true && /board "repoa"/.test(ex.message), ex.message);
+    ok('...the staging dir is cleaned up (finally)', !fs.existsSync(path.join(CLAUDE, 'projects', sync.BOARD_PREFIX + projA)));
+
+    // crack the archive open: the binning must hold ON DISK, not just in the report
+    const peek = fs.mkdtempSync(path.join(base, 'peek-'));
+    sync.runTar(['-xzf', tgz], { cwd: peek });
+    const stage = fs.readdirSync(peek).find((d) => d.startsWith(sync.BOARD_PREFIX));
+    ok('the archive holds a staged board dir', !!stage);
+    const sp = (rel) => path.join(peek, stage, rel);
+    ok('...ledger travels byte-exact', fs.readFileSync(sp('peer/notes.jsonl'), 'utf8') === led(noid1, noid2, idA, idB));
+    const tombA = JSON.parse(fs.readFileSync(sp('peer/claim-alpha.json'), 'utf8'));
+    ok('...claims are TOMBSTONED at export — pid stripped, convId kept', tombA.pid === undefined && tombA.convId === cidA && tombA.sessionId === 'a-sess');
+    ok('...origin/anchor-state/born/spill NEVER travel',
+      !fs.existsSync(sp('peer/origin.json')) && !fs.existsSync(sp('peer/anchor-state.json'))
+      && !fs.existsSync(sp('peer/born-alpha.json')) && !fs.existsSync(sp('peer/spill-3.txt')));
+    ok('...the charter travels', /# alpha/.test(fs.readFileSync(sp('roles/alpha.md'), 'utf8')));
+    ok('...board.json records the source repo root', JSON.parse(fs.readFileSync(sp('board.json'), 'utf8')).root === bA.root);
+
+    // IMPORT 1 — same repo: local moved on (a local-only note), archive merges INTO it
+    fs.appendFileSync(path.join(bA.planDir, 'notes.jsonl'), idC + '\n');
+    const im1 = sync.doImport('brd-sess', `"${tgz}"`);
+    ok('import into the SAME repo merges (0 new: archive is a subset of local)', im1.ok === true && /0 new note/.test(im1.message), im1.message);
+    ok('...local-only note survives untouched', fs.readFileSync(path.join(bA.planDir, 'notes.jsonl'), 'utf8') === led(noid1, noid2, idA, idB, idC));
+    ok('...the orphan claim is DROPPED — a revive pointer arc could not honour', /claim ghost: dropped/.test(im1.message));
+    ok('...the phantom-project guard holds: no board dir leaked into ~/.claude/projects',
+      !fs.readdirSync(path.join(CLAUDE, 'projects')).some((d) => d.startsWith(sync.BOARD_PREFIX)));
+
+    // IMPORT 2 — a HELD chair is never tombstoned (the live-destination guard, audit #232)
+    fs.writeFileSync(path.join(CLAUDE, 'cache', 'arc-state-brd-live.json'), J({ pid: process.pid, cwd: repoA }));
+    fs.writeFileSync(path.join(bA.planDir, 'claim-alpha.json'), J({ role: 'alpha', pid: process.pid, sessionId: 'brd-live', convId: cidA, at: Date.now() }));
+    const im2 = sync.doImport('brd-sess', `"${tgz}"`);
+    const liveClaim = JSON.parse(fs.readFileSync(path.join(bA.planDir, 'claim-alpha.json'), 'utf8'));
+    ok('a HELD chair survives import — never tombstone a live peer', /claim alpha: chair is HELD/.test(im2.message) && liveClaim.pid === process.pid, im2.message);
+
+    // IMPORT 3 — --dest onto a fresh clone: the board lands whole, gated correctly
+    const destOuter = path.join(base, 'dest');
+    fs.mkdirSync(path.join(destOuter, path.basename(bA.root), '.git'), { recursive: true });
+    const im3 = sync.doImport('brd-sess', `"${tgz}" --dest "${destOuter}"`);
+    const bB = RM.resolveBoard(path.join(destOuter, path.basename(bA.root)));
+    ok('--dest: the board lands at the re-rooted repo', im3.ok === true && fs.existsSync(path.join(bB.planDir, 'notes.jsonl')), im3.message);
+    ok('...fresh destination takes the whole archive ledger', fs.readFileSync(path.join(bB.planDir, 'notes.jsonl'), 'utf8') === led(noid1, noid2, idA, idB));
+    const tombB = JSON.parse(fs.readFileSync(path.join(bB.planDir, 'claim-alpha.json'), 'utf8'));
+    ok('...alpha claim lands as a pid-less tombstone (its transcript travelled)', tombB.pid === undefined && tombB.convId === cidA);
+    ok('...ghost claim never lands (transcript absent)', !fs.existsSync(path.join(bB.planDir, 'claim-ghost.json')));
+    ok('...cursor-alpha carried; cursor-notes stayed home',
+      fs.existsSync(path.join(bB.planDir, 'cursor-alpha.json')) && !fs.existsSync(path.join(bB.planDir, 'cursor-notes.json')));
+    ok('...origin was NOT imported — the destination mints its own', !fs.existsSync(path.join(bB.planDir, 'origin.json')));
+    ok('...the charter arrived', fs.existsSync(path.join(bB.root, '.arc', 'roles', 'alpha.md')));
+
+    // IMPORT 4 — divergence refuses E2E, local untouched, the LINE is named
+    const before = led(noid1, idA);
+    fs.writeFileSync(path.join(bA.planDir, 'notes.jsonl'), before.replace('legacy one', 'REWRITTEN HISTORY'));
+    const im4 = sync.doImport('brd-sess', `"${tgz}"`);
+    ok('divergent id-less prefixes REFUSE the merge and name the line',
+      /merge REFUSED/.test(im4.message) && /line 1/.test(im4.message), im4.message);
+    ok('...and the local board is untouched by the refusal',
+      fs.readFileSync(path.join(bA.planDir, 'notes.jsonl'), 'utf8') === before.replace('legacy one', 'REWRITTEN HISTORY'));
+
+    try { fs.unlinkSync(path.join(CLAUDE, 'cache', 'arc-state-brd-live.json')); } catch {}
+    fs.rmSync(base, { recursive: true, force: true });
+  } else {
+    ok('(tar unavailable — skipped the board round-trip)', true);
+  }
+} catch (e) { ok('arc-sync board export/import', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- 5. arc-switch-core — peek + trash rendering ------------------------------
 section('arc-switch-core');
 try {
@@ -1446,13 +1575,15 @@ try {
   const b2 = RM8.resolveBoard(old);
   ok('a fresh resolve now points at .arc/peer (then the fallback never fires again)',
     b2.planDir === path.join(b2.root, '.arc', 'peer') && RM8.allNotes(b2).length === 2);
-  ok('the self-ignore came along, so the board still never enters the project history',
-    /^\*$/m.test(fs.readFileSync(path.join(old, '.arc', 'peer', '.gitignore'), 'utf8')));
-  ok('...and it does NOT swallow its committed sibling .arc/roles/',
+  ok('the self-ignore now sits ONE LEVEL UP (.arc/.gitignore) and covers the whole .arc',
+    /^\*$/m.test(fs.readFileSync(path.join(old, '.arc', '.gitignore'), 'utf8')));
+  ok('...and the retired per-dir pair inside peer/ is gone (the union merge job moved into arc import)',
+    !fs.existsSync(path.join(old, '.arc', 'peer', '.gitignore')) && !fs.existsSync(path.join(old, '.arc', 'peer', '.gitattributes')));
+  ok('...and it DOES swallow .arc/roles/ — the operator ruled the whole .arc machine state (2026-07-17)',
     (() => { fs.mkdirSync(path.join(old, '.arc', 'roles'), { recursive: true });
       fs.writeFileSync(path.join(old, '.arc', 'roles', 'code.md'), ['# code', '', 'owns: things', ''].join('\n'));
       const r = spawnSync('git', ['check-ignore', '.arc/roles/code.md'], { cwd: old, encoding: 'utf8' });
-      return r.status !== 0; })());
+      return r.status === 0; })());
 
   // A BRAND-NEW board must simply be .peer — no legacy anything.
   const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'mig2-'));
@@ -3175,10 +3306,11 @@ try {
   ok('no repo → the folder itself is the board', R.resolveBoard(outside).root === R.canonical(outside));
   ok('a board is never nameless', !!R.resolveBoard(repo).name && !!R.resolveBoard('C:\\').name);
 
-  // 2) the board self-ignores
+  // 2) the board self-ignores — from .arc/.gitignore, covering the WHOLE .arc
   R.ensureBoard(rTop);
-  const gi = fs.readFileSync(path.join(rTop.planDir, '.gitignore'), 'utf8');
-  ok('the board .gitignore ignores everything (incl. itself)', /^\*$/m.test(gi));
+  const gi = fs.readFileSync(path.join(path.dirname(rTop.planDir), '.gitignore'), 'utf8');
+  ok('the .arc .gitignore ignores everything (incl. itself)', /^\*$/m.test(gi));
+  ok('...and peer/ carries no per-dir pair of its own', !fs.existsSync(path.join(rTop.planDir, '.gitignore')) && !fs.existsSync(path.join(rTop.planDir, '.gitattributes')));
 
   // 3) append + seq is the LINE NUMBER (race-free: two writers can't collide)
   R.appendNote(rTop, { from: 'research', to: 'coding', body: 'spec for P-014 changed' });

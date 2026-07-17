@@ -36,6 +36,15 @@ const PROJECTS = path.join(HOME, '.claude', 'projects');
 const CACHE = path.join(HOME, '.claude', 'cache');
 const BACKUPS = path.join(HOME, '.claude', 'backups');
 
+// The board (<repo>/.arc) travels WITH its sessions — same archive, different tree. The
+// tree problem is solved the way the manifest already solves it: STAGE into PROJECTS,
+// list the files, clean up in `finally`. Never a second tar -C: runTar's --force-local
+// fallback exists because tar dialects already bite in this file, and one archive root
+// is the only shape both GNU tar and bsdtar agree on.
+const B = require('./arc-board');
+const BOARD_PREFIX = '.arc-board-';   // dot-prefixed: discover() never mistakes a stage for a project
+const listDir = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
+
 // ---- small helpers ---------------------------------------------------------
 
 function stamp() {
@@ -250,6 +259,126 @@ function parseFlags(argStr) {
   return { flags, pos };
 }
 
+// ---- the board: what travels, what is stripped, what stays home ---------------
+// The audit-signed binning (#227/#232):
+//   peer/notes.jsonl     CARRY  — the content; import owns the merge (mergeLedgers below)
+//   roles/*.md           CARRY  — the whole .arc is machine state (operator ruling 2026-07-17);
+//                                 export/import is its ONLY transport now
+//   peer/claim-*.json    TOMBSTONE {role, sessionId, convId, at} — the pid is stripped AT EXPORT,
+//                                 so the archive at rest can never squat a chair even hand-extracted
+//                                 (isHolder reads a pid-less claim VACANT); import strips AGAIN,
+//                                 because archives made by older exports or by hand won't be clean
+//   peer/cursor-/seen-*  CARRY  — import gates each on its session actually being present there
+//   origin.json          NEVER  — one origin, one writer; carrying it is the silent ord break
+//   anchor-state.json    NEVER  — a git position, stale on arrival by construction
+//   born-/lease-/.lock-/*.tmp-/spill-*  NEVER — transient, or re-derived: a spill file is
+//                                 re-written FROM the ledger on every delivery (arc-notes
+//                                 directBody); it is a delivery cache, not content
+
+// Merge an archive ledger into a local one. Append-only union with ONE hard rule.
+//   * id-bearing notes union by id: local lines keep their order, archive-only notes are
+//     appended in archive order. That preserves every origin's RELATIVE order — which is
+//     what `ord` and the per-origin cursors need — because any exported ledger holds a
+//     per-origin PREFIX of that origin's true sequence (a single writer appends in order,
+//     and a full-file copy cannot reorder it), so archive-only notes of an origin always
+//     EXTEND past the local prefix; appending keeps them in sequence.
+//   * id-LESS lines are the frozen prefix. arc-board.js:433 mints their ids from POSITION
+//     at read time and never writes them back — so two boards agree on those ids ONLY if
+//     they agree on those lines, byte for byte, in order. The shorter prefix must be a
+//     byte-prefix of the longer. Anything else means the same ~:000042 names two DIFFERENT
+//     notes: a union would silently drop one side or re-parent a thread — the failure
+//     arc-board.js:24-31 proved with two real clones. There is no sound recovery (re-iding
+//     un-freezes what the design froze; keeping both prefixes doubles history), so we
+//     REFUSE, naming the first diverging line. A false refuse costs a retry; a false
+//     accept costs a silently corrupted reference graph.
+function mergeLedgers(localText, archiveText) {
+  const split = (t) => String(t || '').split('\n').filter((l) => l.trim());
+  const idOf = (l) => { try { return JSON.parse(l).id || null; } catch { return null; } };
+  const L = split(localText), A = split(archiveText);
+  const pfxLen = (arr) => { let n = 0; while (n < arr.length && !idOf(arr[n])) n++; return n; };
+  const lp = pfxLen(L), ap = pfxLen(A);
+  for (let i = 0; i < Math.min(lp, ap); i++) {
+    if (L[i] !== A[i]) {
+      return { ok: false, line: i + 1, local: L[i], archive: A[i],
+        reason: `the id-less prefixes diverge at line ${i + 1} — the two boards minted DIFFERENT notes at the same position, so merging would silently re-point references` };
+    }
+  }
+  // The longer id-less prefix wins whole: its extra lines carry the same synthetic ids on
+  // both machines (the Nth id-less line is ~:N on each), so references to them stay stable.
+  const head = ap > lp ? A.slice(0, ap) : L.slice(0, lp);
+  const lTail = L.slice(lp), aTail = A.slice(ap);
+  const have = new Set(lTail.map(idOf));
+  const merged = [...head, ...lTail];
+  let added = Math.max(0, ap - lp);
+  for (const line of aTail) {
+    const id = idOf(line);                       // a torn archive tail line (id null) is never imported
+    if (id && !have.has(id)) { merged.push(line); have.add(id); added++; }
+  }
+  return { ok: true, text: merged.join('\n') + '\n', added };
+}
+
+// The boards behind a set of selected sessions: launch cwd -> repo root -> .arc, deduped
+// by root (many project dirs, one board). A root whose tree is gone, or whose board has
+// no ledger, contributes nothing.
+function sessionBoards(selected) {
+  const out = new Map();
+  for (const s of selected) {
+    const launch = sniffLaunchCwd(s.jsonl, s.project);
+    if (!launch || !fs.existsSync(launch)) continue;
+    let board; try { board = B.resolveBoard(launch); } catch { continue; }
+    if (out.has(board.root)) continue;
+    if (!fs.existsSync(path.join(board.planDir, 'notes.jsonl'))) continue;
+    out.set(board.root, board);
+  }
+  return [...out.values()];
+}
+
+// Stage one board under PROJECTS for the tar. Returns { stage, rels, notes, claims, roleMds }.
+function stageBoard(board, usedNames) {
+  let name = BOARD_PREFIX + encodeProject(board.root);
+  while (usedNames && usedNames.has(name)) name += '-2';   // encodeProject can collide; roots cannot
+  if (usedNames) usedNames.add(name);
+  const stage = path.join(PROJECTS, name);
+  rm(stage);
+  try { return stageBoardInto(board, stage, name); }
+  catch (e) { rm(stage); throw e; }   // a half-written stage must not outlive the throw
+}
+function stageBoardInto(board, stage, name) {
+  const rels = [];
+  const put = (rel, data) => {
+    const fp = path.join(stage, rel);
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    fs.writeFileSync(fp, data);
+    rels.push(`${name}/${rel}`);
+  };
+  // the ledger travels BYTE-EXACT — the merge on the other side compares bytes
+  const ledger = fs.readFileSync(path.join(board.planDir, 'notes.jsonl'));
+  put('peer/notes.jsonl', ledger);
+  let claims = 0;
+  for (const f of listDir(board.planDir)) {
+    const cm = /^claim-(.+)\.json$/.exec(f);
+    if (cm) {
+      try {
+        const c = JSON.parse(fs.readFileSync(path.join(board.planDir, f), 'utf8'));
+        put(`peer/${f}`, JSON.stringify({ role: c.role || cm[1], sessionId: c.sessionId || null, convId: c.convId || null, at: c.at || 0 }));
+        claims++;
+      } catch {}
+    } else if (/^(cursor|seen)-.+\.json$/.test(f)) {
+      try { put(`peer/${f}`, fs.readFileSync(path.join(board.planDir, f))); } catch {}
+    }
+  }
+  let roleMds = 0;
+  const rolesDir = path.join(board.root, '.arc', 'roles');
+  for (const f of listDir(rolesDir)) {
+    if (f.endsWith('.md')) { try { put(`roles/${f}`, fs.readFileSync(path.join(rolesDir, f))); roleMds++; } catch {} }
+  }
+  // the source repo root is recorded HERE, where the tree exists — repoRoot() fabricates
+  // rather than errors on a missing path, so import could never recover it after the fact
+  put('board.json', JSON.stringify({ tool: 'arc-sync', board: 1, root: board.root, name: board.name, at: new Date().toISOString() }, null, 2));
+  const notes = String(ledger).split('\n').filter((l) => l.trim()).length;
+  return { stage, rels, notes, claims, roleMds };
+}
+
 // ---- export ----------------------------------------------------------------
 
 function doExport(session, argStr) {
@@ -294,12 +423,24 @@ function doExport(session, argStr) {
   const manifest = {
     tool: 'arc-sync', version: 1, machine: os.hostname(), at: new Date().toISOString(),
     sessions: selected.map((s) => ({ project: s.project, id: s.id, size: s.size, lastTs: s.lastTs, title: s.title })),
+    boards: [],
   };
   const manPath = path.join(PROJECTS, '.arc-manifest.json');
   const listPath = path.join(CACHE, `arc-export-list-${process.pid}.txt`);
   const out = flags.out ? path.resolve(flags.out) : path.join(HOME, `arc-export-${stamp()}.tgz`);
+  const staged = [];
   try {
     fs.mkdirSync(CACHE, { recursive: true });
+    // the sessions' boards ride along — staged under PROJECTS, gone again in the finally
+    const usedNames = new Set();
+    for (const board of sessionBoards(selected)) {
+      try {
+        const st = stageBoard(board, usedNames);
+        staged.push({ ...st, boardName: board.name });
+        rels.push(...st.rels);
+        manifest.boards.push({ root: board.root, name: board.name, notes: st.notes });
+      } catch { /* a board that cannot stage never blocks the sessions */ }
+    }
     fs.writeFileSync(manPath, JSON.stringify(manifest, null, 2));
     fs.writeFileSync(listPath, ['.arc-manifest.json', ...rels].join('\n'));
     // --force-local: GNU tar otherwise reads a Windows `C:\...` archive path as a
@@ -311,12 +452,17 @@ function doExport(session, argStr) {
   } finally {
     try { fs.unlinkSync(manPath); } catch {}
     try { fs.unlinkSync(listPath); } catch {}
+    for (const st of staged) rm(st.stage);
   }
   let archiveSize = 0; try { archiveSize = fs.statSync(out).size; } catch {}
+  const boardLine = staged.length
+    ? staged.map((st) => `  + board "${st.boardName}" rides along (${st.notes} notes, ${st.roleMds} charter(s), ${st.claims} claim tombstone(s) — pids stripped)\n`).join('')
+    : '';
   return {
     ok: true,
     message:
       `✓ exported ${selected.length} session(s) — ${what} (${human(totalBytes)} → ${human(archiveSize)} archive)\n` +
+      boardLine +
       `  ${out}\n` +
       `  copy that file to the other PC, then run:  arc:import "${out.split(path.sep).pop()}"  (from wherever you put it)`,
   };
@@ -364,6 +510,8 @@ function doImport(session, argStr) {
   const backupDir = path.join(BACKUPS, `arc-import-${stamp()}`);
   const added = [], updated = [], skipped = [];
   let backedUp = false;
+  const boardStages = [];        // staged boards found at the archive root — processed after sessions
+  const archiveIds = new Set();  // every session id the archive carries (the cursor/claim gate needs it)
 
   // walk extracted <proj>/<id>.jsonl
   let projs = []; try { projs = fs.readdirSync(tmp); } catch {}
@@ -371,6 +519,12 @@ function doImport(session, argStr) {
     const pdir = path.join(tmp, proj);
     let st; try { st = fs.statSync(pdir); } catch { continue; }
     if (!st.isDirectory()) continue; // skips .arc-manifest.json
+    // A staged BOARD is not a project. Without this branch the walk files its notes.jsonl
+    // into ~/.claude/projects as a phantom conversation named "notes" (no dot-skip below,
+    // unlike discover()) — or, under --dest, skips it as "source path could not be
+    // recovered", since a note record carries no cwd. Both silently wrong.
+    if (proj.startsWith(BOARD_PREFIX)) { boardStages.push(pdir); continue; }
+    if (proj.startsWith('.')) continue;   // mirror discover(): a dot-dir is never a project
     let files = []; try { files = fs.readdirSync(pdir); } catch {}
 
     // Where do this project's sessions land? Default: its original folder. With --dest:
@@ -397,6 +551,7 @@ function doImport(session, argStr) {
     for (const f of files) {
       if (!f.endsWith('.jsonl')) continue;
       const id = f.slice(0, -6);
+      archiveIds.add(id);
       const srcJsonl = path.join(pdir, f);
       const srcSide = path.join(pdir, id);
       const dstDir = path.join(PROJECTS, destProjName);
@@ -438,10 +593,21 @@ function doImport(session, argStr) {
       }
     }
   }
+
+  // boards ride AFTER the sessions — the claim/cursor gate asks "is this conversation
+  // available HERE now?", and that answer includes the transcripts just imported.
+  const boardLines = [];
+  const availableConv = (id) => archiveIds.has(id) || !!findTranscriptFile(id);
+  for (const stage of boardStages) {
+    try {
+      importBoard(stage, { destRoot, dryRun: !!flags['dry-run'], availableConv, backupDir, lines: boardLines, markBackedUp: () => { backedUp = true; } });
+    } catch (e) { boardLines.push(`  board: FAILED — ${e.message} (local board untouched)`); }
+  }
   rm(tmp);
 
   const dry = flags['dry-run'] ? ' [DRY RUN — nothing changed]' : '';
   const lines = [`arc:import${dry} — added ${added.length}, updated ${updated.length}, skipped ${skipped.length}`];
+  lines.push(...boardLines);
   if (remaps.length) {
     lines.push(`  re-rooted under ${destRoot}:`);
     for (const r of remaps) lines.push(`    ${r.from}  →  ${r.to}${r.clash ? '   ⚠ same name as another project — MERGED into one folder' : ''}`);
@@ -457,6 +623,135 @@ function doImport(session, argStr) {
 }
 
 function rm(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} }
+
+// ---- board import ------------------------------------------------------------
+// Lands one staged board into its repo. The rules that are NOT obvious from the code:
+//   * a claim whose conversation is not available here is DROPPED — importing it would
+//     promise a revive arc cannot perform (the "scout" orphan, found live on ALYCE:
+//     a chair pointing at a transcript that existed on NEITHER machine). The gate is
+//     transcript-presence ONLY: charterlessness is a roster concern, and gating on it
+//     would also destroy WORKING pointers of undeclared roles (audit #232).
+//   * a claim whose chair is HELD here is never touched. Writing the archive's tombstone
+//     over a live claim flips isHolder to VACANT — a second session gets staffed into an
+//     occupied chair, and the live peer's convId is replaced by a stale one. Same lock
+//     as claimRole, so import serializes against a genuine claim in flight (audit #232;
+//     d63e4c8's bug at import scope, fixed the same way ca89a24 fixed it at close scope).
+//   * a cursor/seen whose session did NOT travel is dropped: a fresh session inheriting a
+//     read cursor would see zero unread and start BLIND — worse than any re-read (#227).
+function importBoard(stageDir, ctx) {
+  const { destRoot, dryRun, availableConv, backupDir, lines, markBackedUp } = ctx;
+  let meta;
+  try { meta = JSON.parse(fs.readFileSync(path.join(stageDir, 'board.json'), 'utf8')); }
+  catch { lines.push('  board: SKIPPED — stage carries no readable board.json'); return; }
+
+  let root = meta.root;
+  if (destRoot !== null && destRoot !== undefined) {
+    const base = path.win32.basename(String(meta.root).replace(/[\\/]+$/, ''));
+    if (!base) { lines.push(`  board "${meta.name}": SKIPPED — source root is a drive root, nothing to re-root under --dest`); return; }
+    root = path.win32.join(destRoot, base);
+  }
+  if (!fs.existsSync(root)) {
+    lines.push(`  board "${meta.name}": SKIPPED — destination ${root} does not exist${destRoot ? '' : ' (clone/create the repo first, or re-root with --dest)'}`);
+    return;
+  }
+  const board = B.resolveBoard(root);          // honours a legacy planDir if the destination still has one
+  if (!dryRun) B.ensureBoard(board);           // migrates + creates; mutates board.planDir — must precede any path use
+  const peerSrc = path.join(stageDir, 'peer');
+  const boardBackup = () => {
+    const d = path.join(backupDir, 'board-' + encodeProject(board.root));
+    fs.mkdirSync(d, { recursive: true });
+    markBackedUp();
+    return d;
+  };
+
+  // 1. the ledger — merge, refuse, or land fresh
+  let archText = ''; try { archText = fs.readFileSync(path.join(peerSrc, 'notes.jsonl'), 'utf8'); } catch {}
+  const localNotes = path.join(board.planDir, 'notes.jsonl');
+  const localText = fs.existsSync(localNotes) ? fs.readFileSync(localNotes, 'utf8') : '';
+  const m = mergeLedgers(localText, archText);
+  if (!m.ok) {
+    lines.push(`  board "${meta.name}": merge REFUSED — ${m.reason}`);
+    lines.push(`    local   line ${m.line}: ${String(m.local).slice(0, 160)}`);
+    lines.push(`    archive line ${m.line}: ${String(m.archive).slice(0, 160)}`);
+    lines.push('    the local board is untouched. These two boards are not copies of one history; merging would corrupt both.');
+    return;
+  }
+  if (dryRun) {
+    lines.push(`  board "${meta.name}" -> ${root}: would merge ${m.added} new note(s)${localText ? '' : ' (fresh board here)'}`);
+  } else {
+    if (m.added > 0) {
+      if (localText) fs.copyFileSync(localNotes, path.join(boardBackup(), 'notes.jsonl'));
+      const tmpF = `${localNotes}.tmp-${process.pid}`;
+      fs.writeFileSync(tmpF, m.text);
+      fs.renameSync(tmpF, localNotes);
+    }
+    lines.push(`  board "${meta.name}" -> ${root}: ${m.added} new note(s) merged${localText ? '' : ' (fresh board here)'}`);
+  }
+
+  // 2. claims — tombstone in, gated; never over a live holder
+  const archClaims = new Map();   // role -> tombstone (the cursor gate below needs the convIds)
+  for (const f of listDir(peerSrc)) {
+    const cm = /^claim-(.+)\.json$/.exec(f); if (!cm) continue;
+    const role = cm[1];
+    let c; try { c = JSON.parse(fs.readFileSync(path.join(peerSrc, f), 'utf8')); } catch { continue; }
+    const tomb = { role: c.role || role, sessionId: c.sessionId || null, convId: c.convId || null, at: c.at || 0 };
+    archClaims.set(role, tomb);
+    if (!tomb.convId || !availableConv(tomb.convId)) {
+      lines.push(`    claim ${role}: dropped — its conversation is not available here (a revive pointer arc could not honour)`);
+      continue;
+    }
+    if (dryRun) { lines.push(`    claim ${role}: would carry the revive pointer -> ${tomb.convId.slice(0, 8)}`); continue; }
+    try {
+      B.withLock(board, `role-${role}`, () => {
+        const local = B.roleClaim(board, role);
+        if (local && B.isHolder(local)) { lines.push(`    claim ${role}: chair is HELD by a live session here — kept (never tombstone a live peer)`); return; }
+        if (local && local.convId && (local.at || 0) >= (tomb.at || 0)) { lines.push(`    claim ${role}: local revive pointer is newer — kept`); return; }
+        B.atomicWriteJson(path.join(board.planDir, f), tomb);
+        lines.push(`    claim ${role}: revivable here as ${tomb.convId.slice(0, 8)}`);
+      });
+    } catch (e) { lines.push(`    claim ${role}: skipped (${e.message})`); }
+  }
+
+  // 3. cursors + seen — carry IFF that role's session travelled (or already lives here).
+  //    cursor-notes (the CLI reader) has no claim, so no convId — it stays home, correctly:
+  //    it is the OTHER machine's human's read position, not this one's.
+  for (const f of listDir(peerSrc)) {
+    const km = /^(cursor|seen)-(.+)\.json$/.exec(f); if (!km) continue;
+    const kind = km[1], who = km[2];
+    const tomb = archClaims.get(who);
+    if (!tomb || !tomb.convId || !availableConv(tomb.convId)) {
+      lines.push(`    ${kind} ${who}: dropped — its session did not travel (a fresh session must re-read, not inherit blindness)`);
+      continue;
+    }
+    let arch; try { arch = JSON.parse(fs.readFileSync(path.join(peerSrc, f), 'utf8')); } catch { continue; }
+    const dst = path.join(board.planDir, f);
+    let localNewer = false;
+    try { localNewer = ((JSON.parse(fs.readFileSync(dst, 'utf8')).at || 0) >= (arch.at || 0)); } catch {}
+    if (localNewer) { lines.push(`    ${kind} ${who}: local is newer — kept`); continue; }
+    if (!dryRun) B.atomicWriteJson(dst, arch);
+    lines.push(`    ${kind} ${who}: carried (its session travelled with it)`);
+  }
+
+  // 4. charters — hand-written files: newer mtime wins (tar preserves mtimes), loser backed up
+  const rolesSrc = path.join(stageDir, 'roles');
+  const rolesDst = path.join(board.root, '.arc', 'roles');
+  for (const f of listDir(rolesSrc)) {
+    if (!f.endsWith('.md')) continue;
+    const src = path.join(rolesSrc, f), dst = path.join(rolesDst, f);
+    let action = 'added';
+    if (fs.existsSync(dst)) {
+      if (fs.readFileSync(dst, 'utf8') === fs.readFileSync(src, 'utf8')) continue;
+      if (fs.statSync(dst).mtimeMs >= fs.statSync(src).mtimeMs) { lines.push(`    charter ${f}: local is newer — kept`); continue; }
+      if (!dryRun) {
+        const bdir = path.join(boardBackup(), 'roles'); fs.mkdirSync(bdir, { recursive: true });
+        fs.copyFileSync(dst, path.join(bdir, f));
+      }
+      action = 'updated';
+    }
+    if (!dryRun) { fs.mkdirSync(rolesDst, { recursive: true }); fs.copyFileSync(src, dst); }
+    lines.push(`    charter ${f}: ${action}`);
+  }
+}
 
 // ---- delete (to recoverable trash) -----------------------------------------
 
@@ -635,4 +930,4 @@ function emptyTrash() {
   return { ok: failed === 0, count: entries.length, bytes, failed };
 }
 
-module.exports = { doExport, doImport, discover, findTranscriptFile, trashSession, listTrash, restoreSession, emptyTrash, transcriptMeta, human, currentProject, encodeProject, sniffLaunchCwd, remapCwd, underPath, copyRemappingCwd, tokenize, runTar };
+module.exports = { doExport, doImport, discover, findTranscriptFile, trashSession, listTrash, restoreSession, emptyTrash, transcriptMeta, human, currentProject, encodeProject, sniffLaunchCwd, remapCwd, underPath, copyRemappingCwd, tokenize, runTar, mergeLedgers, sessionBoards, stageBoard, importBoard, BOARD_PREFIX };

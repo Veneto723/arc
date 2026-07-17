@@ -83,21 +83,21 @@ const PLAN_DIR = path.join('.arc', 'peer');
 // Newest first. A machine that skipped a hop (home still on `.plan`) migrates straight here.
 const LEGACY_DIRS = ['.peer', '.plan'];
 const NOTES = 'notes.jsonl';
+// The self-ignore sits at .arc/.gitignore and swallows the WHOLE .arc — peer/ AND roles/.
+// The operator's ruling (2026-07-17): everything under .arc is machine state and travels by
+// `arc export` / `arc import`, never by git. Charters included — that half of the old split
+// ("a role's duty is a project fact and commits") was overruled. One file, one level up,
+// same trick: it ignores itself too, so the project's own .gitignore never needs to know
+// arc exists. (The former peer/.gitattributes `merge=union` went with it: nothing under
+// .arc passes through git now, and the union job moved into `arc import`'s ledger merge —
+// which git's union never did soundly anyway; see the id-less-prefix note in mergeLedgers.)
 const GITIGNORE_BODY =
-  '# The board: cross-session sticky notes. Coordination scratch, not a project\n' +
-  '# artifact — this ignores the whole .arc/peer/ area (including this file), so\n' +
-  "# the project's own .gitignore never needs to know it exists. Its sibling\n" +
-  '# .arc/roles/ is NOT ignored: a role\'s duty is a project fact and commits.\n' +
+  '# arc machine state: the board (peer/), the role charters (roles/), claims, cursors.\n' +
+  '# None of it is a project artifact — it travels between machines by `arc export` /\n' +
+  '# `arc import`, never by git (operator ruling, 2026-07-17). This file ignores the\n' +
+  '# whole .arc including itself, so the project\'s own .gitignore never needs to know\n' +
+  '# arc exists.\n' +
   '*\n';
-// Governs notes.jsonl if the board is ever shared (git's default merge corrupts an append-only
-// ledger by writing conflict markers into it). Lives beside the ledger so a board carries its own
-// merge rule wherever it is cloned — no repo-root file to remember, nothing to configure.
-const GITATTRIBUTES_BODY =
-  '# The ledger is APPEND-ONLY: every line is a whole note and no line is ever edited.\n' +
-  '# git\'s default merge would write <<<<<<< markers INTO it and the board would stop\n' +
-  '# parsing. `union` keeps both sides\' lines instead. Merge-safety also needs notes to\n' +
-  '# be referenced by `id`, never by line position — see the design note in arc-board.js.\n' +
-  'notes.jsonl merge=union\n';
 
 // ---- board resolution ---------------------------------------------------------
 // Canonicalise so E:\WhalePhone, e:\whalephone and a junction all name one board.
@@ -154,16 +154,20 @@ function ensureBoard(board) {
     catch { /* someone raced us, or it is locked — keep using the legacy dir, still correct */ }
   }
   fs.mkdirSync(board.planDir, { recursive: true });
-  const gi = path.join(board.planDir, '.gitignore');
-  if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE_BODY);
-  // The board declares its OWN merge, next to the file it governs — the same self-contained move as
-  // the .gitignore above, and it costs nothing while the board stays ignored. It matters the moment
-  // anyone shares one: git's DEFAULT merge on an append-only ledger writes conflict markers straight
-  // INTO it (proven with two clones — the board stops parsing). `union` is built in, needs no
-  // config on either machine, and keeps both sides' lines. It is only half of merge-safety; the
-  // other half is that nothing references a note by position. See `id` and `ord`.
-  const ga = path.join(board.planDir, '.gitattributes');
-  if (!fs.existsSync(ga)) fs.writeFileSync(ga, GITATTRIBUTES_BODY);
+  if (path.basename(path.dirname(board.planDir)) === '.arc') {
+    // The self-ignore covers the WHOLE .arc from one level up (see GITIGNORE_BODY), and the
+    // old per-dir pair inside peer/ is retired: the .gitignore is redundant under the parent
+    // rule, and the .gitattributes union merge is moot — nothing under .arc meets git now.
+    // Unlinking every call is a no-op after the first (ENOENT); this IS the migration.
+    const gi = path.join(path.dirname(board.planDir), '.gitignore');
+    if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE_BODY);
+    for (const f of ['.gitignore', '.gitattributes']) { try { fs.unlinkSync(path.join(board.planDir, f)); } catch {} }
+  } else {
+    // A legacy planDir (root-level .peer/.plan — the rename above raced or is locked): there is
+    // no .arc parent to hold the rule, so the in-dir self-ignore stays until the migration lands.
+    const gi = path.join(board.planDir, '.gitignore');
+    if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE_BODY);
+  }
   return board;
 }
 
