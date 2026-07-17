@@ -658,6 +658,9 @@ function refreshRole(session, pid, cwd, convId) {
 // files (ledger length − this role's cursor), so it cannot lie and nobody has to
 // remember to tell you. Returns null when there is nothing to show.
 // Runs on EVERY statusline repaint, so the first check is the cheapest possible one.
+// A role-holder with no listener THIS long is genuinely deaf, not mid-arm: the threshold clears the
+// transient no-listener windows (arming/post-wake) and most turns, so DEAF means DEAF (audit #200).
+const DEAF_STALE_MS = 90_000;
 function badge(session, cwd) {
   try {
     if (!session) return null;
@@ -670,18 +673,29 @@ function badge(session, cwd) {
       const n = R.noteCount(board);
       return n ? { noRole: true, count: n, board: board.name } : null;
     }
-    // DEAF: holding a role while unreachable. arc ASKED this session to arm a listener (the
-    // offer marker) and it never did — the tell-tale of a turn that could not run, e.g. the
-    // account was rate-limited when the claim landed. The claim itself costs zero tokens (it is
-    // handled in-hook), so the session SQUATS the role while hearing nothing, and every peer
-    // addressing it is talking to an empty chair. Nothing else would ever say so.
-    // (Raised by the scout peer: "the statusline already knows both facts".)
+    const u = R.unreadFor(board, role);
+    // DEAF: holding a role while genuinely unreachable — not merely between arm cycles. There is no
+    // listener, and the notes are going nowhere. Two ways in, BOTH gated on PERSISTENCE so the
+    // transient no-listener windows (arming, post-wake, a short turn) never cry wolf (audit #200):
+    //   • SQUAT — arc offered a listener and it was never armed (a turn that could not run, e.g.
+    //     rate-limited at claim). Gated on the OFFER being STALE: a fresh offer is the ordinary
+    //     arming window, not deafness, so a genuine squat surfaces without flashing DEAF every turn.
+    //   • INTERRUPT — a turn ended by Esc/tool-denial fires NO Stop hook, so no offer is ever made;
+    //     the old `wasOffered` check missed this case entirely (it is what left audit deaf while the
+    //     badge stayed silent). Caught instead by unread notes SITTING past the threshold with no
+    //     listener — a healthy session has no OLD unread, because the auto-feed clears it each turn.
     let deaf = false;
     try {
       const A = require('./arc-await');
-      deaf = A.wasOffered(session) && !A.isWaiting(session);
+      if (!A.isWaiting(session)) {
+        const now = Date.now();
+        const offAt = A.offeredAt(session);
+        const offerStale = offAt != null && now - offAt > DEAF_STALE_MS;
+        const oldestUnread = u.count ? Math.min(...u.notes.map((n) => new Date(n.ts).getTime())) : now;
+        const unreadStale = u.count > 0 && now - oldestUnread > DEAF_STALE_MS;
+        deaf = offerStale || unreadStale;
+      }
     } catch {}
-    const u = R.unreadFor(board, role);
     if (u.count) return { count: u.count, senders: u.senders, role, board: board.name, deaf };
     return deaf ? { deaf: true, count: 0, role, board: board.name } : null;
   } catch { return null; }

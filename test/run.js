@@ -2135,13 +2135,31 @@ try {
   ok('a role-holder we have NOT yet asked to arm is not called deaf (that is just a fresh claim)',
     !(F6.badge(DS, drepo) || {}).deaf);
 
-  A6.markOffered(DS);          // arc asked it to arm...
-  ok('...but once arc ASKED and it never armed, it is DEAF (the rate-limit squat)',
+  A6.markOffered(DS);          // arc asked it to arm — but JUST now: that is the ordinary arming window
+  ok('...a FRESH offer is NOT deaf (arming window, not a squat) — so no DEAF flash every single turn',
+    !(F6.badge(DS, drepo) || {}).deaf);
+  // Backdate the offer past the stale threshold: offered long ago, still never armed = a real squat.
+  fs.writeFileSync(A6.offerFile(DS), JSON.stringify({ at: Date.now() - 120000 }));
+  ok('...but a STALE offer that never armed IS DEAF (the rate-limit squat), persistence-gated',
     (F6.badge(DS, drepo) || {}).deaf === true);
 
   A6.markWaiting(DS, 'code', process.pid);   // ...and complying clears it
-  ok('...and arming clears the warning immediately',
+  ok('...and arming clears the warning immediately (a live listener is never deaf)',
     !(F6.badge(DS, drepo) || {}).deaf);
+
+  // THE INTERRUPT CASE (audit #200, research #196): a turn ended by Esc/tool-denial fires NO Stop
+  // hook, so no offer is ever made — the OLD wasOffered check missed this entirely, and it is what
+  // left audit deaf while the badge stayed silent. Caught now by an unread note SITTING past the
+  // threshold with no listener.
+  A6.clearWaiting(DS); A6.clearOffered(DS);
+  RM6.appendNote(dboard2, { from: 'peer', to: 'code', kind: 'info', body: 'you there?' });
+  ok('a FRESH unread note with no listener is NOT yet deaf (could be mid-arm)',
+    !(F6.badge(DS, drepo) || {}).deaf);
+  const dnp = RM6.notesPath(dboard2);
+  (() => { const ls = fs.readFileSync(dnp, 'utf8').trim().split('\n').map((l) => JSON.parse(l)); ls[ls.length - 1].ts = new Date(Date.now() - 120000).toISOString(); fs.writeFileSync(dnp, ls.map((l) => JSON.stringify(l)).join('\n') + '\n'); })();
+  ok('...but an OLD unread note with no listener (INTERRUPT case, no offer ever made) IS DEAF',
+    (F6.badge(DS, drepo) || {}).deaf === true);
+  A6.clearWaiting(DS); A6.clearOffered(DS); RM6.markRead(dboard2, 'code');
 
   // The statusline must actually SHOW it — a fact nobody surfaces is a fact nobody has.
   const um = fs.readFileSync(path.join(SRC, 'usage-monitor.js'), 'utf8');

@@ -69,6 +69,12 @@ function markOffered(session) {
 function wasOffered(session) {
   try { return fs.existsSync(offerFile(String(session))); } catch { return false; }
 }
+// WHEN the offer was made, or null. The statusline uses the AGE to tell a genuine squat (offered
+// long ago, never armed) from the ordinary arming window (offered a moment ago, arming now) — so it
+// warns DEAF on the former without flashing it every turn on the latter.
+function offeredAt(session) {
+  try { return JSON.parse(fs.readFileSync(offerFile(String(session)), 'utf8')).at || null; } catch { return null; }
+}
 function clearOffered(session) {
   try { fs.unlinkSync(offerFile(String(session))); } catch { /* already gone */ }
 }
@@ -178,7 +184,7 @@ function awaitOnce(roleArg, cwd, opts) {
 }
 
 module.exports = { awaitOnce, resolveRole, isWaiting, waitingFor, markWaiting, clearWaiting, awaitFile,
-  markOffered, wasOffered, clearOffered, offerFile };
+  markOffered, wasOffered, offeredAt, clearOffered, offerFile };
 
 if (require.main === module) {
   awaitOnce(process.argv[2], process.cwd()).then((c) => process.exit(c));
