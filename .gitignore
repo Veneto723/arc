@@ -1,3 +1,10 @@
 node_modules/
 *.log
 .DS_Store
+
+# arc's own coordination state. The human operator's call (2026-07-17): the WHOLE
+# .arc travels by `arc export`/`arc import`, never by git — roles/ included. This
+# rule lives at the repo root (not self-ignored inside .arc) on purpose: it is the
+# half that TRAVELS, so a fresh clone inherits the rule instead of re-committing
+# charters the moment someone runs `git add -A`.
+.arc/
