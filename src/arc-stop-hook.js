@@ -47,6 +47,8 @@
 // Claude Code independently caps consecutive Stop blocks at 8, which is the backstop.
 'use strict';
 
+const BIRTH_GRACE_MS = 120000;   // a spawn younger than this is not yet nagged as charterless — it is still writing its charter
+
 function out(value) { process.stdout.write(JSON.stringify(value)); }
 
 function run(raw) {
@@ -62,6 +64,22 @@ function run(raw) {
   //    peer silently loses its role on the next restart, and can never invite anyone itself.
   //    Idempotent: one cheap read once healed.
   try { require('./arc-notes').healClaimConv(session, cwd); } catch { /* never wedge a turn */ }
+
+  // 0b. STAMP THE HEAD SHA I JUST SAW. My turn is ending, so whatever HEAD is right now is the last
+  //     state of the repo I have observed. Recording it here (every turn, before any section can
+  //     return) is what lets a future REVIVE brief me on exactly `<this>..HEAD` — the commits I have
+  //     not seen — instead of a wall-clock `--since` that hides pulled commits with old dates
+  //     (audit #149). Cheapest possible: one rev-parse, fail-safe, keyed to MY role.
+  try {
+    const R = require('./arc-board');
+    const N = require('./arc-notes');
+    const board = R.resolveBoard(N.resolveCwd(session, cwd));
+    const myRole = N.getRole(session, board);
+    if (myRole) {
+      const head = require('child_process').spawnSync('git', ['-C', board.root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000 });
+      if (head && head.status === 0) R.stampSeen(board, myRole, String(head.stdout || '').trim());
+    }
+  } catch { /* a missed stamp only widens the next brief — never break a turn */ }
 
   // 1. Anything on the board for me? Hand it over instead of going idle.
   //
@@ -183,7 +201,13 @@ function run(raw) {
       // context, which is exactly the chartered one. So the nag now catches ONLY the leak: an idle
       // spawn with NO charter. That is a temp worker, and a temp worker is the smell the doctrine
       // warns about — if the job was real it earns a charter; if not, it was noise.
-      const leaks = idle.filter((b) => !D.readDuty(board, b.role));
+      // BIRTH-AGE GRACE (audit #149): a brand-new role is staffed and claims its chair a few
+      // seconds BEFORE it writes its charter (the birth instruction says to write it on the first
+      // turn). In that window it reads live + idle + charterless and would be wrongly nagged as a
+      // leak — the same false positive the human caught, narrower. So a spawn younger than the grace
+      // is never nagged; after it, a still-charterless spawn is a genuine temp worker. (A charter
+      // being WRITTEN over an existing file is already safe — a partial read is still truthy.)
+      const leaks = idle.filter((b) => !D.readDuty(board, b.role) && (Date.now() - (b.at || 0)) > BIRTH_GRACE_MS);
       if (leaks.length) {
         const list = leaks.map((b) => `  arc close ${b.role}`).join('\n');
         out({

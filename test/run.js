@@ -2597,6 +2597,32 @@ try {
     ok('paths: scopes the brief — movement outside the declared globs is not this peer\'s movement',
       scoped === null || !/the world moved/.test(scoped.body));
 
+    // THE SHA-RANGE INSTRUMENT (audit #149): --since keys off COMMITTER DATE, so on a two-machine
+    // repo a commit pulled with an OLD date is HIDDEN even though the peer never saw it — a
+    // confidently-incomplete brief, the cross-machine zombie. Reproduced and fixed: anchor on the
+    // last-seen HEAD sha and brief <sha>..HEAD (ancestry, immune to date skew).
+    const srepo = fs.mkdtempSync(path.join(os.tmpdir(), 'sha-'));
+    const sg = (a, e) => spawnSync('git', ['-C', srepo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { encoding: 'utf8', env: { ...process.env, ...(e || {}) } });
+    sg(['init', '-qb', 'main']);
+    fs.mkdirSync(path.join(srepo, '.arc', 'roles'), { recursive: true });
+    fs.writeFileSync(path.join(srepo, '.arc', 'roles', 'sl.md'), '# sl\nowns: all\n');
+    const oldDate = '2026-07-17T09:00:00';
+    fs.writeFileSync(path.join(srepo, 'base'), '1'); sg(['add', '-A']); sg(['commit', '-qm', 'base'], { GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate });
+    const sbd = RM3.resolveBoard(srepo); RM3.ensureBoard(sbd);
+    const seenSha = sg(['rev-parse', 'HEAD']).stdout.trim();
+    RM3.stampSeen(sbd, 'sl', seenSha);              // the peer last saw HEAD=base
+    // a commit lands with an OLD committer date (a pull of an old-dated commit) AFTER the wall-clock lastSat
+    fs.writeFileSync(path.join(srepo, 'x'), '1'); sg(['add', '-A']); sg(['commit', '-qm', 'PULLED old-dated commit'], { GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate });
+    const wallLastSat = Date.parse('2026-07-17T14:00:00');
+    ok('the SHA-range brief CATCHES a pulled old-dated commit that --since would hide (cross-machine zombie fixed)',
+      (() => { const b = I.freshnessBrief(sbd, 'sl', wallLastSat, { sinceRef: seenSha }); return b && b.anchored === 'sha' && /PULLED old-dated/.test(b.body); })());
+    ok('...while the --since fallback (no sha) HIDES it — the exact hole, so the fix is load-bearing',
+      I.freshnessBrief(sbd, 'sl', wallLastSat, {}) === null);
+    // a sha that is NOT an ancestor of HEAD (rewritten history) falls back cleanly, never errors
+    ok('an unreachable sinceRef falls back to --since instead of erroring on a bad range',
+      (() => { const b = I.freshnessBrief(sbd, 'sl', wallLastSat, { sinceRef: 'deadbeef'.repeat(5) }); return b === null; })());   // falls to --since=14:00 -> old dates -> null
+    fs.rmSync(srepo, { recursive: true, force: true });
+
     // INTEGRATION: a real REVIVE posts the brief to the chair; a BIRTH never does.
     const FRS = 'fresh-sess-' + process.pid;
     fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${FRS}.json`),
@@ -3981,10 +4007,23 @@ try {
   RM.recordBirth(board, 'auditx', myConv);
   fs.mkdirSync(path.join(sboard, '.arc', 'roles'), { recursive: true });
   fs.writeFileSync(path.join(sboard, '.arc', 'roles', 'auditx.md'), '# auditx\n\nowns: verification\nnot me: building\n');
+  // BIRTH-AGE GRACE: a spawn younger than 120s is not yet nagged (it is still writing its charter).
+  // age helper's birth past the grace so it reads as a genuine leak; a young one is tested below.
+  const bornHelper = path.join(sboard, '.arc', 'peer', 'born-helper.json');
+  const bh = JSON.parse(fs.readFileSync(bornHelper, 'utf8')); bh.at = Date.now() - 5 * 60000;
+  fs.writeFileSync(bornHelper, JSON.stringify(bh));
   cycle();
   const nag = fire({ hook_event_name: 'Stop', cwd: sboard });
-  ok('the spawn nag lists the CHARTERLESS spawn (a temp worker = a leak)',
+  ok('the spawn nag lists the CHARTERLESS spawn (a temp worker = a leak) once past the birth grace',
     nag.decision === 'block' && /"helper"/.test(nag.reason) && /arc close helper/.test(nag.reason));
+  // a BRAND-NEW charterless spawn (birth just now) is NOT nagged — it is still writing its charter
+  RM.claimRole(board, 'newborn', process.pid, 'newborn-sess', 'newborn-conv');
+  RM.recordBirth(board, 'newborn', myConv);   // at = now, inside the grace
+  cycle();
+  ok('a spawn inside the birth grace is NOT nagged — no false leak while it writes its charter',
+    !/"newborn"/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+  // clean the newborn so it doesn't leak into later assertions
+  try { fs.unlinkSync(path.join(sboard, '.arc', 'peer', 'claim-newborn.json')); fs.unlinkSync(path.join(sboard, '.arc', 'peer', 'born-newborn.json')); } catch {}
   ok('...and NEVER lists the chartered standing duty — closing a teammate is the human\'s call, not a nag\'s',
     !/"auditx"/.test(nag.reason) && !/arc close auditx/.test(nag.reason));
   ok('...and the nag no longer claims an idle listener "burns quota" (it is blocked on a poll)',

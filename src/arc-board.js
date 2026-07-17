@@ -170,6 +170,24 @@ function ensureBoard(board) {
 const notesPath = (board) => path.join(board.planDir, NOTES);
 const cursorPath = (board, role) => path.join(board.planDir, `cursor-${role}.json`);
 const claimPath = (board, role) => path.join(board.planDir, `claim-${role}.json`);
+
+// LAST-SEEN HEAD, per role, machine-local. The revive freshness brief must show a peer the commits
+// it HAS NOT SEEN — and "haven't seen" is a git POSITION, not a wall-clock time. `--since=<time>`
+// filters by committer date, which is wrong on a two-machine repo: a commit pulled from the other
+// machine keeps its ORIGINAL date, so one made at 09:00 and pulled at 15:00 is excluded by
+// `--since=14:00` though the peer never saw it (audit #149, reproduced). So we record the HEAD sha
+// the peer actually saw — stamped every turn by the stop hook — and brief `<sha>..HEAD`, which is
+// ancestry: immune to date skew and to pull/cherry-pick reordering. Machine-local, gitignored: it
+// is "what THIS clone's peer last saw", and a home peer revived on home reads home's marker.
+const seenPath = (board, role) => path.join(board.planDir, `seen-${role}.json`);
+function stampSeen(board, role, sha) {
+  if (!sha) return null;
+  try { ensureBoard(board); atomicWriteJson(seenPath(board, role), { sha: String(sha).trim(), at: Date.now() }); return sha; }
+  catch { return null; }   // a missed stamp just widens the next brief — never break a turn over it
+}
+function readSeen(board, role) {
+  try { return JSON.parse(fs.readFileSync(seenPath(board, role), 'utf8')); } catch { return null; }
+}
 // LEGACY: a claim used to be called a "lease" (before the board/peer/claim rename). A session
 // that is LIVE RIGHT NOW may still be holding one — and an invisible claim is not a cosmetic
 // problem: a second session would see the role as vacant, take it, and the two would share a
@@ -793,7 +811,7 @@ module.exports = {
   canonical, repoRoot, resolveBoard, ensureBoard,
   notesPath, appendNote, allNotes, noteCount, latestSeq,
   KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo,
-  readCursor, readCursorMap, writeCursor, unreadFor, markRead,
+  readCursor, readCursorMap, writeCursor, unreadFor, markRead, stampSeen, readSeen,
   boardOrigin, noteOrigin, noteKey, refKey, resolveRef, refSeq, legacyId,
   isAlive, isHolder, procStarts, roleClaim, claimRole, releaseRole, liveRoles, vacantClaimForRole,
   atomicWriteJson, withLock, vacantClaimForConv,

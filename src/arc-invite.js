@@ -536,8 +536,7 @@ const BRIEF_MAX_SUBJECTS = 24;
 function freshnessBrief(board, role, lastSatMs, opts) {
   const o = opts || {};
   try {
-    if (!lastSatMs || !fs.existsSync(path.join(board.root, '.git'))) return null;
-    const iso = new Date(lastSatMs).toISOString();
+    if (!fs.existsSync(path.join(board.root, '.git'))) return null;
     const run = o.git || ((args) => spawnSync('git', ['-C', board.root, ...args], { encoding: 'utf8', timeout: 3000 }));
     // Duty may scope the brief: a `paths:` line holds git pathspecs. Prose `owns:` is for humans.
     let scope = [];
@@ -549,25 +548,43 @@ function freshnessBrief(board, role, lastSatMs, opts) {
       const m = duty.match(/^\s*\**\s*paths\**\s*:\s*\**\s*(.+?)\s*$/im);
       if (m) scope = m[1].trim().split(/[\s,]+/).filter(Boolean);
     } catch {}
-    const log = run(['log', `--since=${iso}`, '--oneline', '--no-decorate', ...(scope.length ? ['--', ...scope] : [])]);
+
+    // THE SELECTOR: a git POSITION when we have one, wall-clock only as a last resort. The last-seen
+    // HEAD sha (stamped every turn) gives `<sha>..HEAD` — ancestry, which is what "not yet seen"
+    // actually means and is immune to the committer-date skew that made `--since` hide a pulled
+    // commit (audit #149). Use the sha only once proven a real ancestor of HEAD (else a rewritten
+    // history would make the range error or lie); fall back to `--since=lastSat` for a peer from
+    // before the marker existed, and give up if we have neither anchor.
+    const seen = o.sinceRef && String(o.sinceRef).trim();
+    let sel, anchored;
+    if (seen && run(['merge-base', '--is-ancestor', seen, 'HEAD']).status === 0) {
+      sel = [`${seen}..HEAD`]; anchored = 'sha';
+    } else if (lastSatMs) {
+      sel = [`--since=${new Date(lastSatMs).toISOString()}`]; anchored = 'time';
+    } else {
+      return null;
+    }
+    const hint = anchored === 'sha' ? `git log --oneline ${seen.slice(0, 12)}..HEAD` : `git log --oneline --since="${new Date(lastSatMs).toISOString()}"`;
+
+    const log = run(['log', ...sel, '--oneline', '--no-decorate', ...(scope.length ? ['--', ...scope] : [])]);
     if (!log || log.status !== 0) return null;
     const lines = String(log.stdout || '').split('\n').filter((l) => l.trim());
     // The charter is checked separately and ALWAYS repo-wide: a peer whose duty was rewritten
     // while it slept is working under a contract it has never read, whatever its paths: say.
-    const charter = run(['log', `--since=${iso}`, '--oneline', '--', `.arc/roles/${role}.md`]);
+    const charter = run(['log', ...sel, '--oneline', '--', `.arc/roles/${role}.md`]);
     const charterChanged = !!(charter && charter.status === 0 && String(charter.stdout || '').trim());
     if (!lines.length && !charterChanged) return null;                  // nothing moved: say nothing
     const shown = lines.slice(0, BRIEF_MAX_SUBJECTS);
     const more = lines.length - shown.length;
-    const days = ((Date.now() - lastSatMs) / 86400000).toFixed(1);
+    const ago = lastSatMs ? ` (~${((Date.now() - lastSatMs) / 86400000).toFixed(1)}d ago)` : '';
     const body =
-      `WHILE YOU WERE OUT — ${lines.length} commit(s) landed since you last sat (~${days}d ago)` +
+      `WHILE YOU WERE OUT — ${lines.length} commit(s) landed since you last sat${ago}` +
       (scope.length ? ` touching your paths` : '') + ':\n' +
       shown.map((l) => '  ' + l).join('\n') +
-      (more > 0 ? `\n  (+${more} more:  git log --oneline --since="${iso}")` : '') +
+      (more > 0 ? `\n  (+${more} more:  ${hint})` : '') +
       (charterChanged ? `\n⚠ YOUR CHARTER CHANGED while you slept — reread .arc/roles/${role}.md before acting; you are working under a contract you have not seen.` : '') +
       `\nThe board already fed you the notes; this is the CODE's movement. Verify anything you remember about these files before building on it — what you knew may describe a repo that no longer exists.`;
-    return { body, commits: lines.length, charterChanged };
+    return { body, commits: lines.length, charterChanged, anchored };   // anchored: 'sha' (sound) | 'time' (fallback)
   } catch { return null; }                                              // a brief must never block a revive
 }
 
@@ -622,6 +639,9 @@ function staffRole(session, role, opts) {
   // live on the first real revive: the brief came up empty because `git log --since` saw a timestamp
   // the booting tab had already bumped to ~now.) Sampled here, before doSpawn, it is clean.
   const lastSatMs = revive ? (o.lastTurnAt || lastTurnAt)(conv, vacant) : null;
+  // The SOUND anchor for the freshness brief: the HEAD sha the peer last saw (stamped per-turn by
+  // the stop hook). lastSatMs stays as the wall-clock fallback and the "days ago" display.
+  const sinceRef = revive ? (o.sinceRef !== undefined ? o.sinceRef : (R.readSeen(board, role) || {}).sha) : null;
   const account = (process.env.ARC_RUNTIME_ACCOUNT || '').trim() || null;
 
   // LAUNCH IN THE CALLER'S OWN PATH STRING, not board.root. board.root is CANONICAL (lowercased)
@@ -703,7 +723,7 @@ function staffRole(session, role, opts) {
   let briefed = null;
   if (revive) {
     try {
-      briefed = freshnessBrief(board, role, lastSatMs, o);
+      briefed = freshnessBrief(board, role, lastSatMs, { ...o, sinceRef });
       if (briefed) R.appendNote(board, { from: 'arc', to: role, kind: 'info', body: briefed.body });
     } catch { briefed = null; }
   }
