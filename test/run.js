@@ -3995,6 +3995,48 @@ try {
   fs.rmSync(lone, { recursive: true, force: true });
 } catch (e) { ok('arc-notes receipts', false, e.message + '\n' + (e.stack || '')); }
 
+// ---- multi-recipient notes (a comma-list addresses a SUBSET, delivered whole to each) -------
+section('multi-recipient notes (arc note a,b — addressed subset, whole to each, per-recipient receipts)');
+try {
+  const F = require(path.join(SRC, 'arc-notes.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
+  const mroot = fs.mkdtempSync(path.join(os.tmpdir(), 'mrec-'));
+  spawnSync('git', ['-C', mroot, 'init', '-qb', 'main'], {});
+  fs.mkdirSync(path.join(mroot, '.arc', 'roles'), { recursive: true });
+  for (const r of ['a', 'b', 'c']) fs.writeFileSync(path.join(mroot, '.arc', 'roles', r + '.md'), '# ' + r + '\nowns: x\n');
+  spawnSync('git', ['-C', mroot, '-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '-A'], {});
+  spawnSync('git', ['-C', mroot, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'i'], {});
+  const mb = RM.resolveBoard(mroot); RM.ensureBoard(mb);
+  const mcache = path.join(CLAUDE, 'cache');
+  const MS = (n) => 'mrec-' + n + '-' + process.pid;
+  for (const r of ['a', 'b', 'c']) { writeJSON(path.join(mcache, `arc-state-${MS(r)}.json`), { pid: process.pid, cwd: mroot }); F.requestRole(MS(r), r, mroot); }
+
+  const big = 'PACKET ' + 'x'.repeat(1200) + ' END';
+  const res = F.requestNote(MS('c'), `a,b "${big}"`, mroot);
+  const n = RM.allNotes(mb).find((x) => /^PACKET/.test(x.body));
+  ok('a comma-list posts, names both recipients, and stores `to` as an ARRAY (not the string "a,b")',
+    res.ok && /posted for a \+ b/.test(res.message) && Array.isArray(n.to) && n.to.slice().sort().join() === 'a,b');
+  ok('BOTH named roles see it unread; the sender does not — addressed, not broadcast',
+    RM.unreadFor(mb, 'a').notes.some((x) => x.id === n.id) && RM.unreadFor(mb, 'b').notes.some((x) => x.id === n.id)
+    && !RM.unreadFor(mb, 'c').notes.some((x) => x.id === n.id));
+  ok('receipts track each recipient: [a,b], none seen, then a-only after a reads',
+    JSON.stringify(RM.seenBy(mb, n).recipients.slice().sort()) === '["a","b"]' && RM.seenBy(mb, n).seen.length === 0
+    && (() => { F.injection(MS('a'), mroot); const s = RM.seenBy(mb, n); return s.seen.includes('a') && !s.seen.includes('b'); })());
+  ok('a subset note is delivered WHOLE (the full 1200-char packet), not the broadcast preview',
+    (() => { const inj = F.injection(MS('b'), mroot); return inj && inj.text.includes(big); })());
+  ok('the SENDER is dropped from a recipient list rather than erroring (note still reaches the rest)',
+    (() => { const r = F.requestNote(MS('c'), 'a,c "drop me"', mroot); const dn = RM.allNotes(mb).find((x) => x.body === 'drop me'); return r.ok && dn.to === 'a'; })());
+  ok('a malformed role in the list is refused (never posted to a garbage chair)',
+    F.requestNote(MS('c'), 'a,BAD! "x"', mroot).ok === false);
+  ok('single role still stores a STRING and broadcast still stores NULL (no regression)',
+    (() => { F.requestNote(MS('c'), 'a "solo"', mroot); F.requestNote(MS('c'), 'all "everyone"', mroot);
+      const s = RM.allNotes(mb).find((x) => x.body === 'solo'); const bc = RM.allNotes(mb).find((x) => x.body === 'everyone');
+      return typeof s.to === 'string' && bc.to == null; })());
+
+  for (const r of ['a', 'b', 'c']) { try { fs.unlinkSync(path.join(mcache, `arc-state-${MS(r)}.json`)); } catch {} try { fs.unlinkSync(path.join(mcache, `arc-role-${MS(r)}.json`)); } catch {} }
+  fs.rmSync(mroot, { recursive: true, force: true });
+} catch (e) { ok('multi-recipient notes', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- arc-update (version-awareness at launch + one-command upgrade) ----------
 section('arc-update (launch check is fail-safe; release preconditions hold)');
 try {

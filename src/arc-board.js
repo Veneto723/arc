@@ -303,7 +303,8 @@ function appendNote(board, note) {
     id: mintId(board),                           // stable identity — survives any merge or reorder
     ts: new Date().toISOString(),
     from: String(note.from || 'unknown'),
-    to: note.to ? String(note.to) : null,      // null = broadcast to the whole flat
+    to: note.to == null ? null                                         // null = broadcast to the whole flat
+      : (Array.isArray(note.to) ? note.to.map(String) : String(note.to)),   // one role, or a specific subset (array)
     kind: normalizeKind(note.kind),
     priority: note.priority === 'high' ? 'high' : 'normal',
     body: String(note.body || ''),
@@ -344,12 +345,17 @@ function supersededMap(board, all) {
 // answer to it creates a debt that CANNOT be paid: the only way to clear it would be to reply to a
 // note nobody is allowed to act on. Found by using it: a request I retracted the moment I realised
 // it was unanswerable (I had told the peer not to reply) kept showing as owed anyway.
+// A note's recipient is a single role (string), a SPECIFIC SUBSET (array, addressed to each), or
+// broadcast (null, everyone). This is the one place that knows "is this directed at <role>" — used
+// by delivery, receipts, and the request tracker so all three agree on who a multi-recipient note is for.
+const toHas = (to, role) => Array.isArray(to) ? to.includes(role) : to === role;
+
 function openRequests(board, role) {
   const all = allNotes(board);
   const answered = new Set(all.filter((n) => n.replyTo).map((n) => refKey(n.replyTo)));
   const retracted = supersededMap(board, all);
   return all.filter((n) => n.kind === 'request' && !answered.has(n.id) && !retracted.has(n.id)
-    && (!role || n.from === role || n.to === role || n.to == null));
+    && (!role || n.from === role || n.to == null || toHas(n.to, role)));
 }
 
 // ---- receipts: has a note's recipient SEEN it --------------------------------
@@ -367,9 +373,9 @@ function seenBy(board, note, all) {
   if (!note) return { recipients: [], seen: [] };
   const notes = all || allNotes(board);
   const n = notes.find((x) => x.id === note.id) || note;   // ensure per-origin ord + origin are present
-  const recipients = note.to != null
-    ? [note.to]
-    : liveRoles(board).map((l) => l.role).filter((r) => r !== note.from);
+  const recipients = note.to == null
+    ? liveRoles(board).map((l) => l.role).filter((r) => r !== note.from)   // broadcast → the live peers
+    : (Array.isArray(note.to) ? note.to : [note.to]);                      // directed (one) or a subset (many)
   const hasSeen = (role) => n.ord != null && n.ord <= ((readCursorMap(board, role, notes)[noteOrigin(n)]) || 0);
   return { recipients, seen: recipients.filter(hasSeen) };
 }
@@ -513,7 +519,7 @@ function unreadFor(board, role) {
   const cur = readCursorMap(board, role, all);      // per-origin high-water (fail-open handled inside)
   const cursor = readCursor(board, role);           // reported for debugging, never used to filter
   const notes = all.filter(
-    (n) => n.ord > (cur[noteOrigin(n)] || 0) && n.from !== role && (n.to == null || n.to === role));
+    (n) => n.ord > (cur[noteOrigin(n)] || 0) && n.from !== role && (n.to == null || toHas(n.to, role)));
   const senders = [...new Set(notes.map((n) => n.from))];
   return { cursor, count: notes.length, notes, senders, latest, total: all.length };
 }

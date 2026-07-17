@@ -336,7 +336,17 @@ function requestNote(session, arg, cwd, opts) {
   const s = String(arg || '').trim();
   const m = s.match(/^(\S+)\s+([\s\S]+)$/);
   if (!m) return { ok: false, message: NOTE_USAGE };
-  const to = m[1].toLowerCase() === 'all' ? null : m[1].toLowerCase();
+  // Recipient(s): "all" broadcasts (null). A COMMA-LIST addresses a specific subset — delivered whole
+  // to EACH named role (not the ambient preview a broadcast gets), e.g. `arc note audit,research "…"`.
+  // A single role stays a plain string, exactly as before. A one-element list collapses to that string.
+  let to;
+  if (m[1].toLowerCase() === 'all') to = null;
+  else if (m[1].includes(',')) {
+    const roles = [...new Set(m[1].toLowerCase().split(',').map((r) => r.trim()).filter(Boolean))];
+    const bad = roles.find((r) => !VALID_ROLE.test(r));
+    if (bad) return { ok: false, message: `"${bad}" is not a valid role in the recipient list (roles are lowercase; "all" broadcasts).` };
+    to = roles.length === 1 ? roles[0] : roles;
+  } else to = m[1].toLowerCase();
   // OPTIONAL structure. A bare `arc note all "build is broken"` must stay exactly as cheap as
   // it always was — these only matter when the note is a request, an answer, or a retraction.
   let rest = m[2];
@@ -422,7 +432,15 @@ function requestNote(session, arg, cwd, opts) {
   // Only on YOUR OWN board is "to === me" a self-note. Across boards, "arc/code" and
   // "whalephone/code" are two different sessions that merely share a role NAME — which is the
   // whole reason the sender is qualified.
-  if (!crossFrom && to && to === me) return { ok: false, message: `you are "${me}" — a note to yourself would never be read (you never see your own notes).` };
+  if (!crossFrom && to) {
+    if (Array.isArray(to)) {
+      const others = to.filter((r) => r !== me);   // drop yourself; the note still reaches the rest of the list
+      if (!others.length) return { ok: false, message: `the recipient list was only yourself — you never see your own notes.` };
+      to = others.length === 1 ? others[0] : others;
+    } else if (to === me) {
+      return { ok: false, message: `you are "${me}" — a note to yourself would never be read (you never see your own notes).` };
+    }
+  }
 
   const note = R.appendNote(target, { from: crossFrom || me, to, body, kind: crossFrom ? 'info' : kind, replyTo, supersedes });
   const seq = R.latestSeq(target);
@@ -445,6 +463,14 @@ function requestNote(session, arg, cwd, opts) {
   // a real feature, not a leak, so refusing would destroy something useful. What was missing was
   // the truth, out loud, at the only moment it can be acted on.
   let chair = '';
+  if (Array.isArray(to)) {
+    // MULTI-RECIPIENT: name any addressee nobody holds. The rich revive offer below is for a SINGLE
+    // recipient; for a subset keep it terse, so the sender is not misled about who actually got it.
+    const held = new Set(R.liveRoles(crossFrom ? target : board).map((l) => l.role));
+    const empty = to.filter((r) => !held.has(r));
+    if (empty.length) chair = `\n  ⚠ not currently held: ${empty.join(', ')} — the note keeps for ${empty.length === 1 ? 'that role' : 'them'} (whoever claims it next reads it in full)`
+      + (note.kind === 'request' ? `; a REQUEST stays unanswered by ${empty.length === 1 ? 'it' : 'those'} until staffed (arc delegate <role> "<packet>").` : '.');
+  } else
   // ACROSS A BOARD, the empty-chair OFFER is not yours to take: `arc delegate` acts on YOUR board,
   // so telling a whalephone peer to revive arc's `frontend` would be advice it cannot follow. Say
   // the true half (nobody is there, the note keeps) and stop.
@@ -502,7 +528,7 @@ function requestNote(session, arg, cwd, opts) {
   // wired to anything. So every post now carries its own receipt.
   const stored = note.body.length;
   return { ok: true, message:
-    `✓ note #${seq} posted for ${to || 'everyone'} (from "${crossFrom || me}", on the "${target.name}" board)` +
+    `✓ note #${seq} posted for ${Array.isArray(to) ? to.join(' + ') : (to || 'everyone')} (from "${crossFrom || me}", on the "${target.name}" board)` +
     `  — ${stored} chars stored\n` +
     (crossFrom ? `  ⇄ CROSS-BOARD: this left "${board.name}" and landed on "${target.name}". One-way — they\n`
                + `    cannot reply to you here. Anything you need BACK goes through your human.\n` : '') +
@@ -800,7 +826,10 @@ function injection(session, cwd) {
       // Directed at ME = my work, delivered whole (spilled to a file if it cannot fit inline, never
       // truncated). A broadcast = ambient, previewed. See the constants above for why this
       // distinction is load-bearing rather than cosmetic.
-      const body = n.to === role ? directBody(n, board, spills) : clipBody(n.body, BODY_CLIP);
+      // ADDRESSED to me (a directed note OR a named recipient in a subset list) → delivered WHOLE;
+      // a broadcast is ambient FYI → preview. A multi-recipient note is work for each name, not ambient.
+      const addressed = n.to === role || (Array.isArray(n.to) && n.to.includes(role));
+      const body = addressed ? directBody(n, board, spills) : clipBody(n.body, BODY_CLIP);
       const kind = n.kind && n.kind !== 'info' ? `  <${n.kind}>` : '';
       const thread = n.replyTo ? `  ↩ re #${R.refSeq(allNotes, n.replyTo) ?? '?'}` : '';
       const dead = sup.get(n.id);      // keyed by ID: a retraction must survive a merge
