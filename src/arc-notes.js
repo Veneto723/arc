@@ -582,15 +582,17 @@ function receiptBlock(board, me, all) {
   const rows = recs.map(({ n, recipients, seen }) => {
     const kind = n.kind && n.kind !== 'info' ? `<${n.kind}> ` : '';
     let mark;
-    if (n.to != null) mark = seen.length ? `✓ seen by ${n.to}` : `⧗ ${n.to} hasn't read it yet`;
+    if (typeof n.to === 'string') mark = seen.length ? `✓ seen by ${n.to}` : `⧗ ${n.to} hasn't read it yet`;
     else if (!recipients.length) mark = '(no live peer to receive)';
     // "all N LIVE", never a bare "all": recipients is the CURRENT live set, which SHRINKS as chairs
     // close — a peer live at broadcast that closes UNREAD drops out, so an absolute "all" would
     // overclaim a set that lost a genuine recipient to closure (audit #192 Q2). Naming who signed
     // and qualifying "live" keeps it honest without storing a snapshot (the receipt stays derived).
-    else if (seen.length === recipients.length) mark = `✓ seen by all ${recipients.length} live (${seen.slice().sort().join(', ')})`;
+    else if (seen.length === recipients.length) mark = Array.isArray(n.to)
+      ? `✓ seen by all (${seen.slice().sort().join(', ')})`                                    // a NAMED subset: no "live" qualifier
+      : `✓ seen by all ${recipients.length} live (${seen.slice().sort().join(', ')})`;         // a broadcast over the current live set
     else mark = `${seen.length}/${recipients.length} seen · missing: ${recipients.filter((r) => !seen.includes(r)).sort().join(', ')}`;
-    return `    #${n.seq} → ${n.to || 'all'}  ${kind}${mark}`;
+    return `    #${n.seq} → ${Array.isArray(n.to) ? n.to.join('+') : (n.to || 'all')}  ${kind}${mark}`;
   });
   return `\n  your recent sent (receipts — no ack needed):\n${rows.join('\n')}`;
 }
@@ -639,8 +641,14 @@ function requestNotes(session, arg, cwd) {
       (n.refs ? `\n        refs: ${JSON.stringify(n.refs)}` : '');
   });
   const mine = R.openRequests(board, me).filter((n) => n.from === me);
-  const openLine = mine.length ? `\n  ⧗ ${mine.length} of YOUR request(s) still unanswered: ` +
-    mine.map((n) => `#${n.seq} (→${n.to || 'all'}, ${R.seenBy(board, n, allU).seen.length ? 'seen' : 'not yet seen'})`).join(', ') : '';
+  const fmtReq = (n) => {
+    if (Array.isArray(n.to)) {   // wait-for-all: per-recipient, so a deaf one is visible and never a blind hang
+      const st = R.requestStatus(board, n, allU);
+      return `#${n.seq} → [${st.map((s) => `${s.role} ${s.replied ? '✓' : s.seen ? '⧗seen' : '⧗unseen'}`).join(', ')}]`;
+    }
+    return `#${n.seq} (→${n.to || 'all'}, ${R.seenBy(board, n, allU).seen.length ? 'seen' : 'not yet seen'})`;
+  };
+  const openLine = mine.length ? `\n  ⧗ ${mine.length} of YOUR request(s) still unanswered: ${mine.map(fmtReq).join(', ')}` : '';
   const receipts = receiptBlock(board, me, allU);
   R.markRead(board, me);   // rd()-only: the note stays, only YOUR cursor advances
   return { ok: true, plain: true, message:

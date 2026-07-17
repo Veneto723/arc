@@ -4037,6 +4037,49 @@ try {
   fs.rmSync(mroot, { recursive: true, force: true });
 } catch (e) { ok('multi-recipient notes', false, e.message + '\n' + (e.stack || '')); }
 
+// ---- multi-recipient REQUESTS: wait-for-all (owed by each; empty chairs excluded) -----------
+section('multi-recipient requests (owed-by-each: closes only when all HELD recipients reply)');
+try {
+  const F = require(path.join(SRC, 'arc-notes.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
+  const wroot = fs.mkdtempSync(path.join(os.tmpdir(), 'wall-'));
+  spawnSync('git', ['-C', wroot, 'init', '-qb', 'main'], {});
+  fs.mkdirSync(path.join(wroot, '.arc', 'roles'), { recursive: true });
+  for (const r of ['a', 'b', 'c', 'ghost']) fs.writeFileSync(path.join(wroot, '.arc', 'roles', r + '.md'), '# ' + r + '\nowns: x\n');
+  spawnSync('git', ['-C', wroot, '-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '-A'], {});
+  spawnSync('git', ['-C', wroot, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'i'], {});
+  const wb = RM.resolveBoard(wroot); RM.ensureBoard(wb);
+  const wcache = path.join(CLAUDE, 'cache');
+  const WS = (n) => 'wall-' + n + '-' + process.pid;
+  // a,b,c LIVE (genuine claim via this alive pid); ghost is DECLARED but nobody holds it
+  for (const r of ['a', 'b', 'c']) { writeJSON(path.join(wcache, `arc-state-${WS(r)}.json`), { pid: process.pid, cwd: wroot }); F.requestRole(WS(r), r, wroot); }
+  const openSeqs = () => RM.openRequests(wb, 'c').filter((n) => n.from === 'c').map((n) => n.seq);
+
+  F.requestNote(WS('c'), 'a,b --kind request "both please"', wroot);
+  const req = RM.allNotes(wb).find((x) => x.body === 'both please');
+  ok('a multi-recipient request is OPEN before anyone replies', openSeqs().includes(req.seq));
+  F.requestNote(WS('a'), `c --reply-to ${req.seq} "a done"`, wroot);
+  ok('...STILL open after ONE of two replies; requestStatus shows a replied, b not',
+    openSeqs().includes(req.seq)
+    && RM.requestStatus(wb, req).find((s) => s.role === 'a').replied === true
+    && RM.requestStatus(wb, req).find((s) => s.role === 'b').replied === false);
+  F.requestNote(WS('b'), `c --reply-to ${req.seq} "b done"`, wroot);
+  ok('...CLOSED only once BOTH have replied (owed by each)', !openSeqs().includes(req.seq));
+
+  F.requestNote(WS('c'), 'a,ghost --kind request "a and a ghost"', wroot);
+  const req2 = RM.allNotes(wb).find((x) => x.body === 'a and a ghost');
+  ok('an EMPTY-CHAIR recipient is not waited on: a held+ghost request closes when the HELD one replies',
+    (() => { const before = openSeqs().includes(req2.seq); F.requestNote(WS('a'), `c --reply-to ${req2.seq} "done"`, wroot); return before && !openSeqs().includes(req2.seq); })());
+
+  F.requestNote(WS('c'), 'a --kind request "just a"', wroot);
+  const req3 = RM.allNotes(wb).find((x) => x.body === 'just a');
+  ok('single-recipient request is UNCHANGED: closes on its reply',
+    (() => { const before = openSeqs().includes(req3.seq); F.requestNote(WS('a'), `c --reply-to ${req3.seq} "ok"`, wroot); return before && !openSeqs().includes(req3.seq); })());
+
+  for (const r of ['a', 'b', 'c']) { try { fs.unlinkSync(path.join(wcache, `arc-state-${WS(r)}.json`)); } catch {} try { fs.unlinkSync(path.join(wcache, `arc-role-${WS(r)}.json`)); } catch {} }
+  fs.rmSync(wroot, { recursive: true, force: true });
+} catch (e) { ok('multi-recipient requests', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- arc-update (version-awareness at launch + one-command upgrade) ----------
 section('arc-update (launch check is fail-safe; release preconditions hold)');
 try {

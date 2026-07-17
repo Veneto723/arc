@@ -352,9 +352,23 @@ const toHas = (to, role) => Array.isArray(to) ? to.includes(role) : to === role;
 
 function openRequests(board, role) {
   const all = allNotes(board);
-  const answered = new Set(all.filter((n) => n.replyTo).map((n) => refKey(n.replyTo)));
   const retracted = supersededMap(board, all);
-  return all.filter((n) => n.kind === 'request' && !answered.has(n.id) && !retracted.has(n.id)
+  // WHO has replied to each request (request-id → set of replier roles). A single/broadcast request
+  // closes on ANY reply (unchanged). A MULTI-recipient request is owed-by-each: it stays open until
+  // every recipient SOMEONE HOLDS has replied. An empty chair is excluded (waiting on a role nobody
+  // holds is infinite); a deaf-but-held one still counts — it can answer once woken, and the sender
+  // sees via receipts that it has not, then drops it by choice. "Wait for all who can answer."
+  const repliers = new Map();
+  for (const n of all) if (n.replyTo) { const k = refKey(n.replyTo); if (!repliers.has(k)) repliers.set(k, new Set()); repliers.get(k).add(n.from); }
+  let live = null;   // lazily built: only a multi-recipient request needs the live roster
+  const answered = (n) => {
+    const who = repliers.get(n.id) || new Set();
+    if (!Array.isArray(n.to)) return who.size > 0;
+    if (!live) live = new Set(liveRoles(board).map((l) => l.role));
+    const expected = n.to.filter((r) => live.has(r));
+    return expected.length > 0 && expected.every((r) => who.has(r));
+  };
+  return all.filter((n) => n.kind === 'request' && !answered(n) && !retracted.has(n.id)
     && (!role || n.from === role || n.to == null || toHas(n.to, role)));
 }
 
@@ -378,6 +392,17 @@ function seenBy(board, note, all) {
     : (Array.isArray(note.to) ? note.to : [note.to]);                      // directed (one) or a subset (many)
   const hasSeen = (role) => n.ord != null && n.ord <= ((readCursorMap(board, role, notes)[noteOrigin(n)]) || 0);
   return { recipients, seen: recipients.filter(hasSeen) };
+}
+
+// Per-recipient status of a request I sent: [{ role, seen, replied }] for each addressee. This is
+// what makes wait-for-all safe rather than a blind hang — the sender can SEE that one recipient has
+// not even seen the note (deaf) while another has replied, and decide to proceed without the absent one.
+function requestStatus(board, note, all) {
+  const notes = all || allNotes(board);
+  const recipients = Array.isArray(note.to) ? note.to : (note.to != null ? [note.to] : []);
+  const seen = new Set(seenBy(board, note, notes).seen);
+  const replied = new Set(notes.filter((n) => n.replyTo && refKey(n.replyTo) === note.id).map((n) => n.from));
+  return recipients.map((r) => ({ role: r, seen: seen.has(r), replied: replied.has(r) }));
 }
 
 // Every note answering `ref`, oldest first — the thread under a request. Takes a display seq (what
@@ -879,7 +904,7 @@ module.exports = {
   PLAN_DIR, GITIGNORE_BODY,
   canonical, repoRoot, resolveBoard, ensureBoard,
   notesPath, appendNote, allNotes, noteCount, latestSeq,
-  KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo, seenBy,
+  KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo, seenBy, requestStatus,
   readCursor, readCursorMap, writeCursor, unreadFor, markRead, stampSeen, readSeen,
   boardOrigin, noteOrigin, noteKey, refKey, resolveRef, refSeq, legacyId,
   isAlive, isHolder, procStarts, roleClaim, claimRole, releaseRole, liveRoles, vacantClaimForRole,
