@@ -140,7 +140,14 @@ function coreHookEntries(scriptsDir) {
 // claimed-but-deaf. That is precisely the failure this allowlist exists to prevent, so it must
 // cover whichever shell the harness hands the session. (Found by the scout peer, in its own
 // runtime.)
-const BOARD_COMMANDS = ['arc join', 'arc await', 'arc role', 'arc notes', 'arc note'];
+// `arc close` is HERE because the stop-hook's own nag prescribes it — a remedy the hook demands
+// must never be permission-blocked (a content classifier once vetoed it mid-session and the agent
+// could not comply with arc's own instruction). `arc export`/`arc import` are the board's transport
+// verbs — post-dating the original list, they were missing by staleness, not decision. `arc
+// delegate` stays OFF the list on purpose and by doctrine: it is the one verb that spawns a
+// session, and the operator's rule is that a spawn is permitted by the human — the permission
+// prompt IS that permission.
+const BOARD_COMMANDS = ['arc join', 'arc await', 'arc role', 'arc notes', 'arc note', 'arc close', 'arc export', 'arc import'];
 const SHELL_TOOLS = ['Bash', 'PowerShell'];
 const BOARD_PERMISSIONS = SHELL_TOOLS.flatMap((tool) =>
   BOARD_COMMANDS.flatMap((cmd) => [`${tool}(${cmd}:*)`, `${tool}(${cmd})`]));

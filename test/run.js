@@ -2520,6 +2520,14 @@ try {
   // session, and that stays a per-spawn decision routed through the arc:mode gate.
   ok('`arc delegate` is NOT auto-allowed (spawning sessions stays a gated decision)',
     !perms.some((p) => /delegate|invite/.test(p)));
+  // close/export/import joined later (they post-date the original list). close is the remedy the
+  // stop-hook's own nag prescribes — arc must never demand a command the allowlist then blocks;
+  // export/import are the board's transport. A content classifier vetoing "earlier conversation
+  // content" once locked an agent out of all three mid-session — allowlisted commands skip it.
+  for (const tool of ['Bash', 'PowerShell']) {
+    ok(`the allowlist covers ${tool} close/export/import (the nag's remedy + the board's transport)`,
+      perms.includes(`${tool}(arc close:*)`) && perms.includes(`${tool}(arc export:*)`) && perms.includes(`${tool}(arc import:*)`));
+  }
 
   const st = {};
   W.mergePermissions(st, perms);
