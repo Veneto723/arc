@@ -4080,6 +4080,67 @@ try {
   fs.rmSync(wroot, { recursive: true, force: true });
 } catch (e) { ok('multi-recipient requests', false, e.message + '\n' + (e.stack || '')); }
 
+// ---- multi-recipient DELEGATE: one command staffs/revives EACH role, posts ONE request ----------
+section('multi-recipient delegate (arc delegate a,b — fill every chair, then ONE request to all)');
+try {
+  const I = require(path.join(SRC, 'arc-invite.js'));
+  const RM = require(path.join(SRC, 'arc-board.js'));
+  const F = require(path.join(SRC, 'arc-notes.js'));
+  const droot = fs.mkdtempSync(path.join(os.tmpdir(), 'dmany-'));
+  spawnSync('git', ['-C', droot, 'init', '-qb', 'main'], {});
+  fs.mkdirSync(path.join(droot, '.arc', 'roles'), { recursive: true });
+  for (const r of ['a', 'b', 'c', 'd', 'e']) fs.writeFileSync(path.join(droot, '.arc', 'roles', r + '.md'), '# ' + r + '\nowns: x\n');
+  spawnSync('git', ['-C', droot, '-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '-A'], {});
+  spawnSync('git', ['-C', droot, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'i'], {});
+  const db = RM.resolveBoard(droot); RM.ensureBoard(db);
+  const dcache = path.join(CLAUDE, 'cache');
+  const DS = (n) => 'dmany-' + n + '-' + process.pid;
+  // a and c are LIVE (genuine claim, this alive pid); b,d,e are declared but nobody holds them
+  for (const r of ['a', 'c']) { writeJSON(path.join(dcache, `arc-state-${DS(r)}.json`), { pid: process.pid, cwd: droot }); F.requestRole(DS(r), r, droot); }
+  // staffing must NOT open a real tab: mock the spawn, count it, and stub the transcript as absent
+  let spawnCount = 0;
+  const dmock = { spawn: () => { spawnCount++; return { status: 0 }; }, hasWt: true, hasTranscript: () => false, writeScript: () => 'C:\\Temp\\p.txt' };
+  const bodyNote = (body) => RM.allNotes(db).find((x) => x.body === body);
+
+  // a live + b closed: a is noted live (no spawn), b is STAFFED (one spawn), ONE request to [a,b]
+  spawnCount = 0;
+  const r1 = I.requestDelegate(DS('c'), 'a,b "do the thing"', droot, dmock);
+  const req1 = bodyNote('do the thing');
+  ok('delegate a,b: a noted live + b staffed (exactly ONE spawn), ONE request to [a,b]',
+    r1.ok === true && spawnCount === 1
+    && req1 && req1.kind === 'request' && Array.isArray(req1.to) && req1.to.slice().sort().join() === 'a,b'
+    && /a \(live\)/.test(r1.message) && /b — STAFFED/.test(r1.message), JSON.stringify(r1));
+
+  // both closed (d,e): TWO spawns, one request to [d,e]
+  spawnCount = 0;
+  const r2 = I.requestDelegate(DS('c'), 'd,e "both new"', droot, dmock);
+  const req2 = bodyNote('both new');
+  ok('delegate d,e (both closed): staffs BOTH (two spawns), ONE request to [d,e]',
+    r2.ok === true && spawnCount === 2 && req2 && Array.isArray(req2.to) && req2.to.slice().sort().join() === 'd,e');
+
+  // the caller drops itself: a,c from c -> just a (single request, a already live so no spawn)
+  spawnCount = 0;
+  const r3 = I.requestDelegate(DS('c'), 'a,c "drop self"', droot, dmock);
+  const req3 = bodyNote('drop self');
+  ok('the caller is dropped from the list (a,c from c -> a only, single request, no spawn)',
+    r3.ok === true && req3 && req3.to === 'a' && spawnCount === 0);
+
+  // one invalid role in the list refuses the WHOLE command (nothing staffed)
+  spawnCount = 0;
+  ok('an invalid role anywhere in the list refuses the whole command — nothing staffed',
+    I.requestDelegate(DS('c'), 'a,BAD! "x"', droot, dmock).ok === false && spawnCount === 0);
+
+  // no packet: fill chairs only, no request posted
+  spawnCount = 0;
+  const before = RM.allNotes(db).length;
+  const r5 = I.requestDelegate(DS('c'), 'd,e', droot, dmock);
+  ok('no packet: chairs filled, NO request posted (a note-free staffing)',
+    r5.ok === true && RM.allNotes(db).length === before);
+
+  for (const r of ['a', 'c']) { try { fs.unlinkSync(path.join(dcache, `arc-state-${DS(r)}.json`)); } catch {} try { fs.unlinkSync(path.join(dcache, `arc-role-${DS(r)}.json`)); } catch {} }
+  fs.rmSync(droot, { recursive: true, force: true });
+} catch (e) { ok('multi-recipient delegate', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- arc-update (version-awareness at launch + one-command upgrade) ----------
 section('arc-update (launch check is fail-safe; release preconditions hold)');
 try {

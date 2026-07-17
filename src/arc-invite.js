@@ -785,6 +785,50 @@ function staffRole(session, role, opts) {
 // reversible; staffing spawns a session with its own quota. So the note always posts, and the
 // spawn is gated by arc:mode (arc-pretool-hook, which checks liveness so the gate fires ONLY when
 // a session would actually be created).
+// arc delegate a,b "packet" — get a SUBSET on one job at once. Each role is handled by the same
+// rule as a single delegate: LIVE ones are noted, CLOSED ones REVIVED as themselves, never-held ones
+// STAFFED from context — so the human's mixed states fall out for free (0-close/2-idle → note both;
+// 1-close/1-idle → revive one + note one; 2-close → revive both). Then ONE multi-recipient request is
+// posted to all of them, so it delivers whole to each and is tracked wait-for-all (stages 1+2).
+function delegateMany(session, firstToken, packet, cwd, o) {
+  const roles = [...new Set(firstToken.split(',').map((r) => r.trim()).filter(Boolean))];
+  const bad = roles.find((r) => !N.VALID_ROLE.test(r));
+  if (bad) return { ok: false, message: `invalid role "${bad}" in the list — letters/digits/dash/underscore, starting with a letter.` };
+  const board = R.resolveBoard(N.resolveCwd(session, null));
+  const me = N.getRole(session, board);
+  if (packet && !me) return { ok: false, message:
+    `you hold no role on the "${board.name}" board, so there is no one for these roles to reply TO.\n` +
+    `  claim yours first:  arc:role <yours>    then delegate again (nothing was started).` };
+  const targets = roles.filter((r) => r !== me);   // never delegate to yourself
+  if (!targets.length) return { ok: false, message: `the only role in the list was yourself.` };
+
+  // Staff each role that is not already live. One snapshot up front: staffing X makes X live, but the
+  // targets are distinct, so a single roster read is correct and cheaper than re-querying per role.
+  const liveSet = new Set(R.liveRoles(board).map((l) => l.role));
+  const done = [];
+  for (const role of targets) {
+    if (liveSet.has(role)) { done.push({ role, how: 'live' }); continue; }
+    const staffed = staffRole(session, role, o);
+    if (!staffed.ok) return { ok: false, message:
+      `staffing "${role}" failed — ${staffed.message}\n` +
+      `  (already staffed before this: ${done.filter((x) => x.how !== 'live').map((x) => x.role).join(', ') || 'none'} — they are idle peers, harmless)` };
+    done.push({ role, how: staffed.revived ? 'revived' : 'staffed' });
+  }
+  const mark = (x) => x.how === 'live' ? `✉ ${x.role} (live)` : x.how === 'revived' ? `↺ ${x.role} — REVIVED as itself` : `⤴ ${x.role} — STAFFED from your context`;
+  const summary = done.map(mark).join('\n  ');
+
+  if (!packet) return { ok: true, roles: targets, message:
+    `${done.length} chair(s) filled:\n  ${summary}\n  no packet — give them a job:  arc delegate ${targets.join(',')} "<packet>"` };
+
+  // ONE multi-recipient request to all targets: delivered WHOLE to each, tracked until EACH replies.
+  const note = N.requestNote(session, `${targets.join(',')} --kind request ${packet}`, cwd);
+  if (!note.ok) return note;
+  return { ok: true, roles: targets, message:
+    `delegated to ${targets.join(' + ')}:\n  ${summary}\n` +
+    note.message.replace(/\n\s+⚠ not currently held[\s\S]*$/, '').replace(/^✓ /, '  ✓ ') +
+    `\n  ONE request, posted to all — tracked until EACH replies (arc notes shows per-recipient status).` };
+}
+
 function requestDelegate(session, arg, cwd, opts) {
   const o = opts || {};
   if (!session) return { ok: false, message: 'NOT under the arc wrapper (launch with `arc`).' };
@@ -798,6 +842,7 @@ function requestDelegate(session, arg, cwd, opts) {
   }
   const role = m[1].toLowerCase();
   const packet = (m[2] || '').trim();
+  if (role.includes(',')) return delegateMany(session, role, packet, cwd, o);   // a comma-list: staff/revive/note EACH role
   if (!N.VALID_ROLE.test(role)) return { ok: false, message: `invalid role "${role}" — letters/digits/dash/underscore, starting with a letter.` };
 
   const board = R.resolveBoard(N.resolveCwd(session, null));
