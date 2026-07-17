@@ -128,6 +128,26 @@ function getRole(session, board) {
     return root === board.root ? r.role : null;   // a role is only valid on its own board
   } catch { return null; }
 }
+// Record the HEAD this peer is looking at RIGHT NOW, keyed to its role, as the seen-marker the
+// next REVIVE briefs `<seen>..HEAD` from. Call this at TURN START, never turn end. The marker must
+// be a LOWER bound on what the peer saw: turn-start HEAD is <= anything the peer can read this turn
+// (the working tree only moves forward), so a mid-turn commit by ANOTHER peer lands ABOVE it and is
+// still briefed. Stamping at turn END instead (turn-end HEAD) would be an UPPER bound: a concurrent
+// mid-turn commit the peer never read is <= turn-end HEAD, so it would be marked seen and SILENTLY
+// skipped forever — the same silent-zombie class as the committer-date hole, in arc's own
+// multi-agent case (audit #170). Over-report (re-show a few seen commits) is safe noise; under-report
+// hides unseen work. Cheapest possible: one rev-parse, fully fail-safe — a missed stamp only widens
+// the next brief, so it must NEVER throw into the caller's turn.
+function stampSeenHead(session, cwd) {
+  try {
+    const board = R.resolveBoard(resolveCwd(session, cwd));
+    const role = getRole(session, board);
+    if (!role) return null;
+    const head = require('child_process').spawnSync('git', ['-C', board.root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000 });
+    if (head && head.status === 0) return R.stampSeen(board, role, String(head.stdout || '').trim());
+  } catch { /* never wedge a turn over a missed stamp */ }
+  return null;
+}
 function setRole(session, board, role) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   fs.writeFileSync(roleFile(session), JSON.stringify({ board: board.root, role, at: Date.now() }));
@@ -788,4 +808,4 @@ function injection(session, cwd) {
 
 module.exports = { requestRole, requestNote, requestNotes, refreshRole, badge, injection, getRole, sessionPid, roleFile,
   unarmedRequests, markRequestsArmed, readArmed,
-  sessionConv, resolveCwd, VALID_ROLE, healClaimConv, isForkedSession };   // arc-invite builds on the same primitives
+  sessionConv, resolveCwd, VALID_ROLE, healClaimConv, isForkedSession, stampSeenHead };   // arc-invite builds on the same primitives

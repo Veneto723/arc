@@ -2645,6 +2645,53 @@ try {
       (() => { const b = I.freshnessBrief(sbd, 'sl', wallLastSat, { sinceRef: 'deadbeef'.repeat(5) }); return b === null; })());   // falls to --since=14:00 -> old dates -> null
     fs.rmSync(srepo, { recursive: true, force: true });
 
+    // audit #170: the seen-marker must be a LOWER bound (turn-START HEAD), not an upper bound
+    // (turn-END). Stamped at turn end, a commit ANOTHER peer lands MID-turn is <= my turn-end HEAD
+    // yet I never read it -> marked seen -> hidden from my next brief FOREVER (silent zombie, arc's
+    // own multi-agent case). stampSeenHead records the HEAD the peer sees NOW keyed to its role, and
+    // the switch-hook calls it at TURN START. Here: stamp A (turn start), another peer commits B
+    // mid-life, revive -> the brief MUST include B (over-report is safe; hiding it is the bug).
+    const zrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'zombie-'));
+    const zg = (a) => spawnSync('git', ['-C', zrepo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { encoding: 'utf8' });
+    zg(['init', '-qb', 'main']);
+    fs.mkdirSync(path.join(zrepo, '.arc', 'roles'), { recursive: true });
+    fs.writeFileSync(path.join(zrepo, '.arc', 'roles', 'zz.md'), '# zz\nowns: all\n');
+    fs.writeFileSync(path.join(zrepo, 'a'), '1'); zg(['add', '-A']); zg(['commit', '-qm', 'A base']);
+    const zbd = RM3.resolveBoard(zrepo); RM3.ensureBoard(zbd);
+    const ZS = 'zombie-sess-' + process.pid;
+    const zRoleFile = NI.roleFile(ZS);
+    fs.mkdirSync(path.dirname(zRoleFile), { recursive: true });
+    fs.writeFileSync(zRoleFile, JSON.stringify({ board: zbd.root, role: 'zz' }));
+    const stampedA = NI.stampSeenHead(ZS, zrepo);                       // TURN START: peer stamps the HEAD it sees (=A)
+    const headA = zg(['rev-parse', 'HEAD']).stdout.trim();
+    ok('stampSeenHead records the CURRENT HEAD keyed to the session role (turn-start lower bound)',
+      stampedA === headA && (RM3.readSeen(zbd, 'zz') || {}).sha === headA);
+    fs.writeFileSync(path.join(zrepo, 'b'), '1'); zg(['add', '-A']); zg(['commit', '-qm', 'B by another peer mid-turn']);
+    const zbrief = I.freshnessBrief(zbd, 'zz', Date.now(), { sinceRef: (RM3.readSeen(zbd, 'zz') || {}).sha });
+    ok('a MID-turn commit by another peer is BRIEFED, not silently skipped (audit #170 lower-bound)',
+      zbrief && zbrief.anchored === 'sha' && /B by another peer/.test(zbrief.body));
+    ok('stampSeenHead fails safe (returns null) for a session that holds no role',
+      NI.stampSeenHead('no-such-sess-' + process.pid, zrepo) === null);
+
+    // REGRESSION (latent, found while moving the stamp): arc-switch-hook must guard its stdin/run
+    // wiring behind require.main === module. Without it, merely REQUIRING the hook runs run('') on
+    // the empty-stdin `end` -> deliverBoard delivers the board and ADVANCES the read cursor as a
+    // side effect of a require (a syntax check once consumed a note this way). With a role + an
+    // unread note + ARC_SESSION set, requiring the module in a child MUST stay silent and leave the
+    // note unread. Exports run so it is requirable as a library at all.
+    RM3.appendNote(zbd, { from: 'other', to: 'zz', kind: 'fyi', body: 'unread note to prove the cursor is untouched' });  // from ANOTHER role: a self-note is not unread-to-self
+    const unreadBefore = RM3.unreadFor(zbd, 'zz').count;
+    // The child runs in zrepo (so resolveCwd -> zbd -> ZS's role matches and the OLD code WOULD
+    // inject) and requires the hook by ABSOLUTE path (zrepo has no src/). On the guarded code the
+    // require is inert, so stdout carries no injection and the cursor never moves.
+    const swHook = path.join(SRC, 'arc-switch-hook.js').replace(/\\/g, '/');
+    const gchild = spawnSync(process.execPath, ['-e', `const m=require(${JSON.stringify(swHook)}); process.stderr.write(typeof m.run);`],
+      { cwd: zrepo, input: '', encoding: 'utf8', env: { ...process.env, ARC_SESSION: ZS } });
+    ok('requiring arc-switch-hook is side-effect-free: exports run, emits NO injection, leaves the cursor unadvanced (require.main guard)',
+      gchild.stderr === 'function' && !/hookSpecificOutput/.test(gchild.stdout || '') && RM3.unreadFor(zbd, 'zz').count === unreadBefore && unreadBefore >= 1);
+    try { fs.unlinkSync(zRoleFile); } catch {}
+    fs.rmSync(zrepo, { recursive: true, force: true });
+
     // INTEGRATION: a real REVIVE posts the brief to the chair; a BIRTH never does.
     const FRS = 'fresh-sess-' + process.pid;
     fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${FRS}.json`),

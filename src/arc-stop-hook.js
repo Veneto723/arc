@@ -65,21 +65,12 @@ function run(raw) {
   //    Idempotent: one cheap read once healed.
   try { require('./arc-notes').healClaimConv(session, cwd); } catch { /* never wedge a turn */ }
 
-  // 0b. STAMP THE HEAD SHA I JUST SAW. My turn is ending, so whatever HEAD is right now is the last
-  //     state of the repo I have observed. Recording it here (every turn, before any section can
-  //     return) is what lets a future REVIVE brief me on exactly `<this>..HEAD` — the commits I have
-  //     not seen — instead of a wall-clock `--since` that hides pulled commits with old dates
-  //     (audit #149). Cheapest possible: one rev-parse, fail-safe, keyed to MY role.
-  try {
-    const R = require('./arc-board');
-    const N = require('./arc-notes');
-    const board = R.resolveBoard(N.resolveCwd(session, cwd));
-    const myRole = N.getRole(session, board);
-    if (myRole) {
-      const head = require('child_process').spawnSync('git', ['-C', board.root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000 });
-      if (head && head.status === 0) R.stampSeen(board, myRole, String(head.stdout || '').trim());
-    }
-  } catch { /* a missed stamp only widens the next brief — never break a turn */ }
+  // 0b. The seen-marker is stamped at TURN START (arc-switch-hook, on UserPromptSubmit), NOT here.
+  //     It used to be stamped here at turn END — but turn-end HEAD is an UPPER bound: if ANOTHER peer
+  //     commits mid-turn on the shared tree, that commit is <= my turn-end HEAD yet I never read it,
+  //     so stamping it "seen" would hide it from my next revive brief FOREVER (audit #170, arc's own
+  //     multi-agent case). Turn-start HEAD is a lower bound the peer definitely saw, so the brief
+  //     over-reports (safe noise) instead of under-reporting (silent zombie). See notes.stampSeenHead.
 
   // 1. Anything on the board for me? Hand it over instead of going idle.
   //

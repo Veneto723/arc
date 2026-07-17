@@ -113,6 +113,14 @@ function run(raw) {
   try { hook = JSON.parse(raw || '{}'); } catch {}
   const prompt = typeof hook.prompt === 'string' ? hook.prompt : '';
   const m = prompt.match(TRIGGER_RX);
+
+  // TURN START: stamp the HEAD this peer sees now as its seen-marker — a LOWER bound for the next
+  // revive's `<seen>..HEAD` brief. UserPromptSubmit is the turn boundary, so this runs once per turn
+  // for BOTH branches below (deliverBoard exits, so it can't come after). audit #170: turn-start is
+  // a lower bound the peer definitely saw; the old turn-END stamp was an upper bound that could mark
+  // a concurrent mid-turn commit "seen" and hide it forever. Fail-safe inside; never wedges a turn.
+  try { require('./arc-notes').stampSeenHead((process.env.ARC_SESSION || '').trim(), typeof hook.cwd === 'string' ? hook.cwd : null); } catch {}
+
   if (!m) deliverBoard(hook); // not an arc: command — deliver waiting notes, let it through
 
   const session = (process.env.ARC_SESSION || '').trim();
@@ -291,10 +299,18 @@ function run(raw) {
   return clBlock(`${r.message}${note}`);
 }
 
-let data = '';
-let done = false;
-const finish = () => { if (done) return; done = true; try { run(data); } catch { process.exit(0); } };
-process.stdin.on('data', (c) => { data += c; });
-process.stdin.on('end', finish);
-process.stdin.on('error', finish);
-setTimeout(finish, 500).unref();
+module.exports = { run };
+
+// Guard the stdin wiring behind require.main (like arc-stop-hook): as the hook entry point this
+// reads stdin and runs; REQUIRED as a library (tests, or another module) it must do nothing —
+// otherwise the empty-stdin `end` fires run(''), which delivers the board and ADVANCES the read
+// cursor as a side effect of a mere require. That is exactly how a syntax check once consumed a note.
+if (require.main === module) {
+  let data = '';
+  let done = false;
+  const finish = () => { if (done) return; done = true; try { run(data); } catch { process.exit(0); } };
+  process.stdin.on('data', (c) => { data += c; });
+  process.stdin.on('end', finish);
+  process.stdin.on('error', finish);
+  setTimeout(finish, 500).unref();
+}
