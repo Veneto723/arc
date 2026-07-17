@@ -1950,6 +1950,11 @@ try {
   const nctx = claim(NM, 'code');     // its OWN role: the fork above already holds "scout"
   ok('a normally-started session gets NO identity lecture (nothing to correct)',
     !/FORKED PEER/.test(nctx) && /arc join code/.test(nctx));
+  // audit #198: the role-claim STEPS (stand by, STOP) are arc's protocol, not the human's. An agent
+  // that relays them as "you told me to stand by" tells the human they ordered something they never
+  // did — the exact misattribution that happened live. The frame forbidding it must ride every claim.
+  ok('the role-claim guidance frames its steps as ARC speaking, not the human (no misattribution)',
+    /ARC's protocol, not your human/i.test(nctx) && /never relay them back as the human's order/i.test(nctx));
 
   // The standing rule, on the channel every woken peer actually reads: the injection.
   const notesSrc2 = fs.readFileSync(path.join(SRC, 'arc-notes.js'), 'utf8');

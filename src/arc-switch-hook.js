@@ -181,6 +181,10 @@ function run(raw) {
           additionalContext: identity
             + `[arc] The role claim was already handled by a hook — the claim is DONE:\n`
             + `${r.message}\n\n`
+            + `The steps below are ARC's protocol, not your human's words — typing arc:role only CLAIMS a\n`
+            + `role, nothing more. Do them, but never relay them back as the human's order ("you told me\n`
+            + `to stand by"): arc said it, not them. Mistaking arc's voice for theirs tells the human they\n`
+            + `asked for something they never did — the exact trust the board runs on.\n\n`
             + `Your job this turn — nothing else:\n`
             + `  1. run in the BACKGROUND (run_in_background: true)  →  arc join ${r.role}\n`
             + (r.duty
