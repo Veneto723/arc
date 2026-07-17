@@ -771,8 +771,15 @@ function releaseRole(board, role, pid) {
 // exactly the mess it exists to clear.
 function closePeer(board, role, opts) {
   const o = opts || {};
-  const claim = roleClaim(board, role);
-  const entryPid = (readClaimFile(board, role) || {}).pid;   // the pid the file names NOW, before we touch anything
+  // ONE raw snapshot at entry. The kill target and the abort baseline BOTH derive from it, so a
+  // revive cannot slip between two adjacent reads and desync them — poisoning entryPid with the
+  // revive's own pid so the :809 abort silently fails to fire and tombstones a live peer (audit
+  // #172). `claim` is the genuineness-filtered view (inlined roleClaim = readClaimFile + isHolder)
+  // so only a genuine holder is killed (a recycled-pid stranger reads vacant, untouched); `entryPid`
+  // is the RAW pid so the tombstone still fires for an already-exited peer (the common close).
+  const entry = readClaimFile(board, role);
+  const entryPid = entry && entry.pid;
+  const claim = entry && isHolder(entry) ? entry : null;
   const kill = o.kill || ((pid) => { try { process.kill(pid, 'SIGKILL'); return true; } catch { return false; } });
   const tree = o.tree || treeOf;
   const killed = [];
