@@ -557,8 +557,12 @@ function receiptBlock(board, me, all) {
     let mark;
     if (n.to != null) mark = seen.length ? `✓ seen by ${n.to}` : `⧗ ${n.to} hasn't read it yet`;
     else if (!recipients.length) mark = '(no live peer to receive)';
-    else if (seen.length === recipients.length) mark = `✓ seen by all ${recipients.length}`;
-    else mark = `${seen.length}/${recipients.length} seen · missing: ${recipients.filter((r) => !seen.includes(r)).join(', ')}`;
+    // "all N LIVE", never a bare "all": recipients is the CURRENT live set, which SHRINKS as chairs
+    // close — a peer live at broadcast that closes UNREAD drops out, so an absolute "all" would
+    // overclaim a set that lost a genuine recipient to closure (audit #192 Q2). Naming who signed
+    // and qualifying "live" keeps it honest without storing a snapshot (the receipt stays derived).
+    else if (seen.length === recipients.length) mark = `✓ seen by all ${recipients.length} live (${seen.slice().sort().join(', ')})`;
+    else mark = `${seen.length}/${recipients.length} seen · missing: ${recipients.filter((r) => !seen.includes(r)).sort().join(', ')}`;
     return `    #${n.seq} → ${n.to || 'all'}  ${kind}${mark}`;
   });
   return `\n  your recent sent (receipts — no ack needed):\n${rows.join('\n')}`;

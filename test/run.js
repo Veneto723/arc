@@ -3927,6 +3927,11 @@ try {
   F.requestNotes(S('c'), '', rroot);
   ok('...seen by all once every live peer reads — a blocker reached everyone, without asking',
     RM.seenBy(rboard, bn).seen.length === 2);
+  // audit #192 Q2: recipients is the CURRENT live set, which shrinks as chairs close, so a bare
+  // "all" would overclaim. The receipt must say "all N LIVE" and name who signed — never an absolute
+  // "all" a closed-unread chair could have dodged.
+  ok('...and the broadcast receipt says "all N LIVE (roles)", never a bare "all" (audit #192 Q2)',
+    /seen by all 2 live \(bb, cc\)/.test(F.requestNotes(S('a'), '', rroot).message));
 
   // A broadcast to an empty board (no live peers) has no recipient, so it can never falsely read
   // "seen by all" — it reports having no one to receive it.
