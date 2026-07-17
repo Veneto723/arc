@@ -278,6 +278,12 @@ function boardOrigin(board) {
   try { ensureBoard(board); atomicWriteJson(originPath(board), { id, at: Date.now() }); } catch {}
   return id;
 }
+// LATENT EDGE — double-mint, NOT a bug (audit #166). Before origin.json exists, two concurrent
+// FIRST-EVER appends can each mint a different origin id; last writer wins the file, but notes
+// already appended keep whichever id their writer read. So the earliest notes could split across
+// two origins. It does NOT break `ord` (each origin still counts its own subsequence cleanly) or
+// the cursor (per-origin) — the board is just finer-grained than intended for its first few notes.
+// First-append race only; every append after origin.json exists reads the one id.
 // RANDOM, not a counter. See the design note at the top: reading the ledger to compute "last+1"
 // is the collision the positional scheme existed to prevent, and it would come back the moment two
 // local peers appended in the same tick. 48 random bits per note need no coordination at all.
@@ -380,7 +386,10 @@ function allNotes(board) {
     // reordering them — so every machine counts the same ordinal for the same note. This is what
     // the cursor advances on. It needs no counter at write time (that race is why seq is positional
     // at all) and, unlike a timestamp, it cannot tie: notes written in the same millisecond still
-    // have distinct ordinals.
+    // have distinct ordinals. BOUNDARY (audit #166): ord assumes an origin's line order never
+    // changes — union-append preserves it, but a `git rebase` of a SHARED ledger would not. Out of
+    // scope by design: .peer/ self-ignores, so the ledger never enters a rebased branch in normal
+    // flow. If that ever changes, ord's monotonicity across the rewrite is not guaranteed.
     out.push({ seq: i + 1, ord: (ord[org] = (ord[org] || 0) + 1), ...n });
   });
   return out;
@@ -763,6 +772,7 @@ function releaseRole(board, role, pid) {
 function closePeer(board, role, opts) {
   const o = opts || {};
   const claim = roleClaim(board, role);
+  const entryPid = (readClaimFile(board, role) || {}).pid;   // the pid the file names NOW, before we touch anything
   const kill = o.kill || ((pid) => { try { process.kill(pid, 'SIGKILL'); return true; } catch { return false; } });
   const tree = o.tree || treeOf;
   const killed = [];
@@ -784,18 +794,31 @@ function closePeer(board, role, opts) {
   // "empty chair" instead of "was here; REVIVE as itself". The close-then-revive round trip is the
   // standing-duty lifecycle; the tombstone below is what makes the promise in close's own message
   // true. Unlink only when there is no conversation to point at — then the chair really is bare.
-  // Read the claim RAW here, not through roleClaim: roleClaim is genuineness-filtered, so a dead
-  // pid reads as "no claim" — which is precisely the common close case, and filtering it would
-  // skip the tombstone for every peer that already exited. The kill above stays filtered (a
-  // recycled pid may be a stranger); the pointer below must not be.
-  const raw = readClaimFile(board, role);
-  if (raw && raw.convId) {
-    atomicWriteJson(claimPath(board, role), { role, sessionId: raw.sessionId || null, convId: raw.convId, at: Date.now() });
-  } else {
-    try { fs.unlinkSync(claimPath(board, role)); } catch {}
-  }
-  clearBirth(board, role);
-  return { role, killed, hadClaim: !!raw, revivable: !!(raw && raw.convId) };
+  // THE TOMBSTONE IS A CLAIM MUTATION, so it must hold the SAME lock claimRole holds — or a
+  // concurrent `arc delegate <role>` (revive) writes a LIVE claim under the lock and our unlocked
+  // tombstone clobbers it: the live peer reads vacant (DOUBLE-STAFFING) and its convId reverts to
+  // the stale one we read before the revive (audit #167, a real race — closePeer took no lock).
+  // The kill stayed OUTSIDE the lock on purpose: killing a tree can be slow, and the lock guards
+  // the claim FILE, not the process. And inside the lock we RE-CHECK the pid: if it changed since
+  // we entered, a revive won the chair while we were killing — do NOT tombstone a live peer.
+  // Read the claim RAW (not roleClaim): roleClaim is genuineness-filtered, so a dead pid reads as
+  // "no claim", and filtering here would skip the tombstone for every peer that already exited —
+  // the common close. The kill above stays filtered (a recycled pid may be a stranger).
+  return withLock(board, `role-${role}`, () => {
+    const raw = readClaimFile(board, role);
+    if (raw && raw.pid && raw.pid !== entryPid) {
+      // A concurrent revive re-claimed this role after we started closing. Its live claim wins;
+      // tombstoning it would erase a live peer. Leave it — we only killed the OLD peer's tree.
+      return { role, killed, hadClaim: true, revivable: !!raw.convId, reclaimed: true };
+    }
+    if (raw && raw.convId) {
+      atomicWriteJson(claimPath(board, role), { role, sessionId: raw.sessionId || null, convId: raw.convId, at: Date.now() });
+    } else {
+      try { fs.unlinkSync(claimPath(board, role)); } catch {}
+    }
+    clearBirth(board, role);
+    return { role, killed, hadClaim: !!raw, revivable: !!(raw && raw.convId), reclaimed: false };
+  });
 }
 
 // The pids around a runner: its parent shell and its claude child. Windows-only (WMI), and it must

@@ -878,6 +878,15 @@ function requestClose(session, arg, cwd, opts) {
   // would lose work nobody knew was in flight.
   const owed = R.openRequests(board, role).filter((n) => n.to === role);
   const r = (o.close || R.closePeer)(board, role, o);
+  // A revive re-claimed the chair while we were closing (closePeer aborted the tombstone to protect
+  // the live peer — audit #167). Say so honestly: we killed the OLD peer's tree, but the chair is
+  // live again under a NEW session, and it was not ours to end.
+  if (r.reclaimed) {
+    return { ok: true, role, killed: r.killed, reclaimed: true, message:
+      `↺ "${role}" was REVIVED while you were closing it — a new session claimed the chair, so arc did\n` +
+      `  NOT tombstone it (that would have erased a live peer). The old process is gone; the chair is\n` +
+      `  live again as someone else's "${role}". Leave it a note if you need it:  arc note ${role} "<text>"` };
+  }
   const what = r.killed.length ? r.killed.map((k) => `${k.what} (${k.pid})`).join(', ') : 'nothing running';
   return { ok: true, role, killed: r.killed, message:
     `✓ closed "${role}" — killed ${what}; its chair is ${r.revivable ? 'vacant, and it keeps its seat' : 'free'}.\n` +

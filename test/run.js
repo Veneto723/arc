@@ -1689,6 +1689,28 @@ try {
     RM7.closePeer(BRD, 'bare', { tree: () => ({ parent: null, children: [] }), kill: () => false });
     ok('close with no conversation unlinks outright — a tombstone pointing nowhere is clutter',
       !fs.existsSync(path.join(BRD.planDir, 'claim-bare.json')));
+
+    // THE CLOSE-VS-REVIVE RACE (audit #167): closePeer took no lock, so a concurrent revive's live
+    // claim could be clobbered by a stale tombstone — double-staffing + a reverted convId. Fixed:
+    // the tombstone runs under the role lock AND aborts if the pid changed since entry. Reproduced
+    // deterministically here — the kill hook lands a re-claim (a revive) DURING the close, exactly
+    // the interleaving. A genuine entry claim (this live pid) so the kill (and thus the revive) fires.
+    RM7.claimRole(BRD, 'raced', process.pid, 'old-sess', 'old-conv');
+    const raceRes = RM7.closePeer(BRD, 'raced', {
+      tree: () => ({ parent: null, children: [] }),
+      // the true interleaving: the old peer dies (release) and a REVIVE claims a fresh pid+conv,
+      // all in the window while close is between reading the pid and writing the tombstone.
+      kill: () => { RM7.releaseRole(BRD, 'raced', process.pid); RM7.claimRole(BRD, 'raced', 424242, 'new-sess', 'new-conv'); return true; },
+    });
+    const racedClaim = JSON.parse(fs.readFileSync(path.join(BRD.planDir, 'claim-raced.json'), 'utf8'));
+    ok('close ABORTS the tombstone when a revive re-claimed during the kill — no clobber of a live peer',
+      raceRes.reclaimed === true && racedClaim.pid === 424242 && racedClaim.convId === 'new-conv');
+    // and the normal path is unaffected: no concurrent reclaim -> tombstone written, reclaimed:false
+    RM7.claimRole(BRD, 'calm', 999997, 'calm-sess', 'calm-conv');
+    const calmRes = RM7.closePeer(BRD, 'calm', { tree: () => ({ parent: null, children: [] }), kill: () => true });
+    const calmTomb = JSON.parse(fs.readFileSync(path.join(BRD.planDir, 'claim-calm.json'), 'utf8'));
+    ok('...while an uncontended close still tombstones normally (convId kept, pid gone, reclaimed:false)',
+      calmRes.reclaimed === false && calmRes.revivable === true && !calmTomb.pid && calmTomb.convId === 'calm-conv');
   }
   // YOU MAY ONLY CLOSE WHAT YOU SPAWNED — a board is shared, and ending someone else's peer
   // mid-conversation is not yours to do. Checked by CONVERSATION, not session id: a respawn must
