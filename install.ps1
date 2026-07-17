@@ -29,6 +29,16 @@ Copy-Item (Join-Path $kit 'src\arc-birth.ps1') $scripts -Force
 Copy-Item (Join-Path $kit 'src\icons\make-icons.ps1') (Join-Path $scripts 'icons') -Force
 Write-Host "  scripts -> $scripts"
 
+# Stamp the deployed version so the runner knows what it is at launch (package.json is deliberately
+# NOT copied to $scripts — one marker, read by arc-update.installedVersion). This is what makes the
+# launch-time "a newer release is available" check possible on a machine that only RUNS arc.
+$pkgVer = (Get-Content (Join-Path $kit 'package.json') -Raw | ConvertFrom-Json).version
+$marker = @{ version = $pkgVer; installedAt = (Get-Date).ToString('o'); source = $kit } | ConvertTo-Json -Compress
+# WriteAllText, not Set-Content -Encoding UTF8: Windows PowerShell 5.1 prepends a UTF-8 BOM, and
+# JSON.parse chokes on it — the runner would read version 0.0.0 and offer a phantom "upgrade".
+[System.IO.File]::WriteAllText((Join-Path $scripts 'arc-version.json'), $marker)
+Write-Host "  version -> arc v$pkgVer"
+
 # pool-DB metrics tooling (feeds the statusline + pool MCP tools when arc-config
 # has poolDb; harmless otherwise). No /pool slash command — it wasn't universal.
 Copy-Item (Join-Path $kit 'pool\pool-query.js') $scripts -Force

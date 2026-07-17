@@ -3955,6 +3955,62 @@ try {
   fs.rmSync(lone, { recursive: true, force: true });
 } catch (e) { ok('arc-notes receipts', false, e.message + '\n' + (e.stack || '')); }
 
+// ---- arc-update (version-awareness at launch + one-command upgrade) ----------
+section('arc-update (launch check is fail-safe; release preconditions hold)');
+try {
+  const U = require(path.join(SRC, 'arc-update.js'));
+  ok('cmpVer: v-prefix + short forms + garbage never throw',
+    U.cmpVer('v2.1.0', '2.1.0') === 0 && U.cmpVer('2.2.0', '2.1.9') === 1 && U.cmpVer('2.1.0', '2.1.1') === -1
+    && U.cmpVer('2.1', '2.1.0') === 0 && U.cmpVer('3.0.0', '2.9.9') === 1 && U.cmpVer('v2.x', '2.0') === 0);
+
+  // checkForUpdate is ASYNC (a network fetch) and this suite is synchronous, so its cache/fail-safe
+  // logic is exercised in a CHILD process that awaits and exits 0/1. Fail-safe is the whole contract:
+  // the launch path must never throw, hang, or be wedged by offline/timeout/garbage.
+  const updPath = path.join(SRC, 'arc-update.js').split(path.sep).join('/');
+  const child = [
+    `const U=require(${JSON.stringify(updPath)});const fs=require('fs'),os=require('os'),p=require('path');`,
+    `const c=p.join(os.tmpdir(),'arc-upd-child-'+process.pid+'.json');let ok=true;const t=(x)=>{if(!x)ok=false;};`,
+    `(async()=>{`,
+    `let r=await U.checkForUpdate({cachePath:c,installed:'2.1.0',fetch:async()=>({tag:'v2.2.0',tarball:'x'}),now:1000});t(r.available===true&&r.latest==='v2.2.0');`,
+    `r=await U.checkForUpdate({cachePath:c,installed:'2.2.0',fetch:async()=>({tag:'v2.2.0'}),now:2000,force:true});t(r.available===false);`,
+    `let n=0;await U.checkForUpdate({cachePath:c,installed:'2.1.0',fetch:async()=>{n++;return{tag:'v9'};},now:3000});t(n===0);`,
+    `await U.checkForUpdate({cachePath:c,installed:'2.1.0',fetch:async()=>{n++;return{tag:'v2.3.0'};},now:3000+25*3600*1000});t(n===1);`,
+    `r=await U.checkForUpdate({cachePath:c,installed:'9.9.9',fetch:async()=>null,now:5000,force:true});t(r.available===false);`,
+    `let th=false;try{r=await U.checkForUpdate({cachePath:c,installed:'2.1.0',fetch:async()=>{throw new Error('x');},now:6000,force:true});}catch{th=true;}t(th===false&&typeof r.available==='boolean');`,
+    `U.recordDecline('v2.3.0',c);r=await U.checkForUpdate({cachePath:c,installed:'2.1.0',fetch:async()=>({tag:'v2.3.0'}),now:7000,force:true});t(r.available===true&&r.declined===true);`,
+    `try{fs.unlinkSync(c);}catch{}process.exit(ok?0:1);})();`,
+  ].join('\n');
+  const scriptFile = path.join(TMP, 'arc-update-async.js'); fs.writeFileSync(scriptFile, child);
+  const cr = spawnSync(process.execPath, [scriptFile], { encoding: 'utf8', timeout: 15000 });
+  ok('checkForUpdate: available / cache-freshness / stale-refetch / offline / throw-swallow / decline (async child)',
+    cr.status === 0, (cr.stdout || '') + (cr.stderr || ''));
+
+  // doRelease preconditions — a release must be a clean, correct, pushed point. Dry-run: never pushes.
+  const mkrepo = (remote, ver) => {
+    const rp = fs.mkdtempSync(path.join(os.tmpdir(), 'rel-'));
+    const g = (a) => spawnSync('git', ['-C', rp, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { encoding: 'utf8' });
+    g(['init', '-qb', 'main']); if (remote) g(['remote', 'add', 'origin', remote]);
+    fs.writeFileSync(path.join(rp, 'package.json'), JSON.stringify({ name: 'arc', version: ver }, null, 2));
+    g(['add', '-A']); g(['commit', '-qm', 'init']);
+    return rp;
+  };
+  const good = mkrepo('https://github.com/Veneto723/arc.git', '2.0.0');
+  ok('doRelease bumps patch/minor/major and accepts an explicit version',
+    U.doRelease('patch', { cwd: good, dryRun: true }).version === 'v2.0.1'
+    && U.doRelease('minor', { cwd: good, dryRun: true }).version === 'v2.1.0'
+    && U.doRelease('major', { cwd: good, dryRun: true }).version === 'v3.0.0'
+    && U.doRelease('2.5.1', { cwd: good, dryRun: true }).version === 'v2.5.1');
+  fs.writeFileSync(path.join(good, 'dirty.txt'), 'x');
+  ok('...refuses a DIRTY tree (never releases uncommitted work)',
+    U.doRelease('patch', { cwd: good, dryRun: true }).ok === false && /dirty/.test(U.doRelease('patch', { cwd: good, dryRun: true }).message));
+  const wrong = mkrepo('https://github.com/someone/other.git', '1.0.0');
+  ok('...refuses the WRONG origin (a fork would push the release elsewhere than the tree)',
+    U.doRelease('patch', { cwd: wrong, dryRun: true }).ok === false && /refusing to release the wrong repo|expected/.test(U.doRelease('patch', { cwd: wrong, dryRun: true }).message));
+  ok('downloadAndInstall refuses with no tarball url (never a half-install)',
+    U.downloadAndInstall('v9', null).ok === false);
+  for (const d of [good, wrong]) fs.rmSync(d, { recursive: true, force: true });
+} catch (e) { ok('arc-update', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- arc-stop-hook (auto-feed at TURN END, no human keystroke) ---------------
 section('arc-stop-hook (a note is never left sitting on the board)');
 try {

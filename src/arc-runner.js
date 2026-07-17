@@ -1292,6 +1292,84 @@ function cmdSetKey(argv) {
 
 // ---- main loop ------------------------------------------------------------
 
+// ---- update / release (logic in arc-update.js) -------------------------------
+// A y/N read that CANNOT hang a launch: non-TTY -> false at once, and a timeout defaults to NO.
+function promptYesNo(question, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    const stdin = process.stdin, out = process.stdout;
+    if (!stdin.isTTY) return resolve(false);
+    out.write(question);
+    let done = false, timer;
+    const finish = (v) => {
+      if (done) return; done = true;
+      try { stdin.removeListener('data', onData); } catch {}
+      try { stdin.pause(); } catch {}
+      clearTimeout(timer);
+      out.write('\n');
+      resolve(v);
+    };
+    const onData = (buf) => { const c = String(buf).trim().toLowerCase(); finish(c === 'y' || c === 'yes'); };
+    try { if (stdin.setRawMode) stdin.setRawMode(false); } catch {}   // line mode: y + Enter
+    stdin.resume();
+    stdin.on('data', onData);
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+// Offered ONLY on a genuine interactive top-level launch — never a peer BIRTH (ARC_RUNTIME_ACCOUNT
+// pins its tab; a prompt would hang the spawn), never a respawn (caller gates on !respawning), never
+// a pipe (isTTY). Fully fail-safe: ANY error and we just launch. On accept, install then re-exec the
+// updated runner so THIS session runs the new code.
+async function maybeOfferUpdate(originalArgs) {
+  try {
+    if (!process.stdin.isTTY || process.env.ARC_RUNTIME_ACCOUNT) return;
+    const U = require('./arc-update');
+    const info = await U.checkForUpdate({ timeoutMs: 1500 });
+    if (!info.available || info.declined) return;
+    const rel = await U.latestRelease(1500);
+    if (!rel || !rel.tarball) return;
+    const yes = await promptYesNo(`\x1b[36m[arc]\x1b[0m a newer arc is available: ${info.installed} → ${info.latest}. Upgrade now? [y/N] `);
+    if (!yes) { U.recordDecline(info.latest); return; }
+    process.stdout.write(`[arc] upgrading to ${info.latest}…\n`);
+    const r = U.downloadAndInstall(rel.tag, rel.tarball);
+    process.stdout.write(`[arc] ${r.message}\n`);
+    if (r.ok) {
+      const re = spawnSync(process.execPath, [process.argv[1], ...(originalArgs || [])], { stdio: 'inherit', env: process.env });
+      process.exit(re.status ?? 0);
+    }
+  } catch { /* NEVER block a launch on the updater */ }
+}
+
+async function cmdUpdate() {
+  const U = require('./arc-update');
+  process.stdout.write('[arc] checking for a newer release…\n');
+  const info = await U.checkForUpdate({ force: true, timeoutMs: 4000 });
+  if (!info.available) { process.stdout.write(`[arc] up to date (installed ${info.installed}${info.latest ? `, latest ${info.latest}` : ''}).\n`); return; }
+  const rel = await U.latestRelease(4000);
+  if (!rel || !rel.tarball) { process.stderr.write('[arc] could not resolve the release tarball.\n'); process.exit(1); }
+  process.stdout.write(`[arc] upgrading ${info.installed} → ${info.latest}…\n`);
+  const r = U.downloadAndInstall(rel.tag, rel.tarball);
+  process.stdout.write(`[arc] ${r.ok ? '✓ ' : 'FAILED — '}${r.message}\n`);
+  process.exit(r.ok ? 0 : 1);
+}
+
+function cmdRelease(argv) {
+  const U = require('./arc-update');
+  const bump = argv.find((a) => !a.startsWith('-')) || 'patch';
+  const yes = argv.includes('--yes') || argv.includes('-y');
+  const plan = U.doRelease(bump, { dryRun: true });        // show exactly what will happen first
+  if (!plan.ok) { process.stderr.write(`[arc] release refused — ${plan.message}\n`); process.exit(1); }
+  process.stdout.write(`[arc] ${plan.message}\n`);
+  if (!yes) {
+    process.stdout.write('[arc] this bumps package.json, tags, PUSHES, and cuts a PUBLIC GitHub Release.\n' +
+      `      confirm:  arc release ${bump} --yes\n`);
+    return;
+  }
+  const r = U.doRelease(bump);
+  process.stdout.write(`[arc] ${r.ok ? '✓ ' : 'FAILED — '}${r.message}\n`);
+  process.exit(r.ok ? 0 : 1);
+}
+
 async function main() {
   const userArgs = process.argv.slice(2);
   if (userArgs[0] === 'bundle') {
@@ -1348,6 +1426,8 @@ async function main() {
   }
   if (userArgs[0] === 'set-key') return cmdSetKey(userArgs.slice(1));
   if (userArgs[0] === 'doctor') return cmdDoctor();
+  if (userArgs[0] === 'update') return cmdUpdate();
+  if (userArgs[0] === 'release') return cmdRelease(userArgs.slice(1));
 
   // Board CLI — the AGENT-facing way to leave a peer a note. The `arc:note`
   // sentinel is eaten by the UserPromptSubmit hook before the model, so an agent can
@@ -1455,6 +1535,7 @@ async function main() {
 
   let respawning = process.env.ARC_RESPAWNED === '1';
   if (!respawning) { sweepStaleStates(); migrateProfilesOnce(); } // only the original launch; not re-execs
+  if (!respawning) await maybeOfferUpdate(userArgs);   // fail-safe + only on an interactive top-level launch
   // Snapshot the terminal window now, while it is still foreground (before claude
   // takes over the TTY), so a clicked toast can focus it later. Once per process.
   captureLaunchWinPid();
