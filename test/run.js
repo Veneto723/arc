@@ -1904,6 +1904,19 @@ try {
       const on = QI.spawnQuiet(); if (prev === undefined) delete process.env.ARC_SPAWN_QUIET; else process.env.ARC_SPAWN_QUIET = prev;
       return on === true; })());
 
+  // ---- ARC_SPAWN_PROFILE: which wt profile dresses a peer's tab --------------------------
+  // Unset, the launch names NO profile — the only form that works on a machine arc has never
+  // seen (profile names are user-chosen, even localized; a wrong -p is wt's silent no-tab).
+  // Set, wt applies that profile's icon/theme while our commandline still overrides the run.
+  ok('by default a peer tab names NO wt profile (a guessed name is a failed launch elsewhere)',
+    (() => { const prev = process.env.ARC_SPAWN_PROFILE; delete process.env.ARC_SPAWN_PROFILE;
+      const line = winOf('0'); if (prev !== undefined) process.env.ARC_SPAWN_PROFILE = prev;
+      return !/ -p /.test(line) && QI.spawnProfile() === ''; })());
+  ok('...and ARC_SPAWN_PROFILE dresses the tab in a named profile, quoted through the PS chain',
+    (() => { const prev = process.env.ARC_SPAWN_PROFILE; process.env.ARC_SPAWN_PROFILE = 'Power Shell';
+      const line = winOf('0'); if (prev === undefined) delete process.env.ARC_SPAWN_PROFILE; else process.env.ARC_SPAWN_PROFILE = prev;
+      return / new-tab -p 'Power Shell' --title /.test(line); })());
+
   // ---- --board: the ONE hole in the filesystem isolation ----------------------------------
   // Built for an observed pain, not a hypothetical: a session dogfooding arc in ANOTHER repo
   // learns things about arc that belong on arc's board, and the only channel was a human
@@ -2649,12 +2662,18 @@ try {
   // same command; the only one that ever mattered was the env a human's terminal does not have.
   // PROOF: identical wt + cmd /k + flags, env stripped -> 21701 bytes, written WHILE STILL LIVE.
   const dirty = { PATH: 'x', CLAUDE_CONFIG_DIR: 'profile', ARC_RUNTIME_ACCOUNT: 'veneto',
-    CLAUDE_CODE_SESSION_ID: 'caller-conv', CLAUDE_CODE_CHILD_SESSION: '1', ARC_SESSION: 'caller-sess' };
+    CLAUDE_CODE_SESSION_ID: 'caller-conv', CLAUDE_CODE_CHILD_SESSION: '1', ARC_SESSION: 'caller-sess',
+    NO_COLOR: '1' };
   const clean = I.birthEnv(dirty);
   ok('a newborn never inherits the CALLER\'s conversation id (it would never get one of its own)',
     !('CLAUDE_CODE_SESSION_ID' in clean) && !('CLAUDE_CODE_CHILD_SESSION' in clean));
   ok('...nor ARC_SESSION, or its hooks read the CALLER\'s role, notes and cursor',
     !('ARC_SESSION' in clean));
+  // Same disease, different organ: Claude Code sets NO_COLOR=1 in its TOOL subshells, every spawn
+  // runs in one, and wt hands the pane the INVOKER's env (probed live, 2026-07-18, both -p and
+  // profile-less) — so every spawned peer ever ran MONOCHROME next to a colored hand-launched tab.
+  ok('...nor the tool-shell\'s NO_COLOR, which turned every spawned peer monochrome',
+    !('NO_COLOR' in clean));
   ok('...while the account profile SURVIVES — a revive resumes a conv that exists only there',
     clean.CLAUDE_CONFIG_DIR === 'profile' && clean.ARC_RUNTIME_ACCOUNT === 'veneto' && clean.PATH === 'x');
   // And it must actually reach the spawn, not just exist as a helper.

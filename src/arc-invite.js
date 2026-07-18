@@ -175,6 +175,13 @@ const INHERITED_IDENTITY = [
   'CLAUDE_CODE_EXECPATH',
   'CLAUDE_EFFORT',               // the caller's effort pin; the peer's own launch decides its own
   'ARC_SESSION',                 // or the peer's hooks read the CALLER's role, notes and cursor
+  // Not identity but the same disease — the caller's TOOL SHELL leaking into a peer that is a
+  // real terminal session. Claude Code sets NO_COLOR=1 in the subshells its tools run in (so
+  // tool output parses clean), every spawn goes through such a subshell, and wt hands the new
+  // pane the INVOKER's environment (probed 2026-07-18: both -p and profile-less panes carried
+  // NO_COLOR=1). Result: every spawned peer ever ran MONOCHROME — statusline, roster glyph
+  // colors, all of it — while a hand-launched session sat colored in the next tab.
+  'NO_COLOR',
 ];
 function birthEnv(base) {
   const env = { ...(base || process.env) };
@@ -331,6 +338,17 @@ function spawnQuiet() { return /^(1|true|yes)$/i.test(String(process.env.ARC_SPA
 // ARC_SPAWN_WINDOW=<name> pins every peer to one named window instead. Any string wt accepts.
 function spawnWindow() { return String(process.env.ARC_SPAWN_WINDOW || '').trim() || '0'; }
 
+// WHICH wt PROFILE dresses a peer's tab. Unset (the default) launches a raw commandline —
+// wt shows a generic tab: no icon, no theme, none of the human's profile appearance. That
+// default is deliberate robustness, not taste: profile names are user-chosen, per-machine,
+// even localized (this machine's cmd profile is named 命令提示符), and a `-p` naming a
+// profile that does not exist makes wt fail the launch — the silent no-tab this launcher
+// fears most. arc cannot guess a name safely, so by default it names none.
+// ARC_SPAWN_PROFILE=<name> opts in: wt applies that profile's icon/theme/font while our
+// commandline still overrides what actually runs (wt documents -p + commandline as exactly
+// this). A wrong name fails visibly, and only for the person who set it.
+function spawnProfile() { return String(process.env.ARC_SPAWN_PROFILE || '').trim(); }
+
 function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, quiet, win) {
   const acct = account ? ` --account ${account}` : '';
   const sh = shell || launchShell();
@@ -434,7 +452,8 @@ function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, qu
     // (operator, 2026-07-17). The human's call: keep the icon, let Claude Code retitle the tab
     // from the project folder like every other session. The role is still legible from the
     // roster and the tab's initial name; the live status icon is worth more than a pinned label.
-    return `wt -w ${win || '0'} new-tab --title ${psQuote(role)} -d ${psQuote(root)} ${pre} ${inner}`;
+    const prof = spawnProfile();
+    return `wt -w ${win || '0'} new-tab${prof ? ` -p ${psQuote(prof)}` : ''} --title ${psQuote(role)} -d ${psQuote(root)} ${pre} ${inner}`;
   }
   // QUIET: Start-Process -WindowStyle HIDDEN. Not Minimized — that was WRONG, and it was wrong in
   // the most expensive way available.
@@ -957,4 +976,4 @@ function requestClose(session, arg, cwd, opts) {
       : `  It never persisted a conversation, so there is nothing to revive — a new delegate starts fresh.`) };
 }
 
-module.exports = { staffRole, requestDelegate, requestClose, buildLaunch, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, transcriptPath, lastTurnAt, freshnessBrief, spawnQuiet, spawnWindow };
+module.exports = { staffRole, requestDelegate, requestClose, buildLaunch, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, transcriptPath, lastTurnAt, freshnessBrief, spawnQuiet, spawnWindow, spawnProfile };
