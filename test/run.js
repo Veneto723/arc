@@ -2244,6 +2244,38 @@ try {
     (F6.badge(DS, drepo) || {}).deaf === true);
   A6.clearWaiting(DS); A6.clearOffered(DS); RM6.markRead(dboard2, 'code');
 
+  // THE HEARTBEAT GATE (roadmap #5): stale unread alone cannot separate idle-and-deaf from
+  // busy-mid-long-turn. A session whose TRANSCRIPT is still growing is mid-turn — the Stop hook
+  // will deliver at turn-end, so badging it is the alarm fatigue the roadmap recorded ("DEAF
+  // fires during normal long turns"). Note: every deaf assert ABOVE ran with NO transcript on
+  // disk — quiet-forever — which is itself the proof that an unresolvable beat stays fail-visible
+  // (the exact pre-heartbeat behavior). Now give the session a transcript and watch the beat gate.
+  const dproj = path.join(CLAUDE, 'projects', 'E--deaf-beat');
+  fs.mkdirSync(dproj, { recursive: true });
+  const dtx = path.join(dproj, 'dc1.jsonl');            // the state file above declared convId: dc1
+  fs.writeFileSync(dtx, '{"type":"assistant"}\n');      // fresh mtime = the turn is beating NOW
+  RM6.appendNote(dboard2, { from: 'peer', to: 'code', kind: 'info', body: 'still there?' });
+  (() => { const ls = fs.readFileSync(dnp, 'utf8').trim().split('\n').map((l) => JSON.parse(l)); ls[ls.length - 1].ts = new Date(Date.now() - 120000).toISOString(); fs.writeFileSync(dnp, ls.map((l) => JSON.stringify(l)).join('\n') + '\n'); })();
+  ok('an OLD unread note while the transcript is BEATING is NOT deaf (busy ≠ deaf — the wolf-cry)',
+    !(F6.badge(DS, drepo) || {}).deaf);
+  // The turn ends or is INTERRUPTED: no hook fires, no flag needs clearing — the transcript
+  // simply stops growing, and the evidence itself goes stale. That is the whole reason this is
+  // a timestamp and not a turn-start/turn-end flag (the a9b682c interrupt bug, mirror-imaged).
+  const dold = new Date(Date.now() - 120000);
+  fs.utimesSync(dtx, dold, dold);
+  ok('...and once the transcript goes QUIET past the threshold, the same note IS deaf (idle-and-deaf)',
+    (F6.badge(DS, drepo) || {}).deaf === true);
+  // The same beat gates the SQUAT arm (stale offer), symmetrically.
+  fs.writeFileSync(dtx, '{"type":"assistant"}\n{"type":"human"}\n');   // beating again
+  fs.writeFileSync(A6.offerFile(DS), JSON.stringify({ at: Date.now() - 120000 }));
+  ok('...a STALE offer under a beating transcript is not a squat — the session is WORKING on something',
+    !(F6.badge(DS, drepo) || {}).deaf);
+  fs.utimesSync(dtx, dold, dold);
+  ok('...and quiet again = the squat resurfaces (the heartbeat DEFERS the badge, never buries it)',
+    (F6.badge(DS, drepo) || {}).deaf === true);
+  fs.rmSync(dproj, { recursive: true, force: true });
+  A6.clearWaiting(DS); A6.clearOffered(DS); RM6.markRead(dboard2, 'code');
+
   // The statusline must actually SHOW it — a fact nobody surfaces is a fact nobody has.
   const um = fs.readFileSync(path.join(SRC, 'usage-monitor.js'), 'utf8');
   ok('the statusline renders DEAF loudly',

@@ -730,6 +730,36 @@ function refreshRole(session, pid, cwd, convId) {
 // A role-holder with no listener THIS long is genuinely deaf, not mid-arm: the threshold clears the
 // transient no-listener windows (arming/post-wake) and most turns, so DEAF means DEAF (audit #200).
 const DEAF_STALE_MS = 90_000;
+
+// THE HEARTBEAT (roadmap #5): how long since this session's conversation TRANSCRIPT
+// last grew. The transcript is the one file that beats ONLY during work — it advances
+// with every tool call and assistant token while a turn runs, and stops the moment the
+// session idles. That is the discriminator the staleness test alone cannot see: a
+// session mid-way through a >90s turn has stale unread AND no listener, but its Stop
+// hook will deliver at turn-end — badging it is alarm fatigue: DEAF fires when nothing
+// is wrong, the human learns to ignore it, and then misses the real idle-and-deaf case.
+// Two designs deliberately NOT used, each with its measured killer:
+//   - a turn-start/turn-end FLAG: an interrupted turn fires no Stop hook, the flag
+//     sticks, and the session reads busy forever — a9b682c's bug, mirror-imaged.
+//   - stamping the STATUSLINE render (the roadmap item's original sketch): the
+//     statusline ticks every ~10s IDLE OR BUSY (refreshInterval + the idle-cadence
+//     measurement that accompanied board #208), so that stamp is always fresh and
+//     DEAF would simply never fire.
+// A freshness timestamp derived from evidence degrades gracefully instead: an
+// interrupted turn just stops beating. Unresolvable (no conv id, no transcript file
+// yet) reads as quiet-forever — fail-VISIBLE, preserving exactly the pre-heartbeat
+// behavior for the cases the old check was built to catch.
+function transcriptQuietFor(session) {
+  try {
+    const conv = sessionConv(session);
+    if (!conv) return Infinity;
+    const projects = path.join(os.homedir(), '.claude', 'projects');
+    for (const d of fs.readdirSync(projects)) {
+      try { return Date.now() - fs.statSync(path.join(projects, d, conv + '.jsonl')).mtimeMs; } catch {}
+    }
+  } catch {}
+  return Infinity;
+}
 function badge(session, cwd) {
   try {
     if (!session) return null;
@@ -766,7 +796,11 @@ function badge(session, cwd) {
         const times = u.count ? u.notes.map((n) => new Date(n.ts).getTime()).filter(Number.isFinite) : [];
         const oldestUnread = times.length ? Math.min(...times) : now;
         const unreadStale = times.length > 0 && now - oldestUnread > DEAF_STALE_MS;
-        deaf = offerStale || unreadStale;
+        // ...AND the heartbeat gate (roadmap #5): stale notes alone cannot separate
+        // idle-and-deaf (badge it) from busy-mid-long-turn (the Stop hook will deliver
+        // at turn-end — badging is alarm fatigue). Only a session that is BOTH
+        // note-stale AND transcript-quiet is genuinely doing nothing.
+        deaf = (offerStale || unreadStale) && transcriptQuietFor(session) > DEAF_STALE_MS;
       }
     } catch {}
     if (u.count) return { count: u.count, senders: u.senders, role, board: board.name, deaf };
