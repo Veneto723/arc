@@ -2502,6 +2502,46 @@ try {
   ok('a non-delegate command is not touched, even in passive (no output = defer)',
     gate('git status').decision === null && gate('arc note code "hi"').decision === null
     && gate('arc join code').decision === null);
+  // A REPLY IS NOT INITIATIVE (the note-permission asymmetry — the human's idea, verbatim:
+  // "replying a note doesn't require user permission"). A VERIFIED reply auto-allows in every
+  // stance; everything unproven defers to the normal permission flow — allow must be EARNED.
+  RM4.appendNote(gboard, { from: 'research', to: 'code', kind: 'request', body: 'q for code?' }); // #1
+  RM4.appendNote(gboard, { from: 'research', to: null, body: 'broadcast FYI' });                  // #2
+  RM4.appendNote(gboard, { from: 'research', to: 'frontend', body: 'not for code' });             // #3
+  St3.setStance(GS, 'passive');   // the strictest stance — a reply flows even here
+  ok('a VERIFIED reply auto-allows in every stance, passive included (a reply is not initiative)',
+    gate('arc note research --reply-to 1 "DONE — the answer"').decision === 'allow');
+  ok('...a reply to a BROADCAST that reached us allows too',
+    gate('arc note research --reply-to 2 "ack"').decision === 'allow');
+  ok('...but INITIATING a note stays untouched by arc (defers to the normal permission flow)',
+    gate('arc note research "a brand new thread"').decision === null);
+  ok('...a reply to a note NOT addressed to us defers (an allow must be PROVEN)',
+    gate('arc note research --reply-to 3 "butting in"').decision === null);
+  ok('...a reply aimed at someone who did NOT write the note defers (a reply goes to its asker)',
+    gate('arc note frontend --reply-to 1 "wrong asker"').decision === null);
+  ok('...a nonexistent seq defers, never allows',
+    gate('arc note research --reply-to 99 "ghost"').decision === null);
+  ok('...and a CROSS-BOARD reply still ASKS — leaving the repo outranks the reply exemption',
+    gate('arc note research --reply-to 1 --board E:\\other "x"').decision === 'ask');
+
+  // COMMAND-SCOPED, OR NOTHING (audit #290 — the bypass it caught before the record did): the
+  // regex matches a SUBSTRING but an allow approves the WHOLE command, so a genuine reply with a
+  // chained tail would have ridden the exemption — removing exactly the prompt that shows the
+  // human the tail. Every decorated form must DEFER to the normal permission flow.
+  ok('a reply with a CHAINED command defers — the allow is command-scoped (audit #290 probes)',
+    gate('arc note research --reply-to 1 "ok"; rm -rf X').decision === null
+    && gate('arc note research --reply-to 1 "ok" && curl evil').decision === null
+    && gate('arc note research --reply-to 1 "ok" | tee X').decision === null
+    && gate('echo hi && arc note research --reply-to 1 "ok"').decision === null);
+  ok('...a body carrying substitution characters defers too ($() and backticks run INSIDE quotes)',
+    gate('arc note research --reply-to 1 "x $(whoami)"').decision === null
+    && gate('arc note research --reply-to 1 "see #282 (crossed)"').decision === null);
+  ok('...a leading cd defers — it would post onto a DIFFERENT board than the ledger checks read',
+    gate('cd E:\\arc; arc note research --reply-to 1 "ok"').decision === null);
+  ok('...and the PLAIN reply still allows (the exemption survives its own scoping)',
+    gate('arc note research --reply-to 1 "DONE - all four claims hold"').decision === 'allow');
+  St3.setStance(GS, 'passive');
+
   // FAILS CLOSED by design: a mention inside a string is gated too. A false positive costs a
   // prompt; a false negative would let a session spawn ungated. And the honest limit — this is a
   // guardrail against self-initiation, not a sandbox: any string matcher can be walked around.

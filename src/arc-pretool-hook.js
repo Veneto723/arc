@@ -61,6 +61,20 @@ const RX_DELEGATE = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+delegate\s+([a-z][a-z0
 // that asks in EVERY stance — including active. The dial governs how much an agent may do on ITS
 // OWN board; it was never a mandate to speak on someone else's.
 const RX_CROSS_BOARD = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+note\s+[^\n]*--board[=\s]+(\S+)/i;
+// A REPLY IS NOT INITIATIVE. The stance dial governs what an agent STARTS; answering a note that
+// already reached you is the second half of an exchange the board exists to carry — and without
+// this, the permission prompt sits INSIDE the auto-feed loop (a peer's reply arrives at turn end,
+// and the answer going back would cost a human keystroke). The human's idea, verbatim (roadmap,
+// 2026-07-17): "replying a note doesn't require user permission." So a VERIFIED reply is
+// auto-allowed in EVERY stance, passive included — passive gates initiative, and a reply is the
+// opposite of initiative. The claim is verified against the ledger, and ANY doubt defers to the
+// normal permission flow: an allow must be PROVEN, a defer costs at most a prompt.
+//   - the referenced note exists on THIS board (numeric seq only; an id-shaped ref defers),
+//   - it was addressed to this session's role (directly, in a comma-list, or broadcast),
+//   - it was written by the role being replied to (a reply goes back to its asker),
+//   - and it is not our own note.
+// A cross-board reply still asks: RX_CROSS_BOARD is checked FIRST and returns before this.
+const RX_NOTE_REPLY = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+note\s+([a-z][a-z0-9_-]*)\s+[^\n]*--reply-to[=\s]+#?(\d+)/i;
 
 const MAX_PEERS_AUTO = 3;   // beyond this, even ACTIVE asks first
 
@@ -96,6 +110,44 @@ function run(raw) {
       + '  It arrives as an ANNOUNCEMENT from "<this board>/<your role>", one-way: they cannot\n'
       + '  reply to you there. Approve only if that board\'s people want to hear this.');
     return 'ask-cross-board';
+  }
+
+  // THE REPLY EXEMPTION (see RX_NOTE_REPLY above). Checked after cross-board (leaving the repo
+  // outranks it) and before anything else: on success it ALLOWS — skipping the normal permission
+  // prompt entirely — so every branch that is not a proven reply must fall through to defer.
+  //
+  // COMMAND-SCOPED, OR NOTHING (audit #290 — a real bypass, caught before it entered the record):
+  // the regex match is a SUBSTRING, but an allow approves the WHOLE shell command — so a genuine
+  // reply with `; rm -rf X` chained on would have ridden the exemption, and it would remove
+  // exactly the prompt that shows a human the chained tail. So the allow additionally demands the
+  // command be SOLELY the reply: anchored at its start (no leading `cd …;` either — a cd moves
+  // the note onto a DIFFERENT board than the one the ledger checks ran against), and containing
+  // NONE of the shell control/substitution characters anywhere, quoted or not — `$()` and
+  // backticks execute INSIDE double quotes, and parsing quoting across two shells is exactly the
+  // analysis a fail-closed gate must not attempt. A reply whose body needs those characters
+  // simply defers to the normal permission prompt: fail-closed costs a prompt, never a bypass.
+  const soleReply = /^arc(?:\.cmd|\.exe)?\s+note\s+/i.test(cmd.trim()) && !/[;&|`$()<>\r\n]/.test(cmd);
+  const nr = cmd.match(RX_NOTE_REPLY);
+  if (nr && !soleReply) return null;                              // chained/decorated — normal flow decides
+  if (nr) {
+    try {
+      const session = (process.env.ARC_SESSION || '').trim();
+      if (!session) return null;
+      const R = require('./arc-board');
+      const N = require('./arc-notes');
+      const board = R.resolveBoard(N.resolveCwd(session, typeof hook.cwd === 'string' ? hook.cwd : null));
+      const me = N.getRole(session, board);
+      const to = nr[1].toLowerCase();
+      const seq = parseInt(nr[2], 10);
+      const target = R.allNotes(board)[seq - 1];
+      const addressedToMe = !!me && !!target && (target.to == null || target.to === me
+        || (Array.isArray(target.to) && target.to.includes(me)));
+      if (me && target && addressedToMe && target.from === to && target.from !== me) {
+        out('allow', `[arc] reply to #${seq} — answering a note that reached you is never gated.`);
+        return 'allow-reply';
+      }
+    } catch { /* unproven — defer */ }
+    return null;                                                  // not a PROVEN reply — normal flow decides
   }
 
   const m = cmd.match(RX_DELEGATE);
@@ -161,7 +213,7 @@ function run(raw) {
   return 'ask';
 }
 
-module.exports = { run, RX_DELEGATE, MAX_PEERS_AUTO };
+module.exports = { run, RX_DELEGATE, RX_NOTE_REPLY, MAX_PEERS_AUTO };
 
 if (require.main === module) {
   let raw = '';
