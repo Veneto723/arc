@@ -36,9 +36,23 @@ function sessionPid(session) {
 // id to disk every single turn, so the truth was already sitting there, unread. Read it.
 // (Found by the scout peer, whose own claim proved it: convId null while the bridge had the id.)
 const activeFile = (session) => path.join(CACHE_DIR, `arc-active-${session}.json`);
+// THE FRESHER FILE WINS, not a fixed priority. The state file lags a picker-resume: resume a
+// DIFFERENT conversation into a live session and the state still names the old conv until the
+// runner reconciles — while the statusline bridge is rewritten every tick with what the session
+// ACTUALLY hosts. State-first stamped audit's conv onto research's claim in the 2026-07-18
+// misfile, which would have misdirected the next revive of that role into the wrong
+// conversation. mtime settles both staleness directions: a live claude's ticking bridge
+// outdates the launch-time state (bridge = live truth); a fresh relaunch's state outdates the
+// dead claude's last bridge (state = launch truth).
 function sessionConv(session) {
-  try { const c = JSON.parse(fs.readFileSync(stateFile(session), 'utf8')).convId; if (c) return c; } catch {}
-  try { return JSON.parse(fs.readFileSync(activeFile(String(session)), 'utf8')).convId || null; } catch { return null; }
+  const read = (p) => {
+    try { return { conv: JSON.parse(fs.readFileSync(p, 'utf8')).convId || null, at: fs.statSync(p).mtimeMs }; }
+    catch { return null; }
+  };
+  const st = read(stateFile(session));
+  const br = read(activeFile(String(session)));
+  const pick = [st, br].filter((x) => x && x.conv).sort((a, b) => b.at - a.at)[0];
+  return pick ? pick.conv : null;
 }
 
 // A claim written BEFORE the conversation id was knowable (every fork) carries convId:null, and

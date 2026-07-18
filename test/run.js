@@ -2814,7 +2814,23 @@ try {
   // having been purged — it would come back knowing less than a peer who never existed.
   ok('...and it still forks the CALLER, so a purged peer is reborn with context, not blank',
     /-Resume conv-abc-123/.test(psOf()) && /-Fork/.test(psOf()));
-  RM3.releaseRole(vboard, 'ghost', 999999);
+  RM3.releaseRole(vboard, 'ghost', DEAD_PID);
+
+  // A ROLE MOVE MUST NOT BURN THE REVIVE POINTER (fired live 2026-07-18): releaseRole used to
+  // unlink the claim outright, destroying the convId — the next `arc delegate` for the old role
+  // then silently BIRTHED A STRANGER in the chair's name (audit's chair, in production, after a
+  // mis-adoption moved its session to another role). Now it tombstones exactly like closePeer.
+  const ghostTomb = RM3.readClaimFile(vboard, 'ghost');
+  ok('releaseRole leaves a TOMBSTONE, not a void — the convId survives the release',
+    !!ghostTomb && !ghostTomb.pid && ghostTomb.convId === 'ghost-conv-777');
+  ok('...which still reads VACANT (a pid-less claim holds nothing)',
+    RM3.roleClaim(vboard, 'ghost') === null);
+  ok('...and stays findable for revive (vacantClaimForRole sees the conversation)',
+    (RM3.vacantClaimForRole(vboard, 'ghost') || {}).convId === 'ghost-conv-777');
+  RM3.claimRole(vboard, 'bare-release', DEAD_PID, 'br-sess', null);
+  RM3.releaseRole(vboard, 'bare-release', DEAD_PID);
+  ok('...while releasing a claim with NO convId unlinks it (nothing to revive — the chair is bare)',
+    !RM3.readClaimFile(vboard, 'bare-release'));
 
   // ---- THE FRESHNESS BRIEF: a revived peer must not trust a world that moved -------------------
   // The zombie failure mode: a peer working from a stale snapshot is CONFIDENTLY WRONG, not slow.
@@ -3632,6 +3648,27 @@ try {
   const cache = path.join(CLAUDE, 'cache'); fs.mkdirSync(cache, { recursive: true });
   const mkSession = (sid, pid) => writeJSON(path.join(cache, `arc-state-${sid}.json`), { pid, cwd: repo2 });
   mkSession('sa', process.pid); mkSession('sb', process.pid); mkSession('sc', process.pid);
+
+  // sessionConv: THE FRESHER FILE WINS. State-first stamped audit's conv onto research's claim
+  // in the 2026-07-18 misfile (a picker-resume hosts a NEW conversation while the state still
+  // names the old one until reconcile) — the claim then misdirects the role's next revive.
+  {
+    const SC = 'conv-fresh-' + process.pid;
+    const stP = path.join(cache, `arc-state-${SC}.json`);
+    const brP = path.join(cache, `arc-active-${SC}.json`);
+    const old = new Date(Date.now() - 60000), fresh = new Date();
+    fs.writeFileSync(stP, JSON.stringify({ pid: process.pid, cwd: repo2, convId: 'conv-state' }));
+    ok('sessionConv: state alone answers (the ordinary launch)', F.sessionConv(SC) === 'conv-state');
+    fs.writeFileSync(brP, JSON.stringify({ convId: 'conv-bridge' }));
+    fs.utimesSync(stP, old, old); fs.utimesSync(brP, fresh, fresh);
+    ok('...a FRESHER bridge wins — the statusline ticks with what the session ACTUALLY hosts',
+      F.sessionConv(SC) === 'conv-bridge');
+    fs.utimesSync(stP, fresh, fresh); fs.utimesSync(brP, old, old);
+    ok('...and a FRESHER state wins back (a relaunch outdates the dead claude\'s last bridge)',
+      F.sessionConv(SC) === 'conv-state');
+    fs.unlinkSync(stP); fs.unlinkSync(brP);
+    ok('...neither file = null (never an invented conversation)', F.sessionConv(SC) === null);
+  }
 
   // roles claimed from a SUBDIR still land in the repo-root board
   const ra = F.requestRole('sa', 'research', path.join(repo2, 'sub'));

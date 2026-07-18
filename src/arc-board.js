@@ -818,10 +818,26 @@ function spawnsOf(board, conv) {
   return out;
 }
 
+// A ROLE MOVE MUST NOT BURN THE REVIVE POINTER. This used to unlink the claim outright — the
+// same mistake closePeer already fixed (see :859) surviving in the MOVE path: a session
+// switching roles deleted its OLD chair's claim, and with it the convId that made the old role
+// revivable. Fired in production 2026-07-18: audit's session was mis-adopted into 'research'
+// (the restart/sweeper race — ROADMAP) and the move DELETED claim-audit, so the next
+// `arc delegate audit` silently birthed a stranger in the chair's name. Tombstone like
+// closePeer does: keep the convId, drop the pid; unlink only a claim with no conversation to
+// point at. Under the same role lock claimRole holds, and pid-checked INSIDE it — a concurrent
+// revive that re-claimed the chair must not have its live claim clobbered by our tombstone.
 function releaseRole(board, role, pid) {
-  for (const p of [claimPath(board, role), legacyClaimPath(board, role)]) {
-    try { if (JSON.parse(fs.readFileSync(p, 'utf8')).pid === pid) fs.unlinkSync(p); } catch {}
-  }
+  return withLock(board, `role-${role}`, () => {
+    for (const p of [claimPath(board, role), legacyClaimPath(board, role)]) {
+      try {
+        const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (c.pid !== pid) continue;               // not ours (or already re-claimed) — leave it
+        if (c.convId) atomicWriteJson(p, { role: c.role || role, sessionId: c.sessionId || null, convId: c.convId, at: Date.now() });
+        else fs.unlinkSync(p);
+      } catch {}
+    }
+  });
 }
 
 // ---- CLOSING A PEER: kill the TREE, in the only order that works ----------------------------
