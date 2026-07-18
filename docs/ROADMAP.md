@@ -166,6 +166,16 @@ So DEAF fires during normal long turns. That is alarm fatigue: it goes off when 
 
 ---
 
+## 10. Richer usage display — the payload already carries it · **SMALL** · evidence ready, nobody has asked
+
+**research's finding + correction (board #257/#264, 2026-07-18, measured live):** the `/api/oauth/usage` call arc already makes returns far more than the 5h/7d percentages the statusline shows. **The corrected field map** (the #257 version was wrong): per-model weekly usage lives in **`limits[]` entries with `kind:"weekly_scoped"`** and `scope.model.display_name` — the top-level `seven_day_opus`/`seven_day_sonnet` fields are **null** on subscription accounts; `utilization` is a whole-number percent, not a fraction. `limits[]` entries also carry **`severity`** (normal → warning/critical — color-coded alerts for free) and per-window `resets_at`. Spend/balance/credits fields are null on subscriptions — **do not build a $-view for sub users.**
+
+**Scope honesty (research's own):** one subscription account, one moment; severity escalation inferred from the field's presence, never observed. And the 429-backoff idea is a **measured dead end** — `Retry-After: 0`, client-identity gating; the shipped header fix (`1f00fc3`) is the only lever.
+
+**Owner of the next move:** the human, to say they want it — likely as part of item 3's view work rather than alone.
+
+---
+
 ## Parked elsewhere — pointers, not entries
 
 These are live threads owned by other chairs or blocked on a call. They are **not** roadmap items; recorded here only so this file is not mistaken for the whole picture.
