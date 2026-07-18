@@ -8,17 +8,22 @@
 // locally in the Claude Code harness, never call a model, and so work at 100%
 // rate-limit.
 //
-// Triggers (the whole prompt, case-insensitive, leading /! optional):
-//   arc:switch            → cycle to the next account
-//   arc:switch <id>       → switch to a named account
-//   arc:restart           → reload the wrapper + relaunch, same account
-//   arc:help  (arc:arc)     → print the command cheat sheet (zero tokens)
-//   arc:role <name>       → claim a role in this board (the "board" — see arc-board.js)
-//   arc:note <to> <text>  → leave a sticky note for a peer ("all" = broadcast)
-//   arc:notes [all]       → read your unread notes (marks read); `all` = whole board
-//   arc:anchors [reseal]  → which doc claims about the code have gone STALE (see arc-anchor.js)
-//   arc:peek              → read-only usage readout of all accounts (no switch)
-//   arc:remove-account <id> → remove an account (alias: arc:delete-account <id>)
+// Triggers — TWO spellings of one command set, defined once in arc-slash.js:
+//   /arc-<verb> [args]   → the human form: / autocomplete via skill stubs (install.ps1);
+//                          the RAW /command reaches this hook before skill expansion, so
+//                          it blocks at zero tokens exactly like the sentinel.
+//   arc:<verb> [args]    → the sentinel: machine senders (the revive prompt is literally
+//                          `arc:role <role>`) and muscle memory. Leading /! optional.
+// The verbs (whole prompt, case-insensitive):
+//   switch [id]           → cycle to the next account / switch to a named one
+//   restart               → reload the wrapper + relaunch, same account
+//   help  (arc)           → print the command cheat sheet (zero tokens)
+//   role <name>           → claim a role in this board (the "board" — see arc-board.js)
+//   note <to> <text>      → leave a sticky note for a peer ("all" = broadcast)
+//   notes [all]           → read your unread notes (marks read); `all` = whole board
+//   anchors [reseal]      → which doc claims about the code have gone STALE (see arc-anchor.js)
+//   peek                  → read-only usage readout of all accounts (no switch)
+//   remove-account <id>   → remove an account (alias: delete-account <id>)
 //   … plus add-account / export / import / delete (delete = the current CHAT)
 //
 // On a trigger it drops the same trigger file arc-runner polls for and BLOCKS the
@@ -31,14 +36,15 @@
 
 const core = require('./arc-switch-core');
 
-// NOTE: delete-account / del-account MUST precede the bare `delete` alternative,
-// else `arc:delete-account` matches `delete` (+ `\b` at the hyphen) and misfires as
-// a CONVERSATION delete. They route to remove-account (account removal), not delete.
-// `notes` MUST precede `note` (a plain alternation would try `note` first and only
-// backtrack; being explicit costs nothing and documents the intent).
-// `arc:` is the current prefix; `arc:` is kept as a deprecated alias through the
-// migration so running sessions and muscle memory don't break.
-const TRIGGER_RX = /^\s*[/!]?\s*arc:(switch|restart|delegate|mode|stance|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|join|anchors|help|arc)\b\s*(.*)$/i;
+// Both prompt forms live in arc-slash (ONE source of truth for the verb set):
+//   arc:<verb>   — the sentinel. Machine senders depend on it (the revive prompt IS
+//                  `arc:role <role>`), so it is permanent, not a deprecated alias.
+//   /arc-<verb>  — the human twin with / autocomplete (skill stubs, install.ps1).
+//                  Claude Code hands this hook the RAW typed /command before any
+//                  skill expansion (verified live 2026-07-18), so it blocks at zero
+//                  tokens exactly like the sentinel.
+const SL = require('./arc-slash');
+const TRIGGER_RX = SL.TRIGGER_RX;
 
 function block(reason) {
   // UserPromptSubmit: block the prompt from reaching the model, show `reason`.
@@ -112,7 +118,17 @@ function run(raw) {
   let hook = {};
   try { hook = JSON.parse(raw || '{}'); } catch {}
   const prompt = typeof hook.prompt === 'string' ? hook.prompt : '';
-  const m = prompt.match(TRIGGER_RX);
+  // Sentinel first, slash twin second — a prompt can only ever match one (colon vs
+  // hyphen), so order is cosmetic; group positions (verb, arg) are identical in both.
+  // The slash twin adds an ARG-POLICY gate the sentinel deliberately lacks: the / menu
+  // inserts "/arc-restart" and the human keeps typing — "/arc-restart after the build
+  // finishes" must not restart mid-build and ERASE the qualifier. A trailing arg on a
+  // no-arg verb means prose, not a command: fail OPEN, the model sees the message.
+  let m = prompt.match(TRIGGER_RX);
+  if (!m) {
+    const s = prompt.match(SL.SLASH_RX);
+    if (s && SL.slashArgOk(s[1], s[2])) m = s;
+  }
 
   // TURN START: stamp the HEAD this peer sees now as its seen-marker — a LOWER bound for the next
   // revive's `<seen>..HEAD` brief. UserPromptSubmit is the turn boundary, so this runs once per turn

@@ -133,6 +133,23 @@ So DEAF fires during normal long turns. That is alarm fatigue: it goes off when 
 
 ---
 
+## 7. Profile-sync merge policy must travel WITH the key · **SMALL** · scheduled by audit, not built
+
+**Scheduled as a condition of the slash-twin verdict (audit, board #245, 2026-07-18):** *"a class that has silently bitten twice will bite the third key invisibly."*
+
+**The gap:** `syncSettings` (`src/arc-profile.js`) merges the keys in `ARC_SETTINGS_KEYS` into every profile's `settings.json` on every launch — and its **default is wholesale replace** (`next[k] = master[k]`). Two keys have already had to be rescued from that default with bespoke per-key branches, each written only after the clobbering was observed:
+
+- `permissions` — a wholesale replace silently deleted the human's own per-profile grants on the next launch (`cfd34a4`).
+- `skillOverrides` — added 2026-07-18 with a per-key `overlayMaps` branch from the start, precisely because the class was known by then.
+
+**The failure that is coming:** the next author appends a key to `ARC_SETTINGS_KEYS` (an `env` block, spinner config, whatever arc owns next), forgets that the default clobbers, and a profile-local value the human set inside a profiled session reverts on every launch — **no error, no symptom, third occurrence.**
+
+**The fix (small, shaped by audit's review):** make the policy travel with the key — `ARC_SETTINGS_KEYS` becomes `[{ key, merge: 'replace' | 'overlay' | 'permissions' }]`, so adding a key **forces** the merge decision at the declaration site instead of defaulting to the dangerous branch. Existing behavior unchanged; only the default dies.
+
+**Owner of the next move:** `code`, when there is slack. No design question is open — this is scheduled work, not a parked idea.
+
+---
+
 ## Parked elsewhere — pointers, not entries
 
 These are live threads owned by other chairs or blocked on a call. They are **not** roadmap items; recorded here only so this file is not mistaken for the whole picture.

@@ -31,10 +31,14 @@ const SHARED_DIRS = ['projects', 'sessions', 'commands', 'todos', 'tasks', 'skil
 // from the home one so a fresh profile still has the user's servers.
 const HOME_CLAUDE_JSON = path.join(os.homedir(), '.claude.json');
 // settings.json keys arc OWNS and must propagate into every profile so the zero-
-// token arc: hooks, the usage statusline, and the user's permission allow-list all
-// work inside a profiled session. Everything else (theme, model, per-account
-// /config) is left to Claude Code / the user per profile.
-const ARC_SETTINGS_KEYS = ['hooks', 'statusLine', 'permissions'];
+// token arc: hooks, the usage statusline, the user's permission allow-list, and the
+// /arc-* skill-menu overrides all work inside a profiled session. Everything else
+// (theme, model, per-account /config) is left to Claude Code / the user per profile.
+// PROVEN GAP this list closes: a root-only skillOverrides never reaches a profiled
+// session (CLAUDE_CONFIG_DIR points at the profile dir, which reads its OWN
+// settings.json) — observed live: root overrides hid skills at root and every
+// profiled session still listed them.
+const ARC_SETTINGS_KEYS = ['hooks', 'statusLine', 'permissions', 'skillOverrides'];
 
 function profileDir(accId) { return path.join(PROFILES_DIR, String(accId)); }
 function credsPath(accId) { return path.join(profileDir(accId), '.credentials.json'); }
@@ -97,6 +101,20 @@ function syncSettings(dir) {
   const next = { ...cur };
   for (const k of ARC_SETTINGS_KEYS) {
     if (master[k] === undefined) continue;
+    // skillOverrides gets the permissions treatment, not the wholesale one: a human
+    // cycling a skill's state via /skills inside a PROFILED session writes to the
+    // profile's own settings.json, and a wholesale replace would revert their choice
+    // on the very next launch. Per-key via the SHARED overlay (arc-wire-settings owns
+    // the policy and its corrupt-value sanitizing — two hand-rolled copies is how the
+    // guards drifted in the first draft): profile wins, new arc entries still flow.
+    // ACCEPTED TRADEOFF (same one permissions scalars already carry): once a profile
+    // holds a key, a ROOT-level change to that SAME key never reaches it — the profile
+    // value wins forever. Root /skills is therefore not the place to retune an
+    // existing override for profiled sessions; do it in the profile.
+    if (k === 'skillOverrides') {
+      next.skillOverrides = require('./arc-wire-settings').overlayMaps(master.skillOverrides, cur.skillOverrides);
+      continue;
+    }
     if (k !== 'permissions') { next[k] = master[k]; continue; }
     const mp = master.permissions || {}, cp = (cur.permissions && typeof cur.permissions === 'object') ? cur.permissions : {};
     const merged = { ...mp, ...cp };                     // profile-local scalars (defaultMode) win

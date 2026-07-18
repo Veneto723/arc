@@ -159,16 +159,41 @@ function mergePermissions(settings, allow) {
   return settings;
 }
 
+// A plain-object overlay where the RIGHT side wins per key — the ONE merge policy both
+// skillOverrides writers share (here: arc defaults laid UNDER the user's values; in
+// arc-profile.syncSettings: root values laid under the profile's). Non-plain-object
+// inputs sanitize to {}: typeof [] === 'object' and string keys set on an array are
+// dropped by JSON.stringify, so a corrupt "skillOverrides": [] would otherwise make a
+// merge report success while writing nothing, forever. Shared so the two call sites
+// cannot drift (the drift WAS real: the first draft hand-rolled this twice with two
+// different corrupt-value guards).
+const asMap = (v) => (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+function overlayMaps(base, wins) { return { ...asMap(base), ...asMap(wins) }; }
+
+// The /arc-* skill stubs exist ONLY for the / menu — the hook intercepts the typed
+// command before the model runs, so their bodies must never reach the model's ambient
+// skill listing either. "user-invocable-only" hides a skill from the model's listing
+// while keeping it in the human's / menu: zero ambient tokens, full autocomplete.
+// Defaults-under-user: a user's own override (e.g. "off" to hide one from the menu
+// too) is their call and must survive every reinstall/update.
+function mergeSkillOverrides(settings) {
+  const defaults = {};
+  for (const e of require('./arc-slash').MENU) defaults[`arc-${e.verb}`] = 'user-invocable-only';
+  settings.skillOverrides = overlayMaps(defaults, settings.skillOverrides);
+  return settings;
+}
+
 function wireArcSettings(scriptsDir = path.join(CLAUDE_DIR, 'scripts'), settingsPath = settingsPathDefault) {
   const { settings, raw } = readSettings(settingsPath);
   mergeHooks(settings, coreHookEntries(scriptsDir));
   mergePermissions(settings, BOARD_PERMISSIONS);
+  mergeSkillOverrides(settings);
   setStatusline(settings, `node "${scriptsDir.replace(/\\/g, '/')}/usage-monitor.js" --compact`);
   writeSettings(settingsPath, settings, raw);
   return { settingsPath, backedUp: raw != null };
 }
 
-module.exports = { readSettings, writeSettings, mergeHooks, mergePermissions, BOARD_PERMISSIONS, setStatusline, STATUSLINE_REFRESH_SECONDS, coreHookEntries, wireArcSettings };
+module.exports = { readSettings, writeSettings, mergeHooks, mergePermissions, mergeSkillOverrides, overlayMaps, BOARD_PERMISSIONS, setStatusline, STATUSLINE_REFRESH_SECONDS, coreHookEntries, wireArcSettings };
 
 if (require.main === module) {
   try {

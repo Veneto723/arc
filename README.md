@@ -140,12 +140,14 @@ To update later: `git pull`, re-run the installer, and `arc:restart` any live se
 
 
 The `arc:` forms are plain messages caught by a hook **before** the model runs —
-that's why they cost nothing and keep working when the account is rate-limited (a
-slash command's bash can't get past the safety classifier, because the classifier
-runs on the exhausted account). That deadlock is exactly why `arc:switch` /
-`arc:restart` / `arc:help` replaced the old `/switch`, `/restart`, and `/cl` slash
-commands — arc ships **no slash commands** now; everything is a zero-token
-`arc:` sentinel.
+that's why they cost nothing and keep working when the account is rate-limited.
+Every *primary* command also has a **`/arc-<verb>` slash twin** (type `/arc` for
+the autocomplete menu; alias spellings like `usage`/`restore` stay sentinel-only):
+Claude Code hands the hook the *raw typed* `/command` before any skill expansion,
+so the twins are eaten by the same hook, equally free and equally rate-limit-proof. (The OLD `/switch`, `/restart`, `/cl` slash commands
+were different: their `!`-bash needed a safety classifier that runs on the
+exhausted account — that deadlock is why they were removed, and the new `/arc-*`
+twins never touch a model or classifier, so it cannot recur.)
 
 ### The board — two sessions, one repo
 
@@ -604,13 +606,14 @@ install.ps1     Windows 11 installer (idempotent)
   automatically (state daily, effort memories after 7 days, conversation locks by
   process liveness). Runtime-neutral aliases and logical sessions live under
   `~/.arc`.
-- `arc:switch` is the token-free interactive path. Slash commands can't match it:
-  a *custom* slash command always costs a small model turn (Claude Code reserves
-  the instant path for built-ins), which is why the old `/switch`, `/restart`, and
-  `/cl` were all removed in favor of zero-token `arc:` sentinels. The one thing the
-  `/` menu offers that `arc:` can't is **autocomplete** — Claude Code's in-input
-  completion is hardcoded to `/` and `@` with no extension point for a custom
-  prefix, so that typeahead is the price of the zero-token/rate-limit-immune path.
+- `arc:switch` and its `/arc-switch` twin are both token-free: a *custom* slash
+  command normally costs a small model turn, but Claude Code submits the raw
+  typed `/command` through UserPromptSubmit **before** skill expansion, and arc's
+  hook eats `/arc-<verb>` there exactly as it eats `arc:<verb>` — so since
+  2026-07-18 the `/` menu's autocomplete no longer costs the zero-token path.
+  The `/arc-*` menu entries are skill stubs whose bodies never load (the hook
+  blocks first); `skillOverrides: user-invocable-only` keeps them out of the
+  model's skill listing, so they are zero ambient tokens too.
 - **`apiKeyEnc` is per user+machine** — a DPAPI blob only decrypts on the Windows
   account and machine that created it. Moving `arc-config.json` to another PC won't
   decrypt it; run `arc set-key <id>` there to re-encrypt. It's not defense against

@@ -4132,6 +4132,179 @@ try {
     importers.length === 0, importers.join(', '));
 } catch (e) { ok('arc:delegate removal', false, e.message + '\n' + (e.stack || '')); }
 
+// ---- the /arc-<verb> slash twins (arc-slash.js) -------------------------------
+// One command set, two spellings: arc:<verb> (sentinel — machine senders like the
+// revive prompt depend on it) and /arc-<verb> (the human form with / autocomplete).
+// Claude Code hands UserPromptSubmit the RAW typed /command BEFORE skill expansion
+// (verified live 2026-07-18: "Original prompt: /arc-peek" on the block label), so the
+// hook eats both at zero tokens. Assert against the REAL hook — no copied regexes.
+section('/arc-<verb> slash twins (same hook, same handlers, zero tokens)');
+try {
+  const swhook = path.join(SRC, 'arc-switch-hook.js');
+  // ISOLATED spawns: ARC_SESSION cleared (a live session here would let account/board
+  // verbs arm real pending markers), ARC_PEEK_NO_REFRESH=1 (peek otherwise fires a
+  // REAL synchronous usage fetch against ~/.claude from inside the suite — network
+  // I/O and a cache write per ask).
+  const ask = (prompt) => {
+    const r = spawnSync(process.execPath, [swhook], {
+      input: JSON.stringify({ prompt, cwd: TMP }), encoding: 'utf8',
+      env: { ...process.env, ARC_SESSION: '', ARC_PEEK_NO_REFRESH: '1' },
+    });
+    try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
+  };
+  const SL = require(path.join(SRC, 'arc-slash.js'));
+  // Digit-normalized compare: peek embeds live, time-derived text at SECOND
+  // granularity ("1s ago", usage %), so byte-equality across separate spawns is a
+  // coin flip on a tick boundary. Structure parity is the contract, not the clock.
+  const norm = (s) => String(s || '').replace(/\d+/g, '#');
+  const sameReason = (a, b) => {
+    const ra = ask(a).reason, rb = ask(b).reason;
+    return !!(ra || '').length && norm(ra) === norm(rb);
+  };
+
+  // PARITY: the slash twin must produce the same handler output as its sentinel.
+  // If these ever diverge, the twins have become two commands.
+  ok('/arc-peek blocks with the SAME reason as arc:peek', sameReason('/arc-peek', 'arc:peek'));
+  ok('/arc-help blocks with the SAME reason as arc:help', sameReason('/arc-help', 'arc:help'));
+  ok('aliases ride the same alternation: /arc-usage === arc:peek', sameReason('/arc-usage', 'arc:peek'));
+  ok('case-insensitive like the sentinel: /ARC-PEEK blocks',
+    !!(ask('/ARC-PEEK').reason || '').length);
+  ok('args pass through: /arc-switch <name> answers like arc:switch <name>',
+    sameReason('/arc-switch nosuchaccount', 'arc:switch nosuchaccount'));
+
+  // SLASH-ONLY ARG POLICY (the sentinel stays lax by long habit): autocomplete inserts
+  // the command and the human keeps typing — a trailing arg on a no-arg verb means
+  // PROSE, not a command, and firing anyway would restart/erase mid-thought.
+  ok('no-arg verb + trailing prose fails OPEN: "/arc-restart after the build finishes"',
+    !ask('/arc-restart after the build finishes').decision);
+  ok('...same for peek: "/arc-peek explain the output" passes through',
+    !ask('/arc-peek explain the output').decision);
+  ok('...but the SENTINEL spelling stays lax (parity with long habit): "arc:peek explain" blocks',
+    !!(ask('arc:peek explain').reason || '').length);
+  ok('/arc-delete takes ONLY a confirm word: "/arc-delete confirm" dispatches',
+    !!(ask('/arc-delete confirm').reason || '').length);
+  ok('..."/arc-delete this section about X" is prose and passes through',
+    !ask('/arc-delete this section about X').decision);
+
+  // ORDERING TRAP (documented in arc-slash.js): delete-account must not misfire as a
+  // conversation delete. Same-handler equality proves the routing.
+  ok('/arc-delete-account routes to remove-account, never conversation delete',
+    ask('/arc-delete-account x').reason === ask('arc:remove-account x').reason);
+
+  // THE FALSE-POSITIVE LINE: a prompt that merely CONTAINS or RESEMBLES a command
+  // must never be eaten — a blocked prompt is ERASED, so a false positive here loses
+  // the human's message outright. The adversarial review (2026-07-18) REPRODUCED an
+  // erasure class in the first draft; each case below is one of its kills, kept as a
+  // regression so the laxity can never come back.
+  ok('mid-text mention passes through: "the /arc-peek command is neat"',
+    !ask('the /arc-peek command is neat').decision);
+  ok('prose without the slash passes through: "arc-peek is broken, look"',
+    !ask('arc-peek is broken, look').decision);
+  ok('unknown verb passes through: /arc-hello',
+    !ask('/arc-hello').decision);
+  ok('LEADING SPACE is the escape-a-slash-command idiom — " /arc-peek explain..." passes',
+    !ask(' /arc-peek explain the output please').decision);
+  ok('a second line means it is not a command: "/arc-peek\\nwhy?" passes whole',
+    !ask('/arc-peek\nwhy does it show that?').decision);
+  ok('...and can never smuggle an ARG: "/arc-switch\\nveneto" passes (no switch fires)',
+    !ask('/arc-switch\nveneto').decision);
+  ok('a hyphen EXTENDING a verb is not that verb: /arc-note-taker passes',
+    !ask('/arc-note-taker hello').decision);
+  ok('...nor a filename: "/arc-switch-hook.js is broken, look" passes',
+    !ask('/arc-switch-hook.js is broken, look at it').decision);
+  ok('a lone trailing newline is still a command: "/arc-peek\\n" blocks',
+    !!(ask('/arc-peek\n').reason || '').length);
+
+  // The tombstone parity: /arc-delegate must intercept exactly like arc:delegate —
+  // unmatched it would leak to the model as an ordinary prompt.
+  ok('/arc-delegate is intercepted and redirects like the sentinel',
+    /in prose/i.test(ask('/arc-delegate codex "task"').reason || ''));
+
+  // The PARTITION is total and machine-checked: every verb in the alternation is a
+  // menu entry, a declared alias, or a declared exclusion — nothing else. A verb added
+  // to VERBS without a MENU/ALIASES/EXCLUDED decision is a silent half-command
+  // (dispatched by the regex, invisible in the menu, no stub contract) and fails here.
+  const menuVerbs = new Set(SL.MENU.map((e) => e.verb));
+  const accounted = new Set([...menuVerbs, ...SL.ALIASES, ...SL.EXCLUDED]);
+  const unaccounted = SL.VERBS.split('|').filter((v) => !accounted.has(v));
+  ok('every VERBS entry is accounted for as menu, alias, or exclusion', unaccounted.length === 0, unaccounted.join(', '));
+  const phantom = [...accounted].filter((v) => !SL.VERBS.split('|').includes(v));
+  ok('...and nothing declared is missing from the alternation', phantom.length === 0, phantom.join(', '));
+  ok('MENU excludes delegate/join/restore by design',
+    !SL.MENU.some((e) => ['delegate', 'join', 'restore'].includes(e.verb)));
+
+  // DRIFT GUARD: the checked-in skill stubs are GENERATED from MENU (stubText). If a
+  // stub is edited by hand or MENU changes without regenerating, this catches it.
+  // CRLF-normalized: without a repo-wide eol policy, a Windows clone under
+  // core.autocrlf=true checks these out as CRLF and a raw byte-compare would fail on
+  // every fresh machine (.gitattributes pins them to LF, this normalization is the
+  // belt to that suspender).
+  const stale = SL.MENU.filter((e) => {
+    const p = path.join(__dirname, '..', 'skills', `arc-${e.verb}`, 'SKILL.md');
+    try { return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n') !== SL.stubText(e); } catch { return true; }
+  }).map((e) => e.verb);
+  ok('every /arc-* skill stub on disk matches stubText(MENU) exactly', stale.length === 0, stale.join(', '));
+
+  // THE RESPAWN LOOP GUARD: anything the hook will EAT must be stripped from
+  // preserved argv, or it re-submits on every respawn, the hook eats it, drops a
+  // trigger, and the runner kills/relaunches FOREVER. The strip asks the hook's OWN
+  // regexes: the first fix paired SLASH_RX with a bare /^arc:/i and missed the HYBRID
+  // spellings TRIGGER_RX tolerates — the same loop through a spelling the fix skipped
+  // (both reviews, 2026-07-18, proven with node). stripConvArgs IS exported
+  // (arc-runner.js module.exports) — call it directly; if it is ever un-exported this
+  // test must FAIL LOUDLY, not silently downgrade to a source grep.
+  const RUNNER = require(path.join(SRC, 'arc-runner.js'));
+  ok('stripConvArgs strips both spellings on respawn (the infinite-restart guard)',
+    RUNNER.stripConvArgs(['/arc-restart']).length === 0
+    && RUNNER.stripConvArgs(['/arc-role research']).length === 0
+    && RUNNER.stripConvArgs(['arc:restart']).length === 0);
+  ok('...including the HYBRID spellings the sentinel tolerates (/arc:restart, !arc:restart, leading spaces)',
+    RUNNER.stripConvArgs(['/arc:restart']).length === 0
+    && RUNNER.stripConvArgs(['!arc:restart']).length === 0
+    && RUNNER.stripConvArgs(['  arc:restart']).length === 0);
+  ok('...but a plain positional survives (only command spellings are stripped)',
+    RUNNER.stripConvArgs(['hello']).length === 1);
+
+  // skillOverrides wiring: only-if-absent — a user's own per-skill choice survives.
+  const W = require(path.join(SRC, 'arc-wire-settings.js'));
+  const s1 = {};
+  W.mergeSkillOverrides(s1);
+  ok('mergeSkillOverrides seeds every stub as user-invocable-only (menu yes, model listing no)',
+    SL.MENU.every((e) => s1.skillOverrides[`arc-${e.verb}`] === 'user-invocable-only'));
+  const s2 = { skillOverrides: { 'arc-peek': 'off', 'somebody-elses': 'on' } };
+  W.mergeSkillOverrides(s2);
+  ok('...but NEVER overwrites an existing user value ("off" stays "off")',
+    s2.skillOverrides['arc-peek'] === 'off' && s2.skillOverrides['somebody-elses'] === 'on'
+    && s2.skillOverrides['arc-help'] === 'user-invocable-only');
+  // The shared policy itself, behaviorally: right side wins per key; corrupt shapes
+  // (arrays, strings, null — typeof [] === 'object') sanitize to {} on EITHER side
+  // instead of poisoning the merge.
+  ok('overlayMaps: right side wins per key, left fills the gaps',
+    JSON.stringify(W.overlayMaps({ a: 1, b: 1 }, { b: 2 })) === '{"a":1,"b":2}');
+  ok('overlayMaps sanitizes corrupt inputs on both sides',
+    JSON.stringify(W.overlayMaps([], { a: 1 })) === '{"a":1}'
+    && JSON.stringify(W.overlayMaps({ a: 1 }, 'junk')) === '{"a":1}'
+    && JSON.stringify(W.overlayMaps(null, null)) === '{}');
+
+  // Profile sync: skillOverrides must ride ARC_SETTINGS_KEYS (a root-only write is
+  // proven ineffective in profiled sessions), and through the SHARED overlay so the
+  // two writers keep ONE semantics — the first draft hand-rolled the merge twice with
+  // two different corrupt-value guards, which is exactly the drift this pins.
+  const profSrc = fs.readFileSync(path.join(SRC, 'arc-profile.js'), 'utf8');
+  ok('arc-profile syncs skillOverrides into every profile',
+    /ARC_SETTINGS_KEYS\s*=\s*\[[^\]]*'skillOverrides'/.test(profSrc));
+  ok('...through the shared overlay (profile wins; one policy, not a second copy)',
+    /overlayMaps\(master\.skillOverrides,\s*cur\.skillOverrides\)/.test(profSrc));
+
+  // The machine-sender contract this feature must never disturb: the revive prompt
+  // is the COLON form and stripConvArgs strips /^arc:/ on respawn. If revive ever
+  // switched to the slash form, the prompt would stop being stripped and re-submit
+  // on every switch/restart forever.
+  const inviteSrc = fs.readFileSync(path.join(SRC, 'arc-invite.js'), 'utf8');
+  ok('the revive prompt stays the colon sentinel (arc:role), never the slash twin',
+    /`arc:role \$\{role\}`/.test(inviteSrc) && !/`\/arc-role/.test(inviteSrc));
+} catch (e) { ok('/arc slash twins', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- receipts: a note reports whether it landed, so an ack is never needed ---
 section('arc-notes receipts (seenBy — a result is terminal, no "received" note)');
 try {

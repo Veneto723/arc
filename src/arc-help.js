@@ -115,12 +115,17 @@ Trash (deleted conversations stay recoverable until you empty it):
   arc:restore <id>        same, shorthand
   arc:trash empty         PERMANENTLY purge the trash (asks; then 'confirm')
 
-Why the arc: forms?
+Why the arc: forms — and the /arc- twins?
   arc:...  are plain messages caught by a hook BEFORE the model runs — they cost
-          NO tokens and work even when the account is rate-limited (a slash command
-          can't, because its bash needs a safety classifier that runs on the same
-          exhausted account). That's why everything here is an arc: sentinel — there
-          are no arc slash commands anymore.
+          NO tokens and work even when the account is rate-limited.
+  The PRIMARY commands above are also /arc-<verb> slash twins (e.g. /arc-peek,
+          /arc-switch veneto): type /arc in the prompt for the autocomplete menu.
+          The SAME hook eats the raw /command before any model or classifier runs,
+          so the twins are just as free and just as rate-limit-proof. Alias
+          spellings (usage, stance, restore, ...) stay sentinel-only. (The OLD
+          /switch /restart slash commands were removed because their !-bash needed
+          a safety classifier on the exhausted account — the new /arc-* forms
+          never reach one.)
 
 Handing work off — there are exactly two ways, and arc only owns one:
   a SUBAGENT      one-shot, no context needed (research a question, sweep some files).

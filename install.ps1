@@ -121,8 +121,13 @@ if (($userPath -split ';') -notcontains $bin) {
   Write-Host "  arc      -> $bin  (POSIX shim, so 'arc' also works in Git Bash / the agent's Bash tool)"
 }
 
-# 3. no slash commands — every arc action is a zero-token arc: sentinel (arc:switch,
-#    arc:restart, arc:peek, arc:help, …) caught by the UserPromptSubmit hook.
+# 3. every arc action is caught by the UserPromptSubmit hook at zero model tokens, in
+#    TWO spellings of one command set (src/arc-slash.js): the arc:<verb> sentinel
+#    (machine senders + muscle memory) and its /arc-<verb> slash twin, whose / menu
+#    autocomplete comes from the skill stubs copied below. Claude Code hands the hook
+#    the RAW typed /command before any skill expansion, so BOTH forms stay
+#    classifier-immune and rate-limit-proof — the original reason slash was dropped
+#    no longer applies, because these never reach a model.
 
 # 3b. core agent skills — capabilities any agent can discover + invoke.
 $skills = Join-Path $claudeDir 'skills'
@@ -145,6 +150,20 @@ foreach ($stale in @('share-with-roommate', 'fridge-responder', 'roommates')) {
   foreach ($root in @($agentSkills, (Join-Path $env:USERPROFILE '.claude\skills'))) {
     $p = Join-Path $root $stale
     if (Test-Path $p) { Remove-Item -Recurse -Force $p; Write-Host "  removed superseded skill -> $p" -ForegroundColor DarkGray }
+  }
+}
+# The /arc-* slash stubs are GENERATED from src/arc-slash.js and ride the copy above —
+# but a copy only ever ADDS. When a verb is removed or renamed, its stale stub would
+# keep advertising a /command the hook no longer matches, and (for the first time) its
+# fallback BODY would actually load and teach a dead verb. Sweep deployed arc-* stubs
+# the kit no longer ships. Deliberately narrow: only ~/.claude/skills, only arc-* names,
+# only when the kit lacks them; junctions are skipped (not ours — the copy deploys real
+# directories, and deleting through a user's junction would reach a foreign tree).
+Get-ChildItem -Path $skills -Directory -Filter 'arc-*' -ErrorAction SilentlyContinue | ForEach-Object {
+  if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+  if (-not (Test-Path (Join-Path $kit "skills\$($_.Name)"))) {
+    Remove-Item -Recurse -Force $_.FullName
+    Write-Host "  removed stale /arc stub -> $($_.FullName)" -ForegroundColor DarkGray
   }
 }
 
@@ -189,8 +208,13 @@ node "$($scripts -replace '\\','/')/arc-wire-settings.js" "$scripts"
 if ($LASTEXITCODE -ne 0) { throw 'settings.json wiring failed — nothing was changed.' }
 #   (arc-wire-settings writes UTF-8 WITHOUT a BOM: Node's JSON.parse rejects a BOM'd settings.json.)
 # (No Bash allow-rule: switching/restart use the zero-token arc:switch / arc:restart
-# sentinels caught by the UserPromptSubmit hook — no !-bash, no classifier. The
-# old /switch /restart slash commands that needed the allow-rule were removed.)
+# sentinels — and their /arc-switch / /arc-restart twins — caught by the
+# UserPromptSubmit hook: no !-bash, no classifier. The OLD /switch /restart slash
+# commands were !-bash-backed and needed the allow-rule; the NEW /arc-* commands are
+# hook-eaten before any model runs, so the deadlock they were removed for cannot
+# recur. arc-wire-settings also writes skillOverrides ("user-invocable-only") for
+# every /arc-* stub, so the / menu shows them while the model's skill listing never
+# pays for them.)
 
 Write-Host ""
 Write-Host "Done. Next:" -ForegroundColor Green

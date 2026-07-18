@@ -415,6 +415,13 @@ function findTranscript(convId) {
 // Strip conversation-control flags (and their values) so the managed path can
 // re-add exactly one --resume/--session-id. Prevents a duplicate when a
 // `arc --resume` session gets adopted into managed mode after the first launch.
+//
+// GUARDED require: on a partially-updated deploy (a newer arc-runner.js copied into
+// ~/.claude/scripts without arc-slash.js) this must DEGRADE to the old colon-prefix
+// strip, not throw MODULE_NOT_FOUND from inside a respawn — that path runs after the
+// old claude process is already dead, so a throw here costs the whole tab.
+let SLASH_MOD = null;
+try { SLASH_MOD = require('./arc-slash'); } catch { /* degraded strip below */ }
 function stripConvArgs(args, opts) {
   const keepPrompt = !!(opts && opts.keepPrompt);
   const out = [];
@@ -435,7 +442,16 @@ function stripConvArgs(args, opts) {
     // conversation id, see arc-notes.healClaimConv) and the listener re-arms at the first idle.
     // ...but ONLY on a respawn. On the FIRST launch this IS the instruction the newborn exists to
     // receive; stripping it there opens a tab that claims nothing (see the call site).
-    if (/^arc:/i.test(x) && !keepPrompt) continue;
+    // BOTH spellings, via the REAL matchers (adversarial review 2026-07-18, then its
+    // reviewer): `arc /arc-restart` re-submits on every respawn, the hook eats it and
+    // drops a fresh restart trigger each cycle — an INFINITE kill/relaunch loop. The
+    // first fix paired SLASH_RX with a cheap /^arc:/i check and missed the HYBRID
+    // spellings TRIGGER_RX tolerates (`/arc:restart`, `!arc:restart`, `  arc:restart`)
+    // — the same loop through a spelling the fix skipped, proven with node. Only the
+    // hook's own regexes can say what the hook will eat, so ask them; the prefix check
+    // survives solely as the degraded no-arc-slash fallback.
+    const hookEats = SLASH_MOD ? (SLASH_MOD.TRIGGER_RX.test(x) || SLASH_MOD.SLASH_RX.test(x)) : /^arc:/i.test(x);
+    if (hookEats && !keepPrompt) continue;
     if (x === '--resume' || x === '-r' || x === '--session-id') {
       if (args[i + 1] && !args[i + 1].startsWith('-')) i++; // also drop its value
       continue;
