@@ -151,6 +151,25 @@ function awaitOnce(roleArg, cwd, opts) {
   // (`arc await` only OBSERVES — it never advances the read cursor, so two pollers
   // cannot consume each other's wake).
   if (session) {
+    // DECLINE A REDUNDANT RE-ARM — do NOT supersede a listener that is ALREADY genuinely alive for
+    // this role (audit #317). A re-arm normally overwrites the marker so the old listener stands
+    // down and the new one takes over — fine when the old one is stale. But a MALFORMED new arm (a
+    // foreground/piped `arc join`, which prints "listening" then dies with the pipe) would supersede
+    // a WORKING listener and then vanish, leaving the session deaf — and the reassuring output
+    // masked it. arc cannot see the invocation form (run_in_background is a Claude Code flag,
+    // invisible here), but it CAN refuse to trade a proven-live listener for an unproven new one:
+    // if you are already reachable, keep the ear you have. Only a re-arm for a DIFFERENT role, or
+    // when no live listener exists, proceeds to take the chair. {genuine} costs a start-time probe,
+    // fine off the hot path (arc join is a background task, not a per-render call).
+    const existing = waitingFor(session, { genuine: true });
+    if (existing && existing.role === role && existing.pid !== process.pid) {
+      clearOffered(session);          // a genuine listener is live => reachable => the offer cycle is closed
+      write(`[${tag}] a listener is ALREADY armed for "${role}" (pid ${existing.pid}, alive) — KEEPING it, `
+        + `not starting a second. THIS call created no listener and is exiting now, which is correct: you `
+        + `are already reachable. (If you are in fact unreachable, that listener has since exited — re-run `
+        + `"arc join ${role}" via run_in_background: true, with NO pipe/redirect/&.)`);
+      return Promise.resolve(0);
+    }
     markWaiting(session, role, process.pid);
     // ARMING IS THE COMPLIANCE — so the offer is fulfilled HERE, the moment the listener exists.
     //

@@ -3384,6 +3384,26 @@ try {
     supTail.marker === process.pid);
   A.clearWaiting(WS);   // test hygiene: release the marker we planted as the successor
 
+  // DECLINE A REDUNDANT RE-ARM (audit #317): if a GENUINE live listener already holds this role, a
+  // second `arc join` must NOT supersede it — a malformed/piped re-arm that prints "listening" then
+  // dies would otherwise trade a WORKING listener for nothing, leaving the session deaf. Plant a
+  // genuine live listener (this test process — marker.at=now is after our own start, so {genuine}
+  // accepts it), then run a real awaitOnce for the same role: it must EXIT 0 saying "already armed",
+  // and leave the existing marker INTACT (not overwrite it with its own about-to-die pid).
+  A.markWaiting(WS, 'research', process.pid);
+  const dec = spawnSync(process.execPath, ['-e',
+    `process.env.ARC_SESSION = ${JSON.stringify(WS)};`
+    + `const A = require(${JSON.stringify(path.join(SRC, 'arc-await.js'))});`
+    + `A.awaitOnce('research', ${JSON.stringify(repo)}, { pollMs: 25, write: (l) => console.log(l) })`
+    + `.then((c) => { const w = A.waitingFor(${JSON.stringify(WS)}); console.log(JSON.stringify({ code: c, marker: w && w.pid })); process.exit(c); });`,
+  ], { encoding: 'utf8', timeout: 8000, env: { ...process.env, ARC_SESSION: WS } });
+  const decTail = (() => { try { return JSON.parse(dec.stdout.trim().split('\n').pop()); } catch { return {}; } })();
+  ok('a redundant arm DECLINES when a genuine live listener already holds the role (keeps the proven one)',
+    dec.status === 0 && /ALREADY armed/i.test(dec.stdout));
+  ok('...and leaves the EXISTING listener\'s marker intact (a malformed re-arm cannot orphan a working one)',
+    decTail.marker === process.pid);
+  A.clearWaiting(WS);
+
   // awaitOnce checks the board SYNCHRONOUSLY on entry (inside the Promise executor), so a note
   // that is already waiting is reported before the first poll interval — no wait, no flake.
   RM.appendNote(board, { from: 'android', to: 'research', body: 'investigate the tap drop' });
@@ -4974,12 +4994,15 @@ try {
   RM.appendNote(board, { from: 'research', to: 'code', body: 'second answer', priority: 'normal' });
   ok('a note IS delivered mid-continuation (a capped batch must drain, not wait for a keystroke)',
     /second answer/.test(fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }).reason || ''));
-  ok('...and it still cannot block twice — the cursor advanced, so the chain TERMINATES',
-    !fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }).decision);
-  // The offers are bounded by their MARKERS, not by a blanket guard — this fire stays silent
-  // because the listener offer was already made this cycle (the marker holds), NOT because
-  // stop_hook_active suppressed it.
-  ok('an already-made OFFER stays silent mid-continuation (the marker bounds it, no nag loop)',
+  // The SAME note never blocks twice — the cursor advanced, so it is not re-delivered. (A delivery
+  // to an unarmed role-holder now RE-OPENS the arm offer, so an arm-offer block may follow — that is
+  // the deafness fix, 2026-07-18: a still-deaf session is re-prompted after handling a task. What
+  // this pins is that the NOTE does not re-deliver, never that the chain goes fully silent.)
+  const afterDeliver = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true });
+  ok('...and the same note never RE-delivers (cursor advanced); an arm re-offer may follow, not the note',
+    !/second answer/.test(afterDeliver.reason || ''));
+  // ...and that arm offer is bounded by its marker — the NEXT fire stays silent (once per cycle).
+  ok('the re-opened offer fires once, then the marker bounds it (no nag loop mid-continuation)',
     !fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }).decision);
 
   // THE DEAF-AFTER-DELIVERY HOLE (fired live TWICE in one day, 2026-07-18 — audit went deaf both
@@ -4999,6 +5022,27 @@ try {
   const shSrc = fs.readFileSync(HOOK, 'utf8');
   ok('the spawns-leak nag (unmarked, would re-fire forever) alone keeps the hard guard',
     /if \(!hook\.stop_hook_active\) try \{/.test(shSrc) && !/^\s*if \(hook\.stop_hook_active\) return null;/m.test(shSrc));
+
+  // A DELIVERY RE-OPENS THE OFFER CYCLE — the deafness root (audit's confession, 2026-07-18): the
+  // offer marker is cleared ONLY when a listener actually arms, so an arm that DID NOT TAKE (a
+  // malformed foreground/piped `arc join`, or an ignored offer) leaves it stuck TRUE and every
+  // future offer is muted FOREVER — even across new delegated tasks. Delivering a note is proof the
+  // session is engaged and still deaf, so it re-opens the cycle: a session gets re-prompted once per
+  // task it handles, not one failed arm then permanent silence.
+  {
+    const A8 = require(path.join(SRC, 'arc-await.js'));
+    A8.clearWaiting(SESSION); A8.markOffered(SESSION); RM.markRead(board, 'code');   // offered before, arm never took -> marker stuck
+    ok('(setup) the offer marker is stuck TRUE and a quiet turn is muted (the deafness state)',
+      A8.wasOffered(SESSION) === true && !fire({ hook_event_name: 'Stop', cwd: sboard }).decision);
+    RM.appendNote(board, { from: 'research', to: 'code', kind: 'request', body: 'a NEW delegated task' });
+    const del = fire({ hook_event_name: 'Stop', cwd: sboard });
+    ok('a new delivery to the still-deaf holder RE-OPENS the offer (clears the stuck marker)',
+      del.decision === 'block' && /a NEW delegated task/.test(del.reason) && A8.wasOffered(SESSION) === false);
+    RM.markRead(board, 'code');
+    ok('...so the next quiet turn OFFERS the listener again (re-prompted per task, not silenced forever)',
+      /hold the role "code"/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+    A8.clearWaiting(SESSION); A8.clearOffered(SESSION); RM.markRead(board, 'code');
+  }
 
   // a non-arc session (no ARC_SESSION) must be left completely alone
   const bare = spawnSync(process.execPath, [HOOK], {

@@ -115,10 +115,22 @@ function run(raw) {
       // isWaitingAs, NOT isWaiting: a listener armed for an OLD role is deaf on this one, so a
       // role-blind check would call a genuinely-deaf session "reachable" and suppress the nudge.
       if (role && !A.isWaitingAs(session, role, { genuine: true })) {
+        // RESET THE OFFER CYCLE on this fresh activity (the deafness root, found 2026-07-18 from
+        // audit's own confession). The standalone offer below is muted once per cycle by wasOffered,
+        // cleared ONLY when a listener actually arms (isWaiting). So an arm that DID NOT TAKE — a
+        // malformed one (audit ran `arc join` foreground+piped, not run_in_background) or an ignored
+        // one — leaves the marker stuck TRUE, and every future offer is suppressed FOREVER, even
+        // across new delegated tasks: the session gets one failed arm and is then never re-prompted.
+        // A delivery is proof the session is engaged AND still deaf, so re-open the cycle: the next
+        // quiet turn re-offers. Bounded (only on a delivery to an unarmed holder), so it is not a
+        // per-turn nag — it re-prompts once per task the session actually handles.
+        A.clearOffered(session);
         armTail = `\n\n⚠ You hold "${role}" but have NO listener armed — the moment this turn ends you are `
           + `unreachable again (a note would sit unseen until a human types). After you handle the above, `
           + `arm it so the NEXT reply reaches you without anyone typing:\n`
-          + `  run EXACTLY "arc join ${role}" via run_in_background: true (no & / no redirects).`;
+          + `  run EXACTLY "arc join ${role}" via run_in_background: true — NO pipe, NO redirect, NO &.\n`
+          + `  (a foreground or piped \`arc join\` is NOT a wakeable listener even if it prints "listening" —\n`
+          + `   only a run_in_background task whose EXIT re-invokes you can wake this session.)`;
       }
     } catch { /* a nudge must never wedge a delivery */ }
     out({
@@ -171,6 +183,11 @@ function run(raw) {
         + `  Put someone in the chair →  arc delegate ${dead[0].to} "<packet>"   (it reads it on arrival)\n`
         + `  …or drop it and do the work yourself / with a subagent.\n`
       : '';
+    // This "arm the waker" IS the listener-arm instruction (`arc join <role>`) — the same one case 3
+    // gives. So mark the offer here too, or case 3 would fire the identical prompt on the NEXT turn:
+    // a double-nag for one action. markRequestsArmed above bounds THIS case per request; markOffered
+    // bounds case 3. Both clear on a real arm (isWaiting) or a fresh delivery (case 1).
+    require('./arc-await').markOffered(session);
     out({
       decision: 'block',
       reason: `[arc] ${open.notes.length} request(s) you asked a peer are STILL UNANSWERED:\n  ${asked}\n${deadLine}\n`
