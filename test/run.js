@@ -49,7 +49,7 @@ console.log(`arc tests · ${process.platform} · node ${process.version} · HOME
 // ---- 1. syntax check every shipped .js --------------------------------------
 section('syntax (node --check, all platforms)');
 const jsFiles = [];
-for (const d of ['src', 'mcp', 'pool', 'test']) {
+for (const d of ['src', 'mcp', 'test']) {
   const dir = path.join(ROOT, d);
   try { for (const f of fs.readdirSync(dir)) if (f.endsWith('.js')) jsFiles.push(path.join(dir, f)); } catch {}
 }
@@ -168,17 +168,17 @@ try {
 
   ok('sub with headroom wins (prefer the subscription)', pick(cfg([SUB, GW]), subUse(10)) === 'max');
   ok('THE FIX: exhausted sub + no-metrics gateway -> the GATEWAY', pick(cfg([SUB, GW]), subUse(100)) === 'whale');
-  ok('exhausted sub + gateway with measured headroom -> gateway', pick(cfg([SUB, GW]), withPool(subUse(100), 20)) === 'whale');
-  ok('OPTIMISM: exhausted sub + gateway measured busy -> STILL the gateway', pick(cfg([SUB, GW]), withPool(subUse(100), 100, 'cooldown')) === 'whale');
   ok('sub-only (no gateway), sub exhausted -> least-bad sub', pick(cfg([SUB]), subUse(100)) === 'max');
   ok('no cache -> null (do not guess)', core.chooseLaunchAccount(cfg([SUB, GW]), null) === null);
   ok('api-only config, no metrics -> the gateway', pick(cfg([GW]), subUse(100)) === 'whale');
-  // reasons must be HONEST about which gateway state was picked (guards the `null >= 0`
-  // JS-coercion trap that mislabels a no-metrics gateway as "most available").
   const reason = (c, cache) => core.chooseLaunchAccount(c, cache).reason;
-  ok('no-metrics gateway is labelled "assumed available"', /assumed available/.test(reason(cfg([SUB, GW]), subUse(100))));
-  ok('measured-headroom gateway is labelled "most available"', /most available/.test(reason(cfg([SUB, GW]), withPool(subUse(100), 20))));
-  ok('busy gateway is labelled "optimistic"', /optimistic/.test(reason(cfg([SUB, GW]), withPool(subUse(100), 100, 'cooldown'))));
+  ok('a gateway is labelled "assumed available" (no rate-limit metrics exist for one)',
+    /assumed available/.test(reason(cfg([SUB, GW]), subUse(100))));
+  // The pool-DB era is REMOVED (2026-07-18): a stale cache file may still carry pool rows,
+  // and they must be dead weight — never a headroom signal, never a different label.
+  ok('legacy cache.pool rows are ignored: same pick, same label',
+    pick(cfg([SUB, GW]), withPool(subUse(100), 20)) === 'whale'
+    && /assumed available/.test(reason(cfg([SUB, GW]), withPool(subUse(100), 100, 'cooldown'))));
 } catch (e) { ok('chooseLaunchAccount works', false, e.message); }
 
 // ---- 2b. per-account subscription usage attribution --------------------------

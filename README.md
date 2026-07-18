@@ -17,7 +17,7 @@ The Claude account config fits any of these setups:
 |---|---|
 | Single subscription | one claude.ai login; you just want the session tools |
 | Two subscriptions | personal + work logins, switch between them |
-| Subscription + gateway | a claude.ai login + an Anthropic-compatible API pool/proxy |
+| Subscription + gateway | a claude.ai login + an Anthropic-compatible API gateway |
 | Gateway only | API base URL + key, no claude.ai login |
 | Any mix | N accounts; switch to any of them by name or number |
 
@@ -121,7 +121,7 @@ or just `arc update`, which pulls the latest GitHub Release and runs its install
 | `/arc-peek` | usage readout of **all** accounts (subscription 5h/7d + gateway cost/tokens) | **0** |
 | `/arc-add-account` | open the add-account **wizard** — pick Subscription or Gateway, then prompts | **0** |
 | `/arc-add-account <id>` | add a **subscription** via guided browser login | **0** |
-| `/arc-add-account <id> --api --url <gw>` | add a **gateway/pool** — verifies it, auto-detects models, encrypts the key | **0** |
+| `/arc-add-account <id> --api --url <gw>` | add a **gateway** — verifies it, auto-detects models, encrypts the key | **0** |
 | `/arc-remove-account <id>` | remove an account (double-confirmed; `<id> confirm` to finish) | **0** |
 | `/arc-rename [<old>] <new>` | rename an account, keeping its login and chats (one arg = this session's account) | **0** |
 | `/arc-export [sel]` | archive chat sessions to a `.tgz` (bare = current conv) | **0** |
@@ -277,7 +277,7 @@ it can never block or fail it. Remove the hook file to disable.
 | `arc --effort <level>` | pin the effort for the whole session |
 | `arc --resume <uuid>` / `arc --resume` | resume, restoring model / mode / effort (incl. ultracode) |
 | `arc add-account <id>` | add a subscription (browser login) |
-| `arc add-account <id> --api --url <gw>` | add a gateway/pool account (the shell twin of `/arc-add-account`) |
+| `arc add-account <id> --api --url <gw>` | add a gateway account (the shell twin of `/arc-add-account`) |
 | `arc set-key <id>` | set/rotate an api account's key, DPAPI-encrypted (from clipboard / `--file` / `--stdin`) |
 | `arc peek` | usage readout of all accounts (the shell twin of `/arc-peek`) |
 | `arc capture <id>` | adopt the currently-active login into an account's profile |
@@ -300,20 +300,19 @@ Everything lives in `~/.claude/arc-config.json` (created by `arc setup`):
 
     // api = any Anthropic-compatible gateway
     {
-      "id": "pool", "label": "POOL", "color": "#2DD4BF", "type": "api",
+      "id": "mate", "label": "MATE", "color": "#2DD4BF", "type": "api",
       "baseUrl": "https://my-gateway.example.com",
       "apiKeyEnv": "MY_GATEWAY_KEY",            // key: env var, or "apiKey" inline, or
       // "apiKeyFrom": { "file": "~/keys.txt", "regex": "key=(sk-[\\w-]+)" }, or
-      // "apiKeyEnc": "AQAAAN…"                 // DPAPI-encrypted; set via `arc set-key pool`
+      // "apiKeyEnc": "AQAAAN…"                 // DPAPI-encrypted; set via `arc set-key mate`
       "modelMap": { "opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "fable": "fable" },
       "headers": { "x-title": "claude" }
       // "usageUrl": "<baseUrl>/v1/usage" by default (false to disable) — the gateway's own usage endpoint
     }
   ],
-  "switchOrder": ["max", "pool"],
+  "switchOrder": ["max", "mate"],
   "thresholds": { "warnSessionPct": 85, "warnWeekPct": 90, "switchSessionPct": 92, "switchWeekPct": 95 },
-  "features": { "autoBest": true },
-  "poolDb": { "neonUrl": "postgresql://..." }   // optional — enables pool metrics
+  "features": { "autoBest": true }
 }
 ```
 
@@ -332,7 +331,7 @@ Everything lives in `~/.claude/arc-config.json` (created by `arc setup`):
   `usageUrl` surfaces the gateway's own usage in the statusline + `/arc-peek`.
 
 **The add-account wizard — bare `/arc-add-account`** (no args): opens a `/arc-switch`-style
-screen to pick **Subscription** vs **Gateway/pool**, then walks you through the details
+screen to pick **Subscription** vs **Gateway**, then walks you through the details
 (id, and for a gateway: URL, label, and reading the key from your clipboard). It delegates
 to the two flows below, so you never need to remember the flags.
 
@@ -345,7 +344,7 @@ account. Flags:
 The `/arc-` form runs it right inside a session (the wrapper takes over the terminal
 for the login, then relaunches your conversation).
 
-**Adding a gateway/pool — `/arc-add-account <id> --api --url <gateway>`** (or `arc add-account …`):
+**Adding a gateway — `/arc-add-account <id> --api --url <gateway>`** (or `arc add-account …`):
 no browser. arc calls the gateway's `/v1/models` to **verify the key works and it's a
 Claude gateway**, **auto-detects the model names** to build the `modelMap` (e.g.
 opus→`claude-opus-4-8`), **DPAPI-encrypts the key** into `apiKeyEnc` (no plaintext on
@@ -386,7 +385,7 @@ All of it also works from the terminal: `arc trash [restore <id>|empty]`.
 every fresh `arc` and `arc --resume` picks the account with the most headroom so you
 never start on an exhausted one — *without* a flag. The policy is cost-aware: it
 **prefers a subscription** (any `oauth` account) while it still has 5h/7d headroom,
-and only falls to the most-available `api`/pool account when the subscription is
+and only falls to an `api` gateway account when the subscription is
 exhausted (over `switchSessionPct` / `switchWeekPct`); if everything is exhausted
 it stays on the subscription (least-bad). It reads the statusline's usage cache —
 no extra network call — and does nothing if there's no cache yet. This is
@@ -402,10 +401,6 @@ arc fetches it (cached ~5 min, zero model tokens — a metadata call) and render
 `MATE $103.60 today · 62.9M tok · unlimited`, with a per-model breakdown in `/arc-peek`.
 Token counts/cost are the gateway's own numbers; there's no 5h/7d window unless the
 gateway reports one (that's an Anthropic-subscription concept). See `src/gw-usage.js`.
-
-**Optional pool metrics (`poolDb.neonUrl`):** point it at a Postgres DB with
-`pool_accounts` / `account_usage` tables to get per-account utilization in the
-statusline and the `pool_status` / `pool_next_reset` MCP tools.
 
 **Manage accounts conversationally (MCP):** the `arc` MCP server exposes
 `account_list` / `account_add` / `account_remove` / `account_update` /
@@ -549,8 +544,7 @@ The repo has all the *code* but deliberately **not** your accounts or secrets
 ```
 src/            wrapper + hooks, account switching, the board (notes/roles/claims,
                 duty roster, peer invite), bundles, status/usage tools
-mcp/            arc MCP server (account management + pool metrics tools)
-pool/           optional pool-DB metrics tooling (pool-query, pool-neon-url)
+mcp/            arc MCP server (account management tools)
 test/           test suite (run.js; `npm test`) — Windows, incl. a real DPAPI round-trip
 install.ps1     Windows installer (idempotent)
 ```

@@ -14,7 +14,7 @@
 //     deadlocked when rate-limited.)
 //   - There is NO MID-SESSION auto-switch (removed — it was disruptive).
 //   - At LAUNCH/RESUME only, arc auto-selects the best account: prefer a
-//     subscription while it has headroom, fall to the most-available pool only
+//     subscription while it has headroom, fall to a gateway only
 //     when the subscription is exhausted. Disable with features.autoBest=false;
 //     override per-launch with `arc --account <id>`.
 //
@@ -564,7 +564,7 @@ function resetTerminal() {
 // A short usage summary for an account, read from the statusline's cache
 // (usage-monitor-cache.json) — so the picker shows the same info as /arc-peek
 // without any network call. oauth → subscription 5h/7d %; api → the gateway's
-// own usage line (e.g. "$103.60 today · 62.9M tok"); legacy poolDb → active/5h.
+// own usage line (e.g. "$103.60 today · 62.9M tok").
 // '' when there's no data to show. Never throws.
 function accountUsage(acc) {
   try {
@@ -585,13 +585,6 @@ function accountUsage(acc) {
       if (gw && gw.data) {
         try { const line = require('./gw-usage').gatewayUsageLine(gw.data); if (line) return `${line}${stale(gw.fetchedAt)}`; } catch {}
       }
-      if (c.pool && Array.isArray(c.pool.rows) && c.pool.rows.length) { // legacy poolDb metrics
-        const rows = c.pool.rows;
-        const active = rows.filter((r) => r.status === 'active' && r.reason_code !== 'rate_limited').length;
-        const fhs = rows.map((r) => r.fh).filter((v) => v != null);
-        const minFh = fhs.length ? Math.round(Math.min(...fhs)) : null;
-        return `pool: ${active}/${rows.length} active${minFh != null ? ` · 5h from ${minFh}%` : ''}${stale(c.pool.fetchedAt)}`;
-      }
     }
   } catch {}
   return '';
@@ -599,7 +592,7 @@ function accountUsage(acc) {
 
 // ---- auto-select the best account at launch/resume -------------------------
 // Policy: PREFER a subscription (oauth) while it has headroom; only when all
-// subscriptions are exhausted fall to the most-available api/pool; if everything
+// subscriptions are exhausted fall to an api gateway; if everything
 // is exhausted, stay on a subscription (least-bad). Launch/resume only — NEVER
 // mid-session (that's the auto-switch that was removed). Skipped when `--account`
 // forces one or `features.autoBest` is false.
@@ -798,7 +791,7 @@ async function runAddWizard() {
   const cancel = () => out.write('\x1b[2m[arc] add cancelled.\x1b[0m\n');
 
   const provider = await selectMenu('Add an arc account — which provider?', [
-    { label: 'Claude (Anthropic)', desc: 'a claude.ai subscription, or an Anthropic-compatible gateway/pool' },
+    { label: 'Claude (Anthropic)', desc: 'a claude.ai subscription, or an Anthropic-compatible gateway' },
     { label: 'Codex / GPT', desc: 'run a GPT model INSIDE Claude Code, via an Anthropic-compatible proxy' },
   ]);
   out.write('\x1b[2J\x1b[H');
@@ -808,7 +801,7 @@ async function runAddWizard() {
   if (provider === 0) {
     type = await selectMenu('Claude account — what type?', [
       { label: 'Subscription', desc: 'claude.ai login (MAX / Pro / Team) — opens a browser' },
-      { label: 'Gateway / pool', desc: 'an API key + URL (e.g. mate, APIHub)' },
+      { label: 'Gateway', desc: 'an API key + URL (e.g. mate)' },
     ]);
     out.write('\x1b[2J\x1b[H');
     if (type === null) return cancel();
@@ -831,7 +824,7 @@ async function runAddWizard() {
     return;
   }
 
-  // gateway / pool
+  // gateway
   let url;
   while (true) {
     url = await promptLine('Gateway URL (https://…): ');
@@ -1190,7 +1183,7 @@ function doAddAccount(argv) {
 
 // CLI entry: `arc add-account <id> ...` — run the flow, then exit.
 function cmdAddAccount(argv) {
-  // Gateway/pool account (--api/--url): verify + register inline (shared core), no
+  // Gateway account (--api/--url): verify + register inline (shared core), no
   // browser. Otherwise fall through to the oauth guided-login flow.
   if (argv.includes('--api') || argv.includes('--url')) {
     const r = core.requestAddAccount('', argv.join(' '));
@@ -1227,7 +1220,6 @@ function cmdDoctor() {
     }
     lines.push(`  [${a.type}] ${a.id} "${a.label}" ${status} ${detail}`);
   }
-  lines.push(`pool metrics: ${cfg.poolDb ? 'configured' : 'off'}`);
   if (cfg.features.autoBest !== false && cfg.accounts.length > 1) {
     const pick = core.chooseLaunchAccount(cfg, readUsageCache());
     lines.push(`auto-select: on — ${pick ? `would launch on ${accountLabel(pick.id)}: ${pick.reason}` : 'no usage data yet → saved/default'}`);
@@ -1555,8 +1547,7 @@ async function main() {
   captureLaunchWinPid();
 
   // Parse arc-managed flags out of the args before they reach claude:
-  //  --account <id> (or --<id> for any configured account id; legacy --pool/
-  //  --apihub/--max still work when such accounts exist) → starting account.
+  //  --account <id> (or --<id> for any configured account id) → starting account.
   //  --effort <level> → PIN the effort for the whole arc session, re-applied on
   //  every respawn (pin > per-conversation detection).
   let forceAccount = null, argEffort = null, forceDupFlag = false;
@@ -1566,7 +1557,6 @@ async function main() {
     const x = userArgs[i];
     if (x === '--account' && userArgs[i + 1]) { forceAccount = userArgs[i + 1]; i++; continue; }
     if (idFlags.has(x)) { forceAccount = x.slice(2); continue; }
-    if (x === '--apihub' && C.findAccount(cfg, 'apihub')) { forceAccount = 'apihub'; continue; } // legacy alias
     if (x === '--effort') { argEffort = userArgs[i + 1] || null; i++; continue; }
     if (x === '--force-duplicate') { forceDupFlag = true; continue; } // cl-only; strip before claude
     passArgs.push(x);

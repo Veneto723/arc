@@ -120,7 +120,7 @@ function refreshUsageForPeek(cfg) {
     const mon = path.join(__dirname, 'usage-monitor.js');
     // --force bypasses the per-slice TTLs: a 3-min-old gateway value is "fresh" to
     // the normal refresh (5-min TTL), but peek must show CURRENT data.
-    execFileSync(process.execPath, [mon, '--refresh', '--with-pool', '--force'], { timeout: 10_000, stdio: 'ignore', windowsHide: true });
+    execFileSync(process.execPath, [mon, '--refresh', '--force'], { timeout: 10_000, stdio: 'ignore', windowsHide: true });
   } catch { /* refresh timed out / failed — fall back to cached data */ }
 }
 
@@ -134,7 +134,7 @@ function refreshUsageForPeek(cfg) {
 function refreshUsageNow(timeoutMs) {
   try {
     const mon = path.join(__dirname, 'usage-monitor.js');
-    execFileSync(process.execPath, [mon, '--refresh', '--with-pool', '--force'],
+    execFileSync(process.execPath, [mon, '--refresh', '--force'],
       { timeout: timeoutMs || 6_000, stdio: 'ignore', windowsHide: true });
     return true;
   } catch { return false; } // slow network must never wedge a switch; the statusline catches up
@@ -194,12 +194,8 @@ function accountHeadroom(acc, cache, th, cfg) {
     if (fh >= SW_S || sd >= SW_W) return -1;             // over a switch threshold = exhausted
     return 100 - fh;                                      // 5h is the binding short-term limit
   }
-  if (acc.type === 'api') {
-    if (!cache.pool || !Array.isArray(cache.pool.rows) || !cache.pool.rows.length) return null;
-    const active = cache.pool.rows.filter((r) => r.status === 'active' && r.reason_code !== 'rate_limited' && r.fh != null);
-    if (!active.length) return -1;                        // every pool account in cooldown = exhausted
-    return 100 - Math.min(...active.map((r) => r.fh));    // headroom of the least-loaded pool account
-  }
+  // api (gateway) accounts carry no rate-limit metrics — null = "cannot judge",
+  // which chooseLaunchAccount already ranks as assumed-available (optimistic by design).
   return null;
 }
 
@@ -220,24 +216,15 @@ function chooseLaunchAccount(cfg, cache) {
   const oauthRoom = oauthJudged.filter((x) => x.s >= 0).sort((x, y) => y.s - x.s);
   if (oauthRoom.length) return { id: oauthRoom[0].a.id, reason: 'subscription has headroom' };
 
-  // Be OPTIMISTIC about gateways: once every subscription is exhausted, prefer a gateway
-  // — and prefer it even when its OWN metrics look busy. A gateway's limit is soft (pool
-  // accounts rotate, cooldowns lift, a pay-per-use endpoint may still serve) where a
-  // subscription at 100% is a hard wall. So ANY gateway beats falling back onto the
-  // exhausted sub; among gateways rank by measured headroom (best) > no-metrics/assumed
-  // available > measured-busy. Only a config with NO gateway settles for the least-bad sub.
-  const apiScored = cfg.accounts.filter((a) => a.type === 'api').map((a) => ({ a, s: score(a) }));
-  if (apiScored.length) {
-    const rank = (s) => (s == null ? -0.5 : s);   // assumed-available sits above measured-busy (-1)
-    apiScored.sort((x, y) => rank(y.s) - rank(x.s));
-    const best = apiScored[0];
+  // Be OPTIMISTIC about gateways: once every subscription is exhausted, prefer a gateway.
+  // A gateway's limit is soft where a subscription at 100% is a hard wall — and a gateway
+  // carries no rate-limit metrics (headroom is always null = cannot judge), so it is
+  // ASSUMED available. Multiple gateways tie: config order picks. Only a config with NO
+  // gateway settles for the least-bad sub.
+  const api = cfg.accounts.filter((a) => a.type === 'api');
+  if (api.length) {
     const via = oauthJudged.length ? `${oauthJudged[0].a.label} exhausted → ` : '';
-    // NB: test null FIRST — `null >= 0` is true in JS (null coerces to 0), which would
-    // mislabel a no-metrics gateway as "most available".
-    const how = best.s == null ? 'gateway (assumed available)'
-      : best.s >= 0 ? 'most available gateway'
-        : 'gateway (optimistic — metrics say busy)';
-    return { id: best.a.id, reason: `${via}${how}` };
+    return { id: api[0].id, reason: `${via}gateway (assumed available)` };
   }
 
   // No gateway configured — least-bad among the (exhausted) subscriptions.
@@ -265,7 +252,7 @@ function ageStr(ms) {
   return m < 90 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
 }
 
-// Standalone, ZERO-TOKEN usage readout of ALL accounts (subscription + pool),
+// Standalone, ZERO-TOKEN usage readout of ALL accounts (subscription + gateway),
 // current account marked, plus what a fresh launch would auto-select. Read-only —
 // the hook renders this directly (no trigger, no relaunch). Returns { ok, message }.
 function buildPeek(session) {
@@ -319,18 +306,6 @@ function buildPeek(session) {
             lines.push(`      ${String(m.model || '?').replace(/^claude-/, '').slice(0, 12).padEnd(12)}  ${GW.fmtTokens(m.tokens)} tok${m.cost != null ? ` · ${GW.fmtCost(m.cost, s.unit)}` : ''}`);
           }
         } catch { lines.push(tint(`  ${label} [gw]    (usage unavailable)`)); }
-      } else if (cache && cache.pool && Array.isArray(cache.pool.rows) && cache.pool.rows.length) {
-        // Legacy poolDb metrics (per-backing-account 5h/7d).
-        const rows = cache.pool.rows;
-        const active = rows.filter((r) => r.status === 'active' && r.reason_code !== 'rate_limited').length;
-        const fhs = rows.map((r) => r.fh).filter((v) => v != null);
-        const minFh = fhs.length ? Math.round(Math.min(...fhs)) : null;
-        lines.push(tint(`  ${label} [gw]    ${active}/${rows.length} active${minFh != null ? `  ·  5h from ${minFh}%` : ''}   ${ageStr(cache.pool.fetchedAt)}`));
-        for (const r of rows) {
-          const nm = String(r.label || r.email || '?').split('@')[0].slice(0, 10).padEnd(10);
-          const st = r.reason_code === 'rate_limited' ? 'cooldown' : (r.status || '?');
-          lines.push(`      ${nm}  5h ${pct(r.fh)}%  ·  7d ${pct(r.sd)}%   ${st}`);
-        }
       } else {
         lines.push(tint(`  ${label} [gw]    (no usage data yet)`));
       }
@@ -475,7 +450,7 @@ function requestModePicker(session) {
   }
 }
 
-// ---- add an api (gateway/pool) account inline -------------------------------
+// ---- add an api (gateway) account inline -------------------------------
 // No browser / TTY needed (unlike an oauth subscription), so this runs right in
 // the hook: verify the gateway, auto-detect its model names, DPAPI-encrypt the
 // key (no plaintext on disk), write the account. Mirrors how `mate` was added.
@@ -631,7 +606,7 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
   headers = headers || {}; modelOverrides = modelOverrides || {}; envMap = envMap || {};
   if (!/^[a-z][a-z0-9_-]*$/i.test(id || '')) return { ok: false, message: `invalid id "${id || ''}" — letters/digits/dash/underscore, start with a letter.` };
   try { if (C.findAccount(C.loadConfig(), id)) return { ok: false, message: `account "${id}" already exists — pick a different id.` }; } catch {}
-  if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) return { ok: false, message: 'a gateway/pool account needs a full http(s):// URL.' };
+  if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) return { ok: false, message: 'a gateway account needs a full http(s):// URL.' };
   const badAlias = Object.keys(modelOverrides).find((a) => !['opus', 'sonnet', 'haiku', 'fable'].includes(a));
   if (badAlias) return { ok: false, message: `--model alias must be opus/sonnet/haiku/fable (got "${badAlias}").` };
   // Reject EMPTY override/header values from any caller — an empty model id would
@@ -723,7 +698,7 @@ function addApiAccountResolved({ id, baseUrl, key, keySrc, keyErr, label, color,
   };
 }
 
-// Add an account. `--api`/`--url` → a gateway/pool account, done inline here.
+// Add an account. `--api`/`--url` → a gateway account, done inline here.
 // Otherwise an oauth subscription → drop a trigger so arc-runner runs the guided
 // browser login on the freed TTY. `argStr` is everything after the add-account
 // verb (/arc-add-account, or the `arc add-account` CLI).
@@ -741,7 +716,7 @@ function requestAddAccount(session, argStr) {
   }
   const id = tokens.find((t) => !t.startsWith('-') && !/^sk-/.test(t)); // skip a bare key token
   if (!id) {
-    return { ok: false, message: 'usage: /arc-add-account <id>  (subscription: browser login)  ·  or  /arc-add-account <id> --api --url <gateway> [--label L] [--color #hex] [--default]  (gateway/pool; key from clipboard, or --file/--key)' };
+    return { ok: false, message: 'usage: /arc-add-account <id>  (subscription: browser login)  ·  or  /arc-add-account <id> --api --url <gateway> [--label L] [--color #hex] [--default]  (gateway; key from clipboard, or --file/--key)' };
   }
   if (!/^[a-z][a-z0-9_-]*$/i.test(id)) {
     return { ok: false, message: `invalid id "${id}" — use letters/digits/dash/underscore, starting with a letter.` };
@@ -753,12 +728,12 @@ function requestAddAccount(session, argStr) {
     }
   } catch {}
 
-  // Gateway/pool account: no browser, no TTY — verify + register right here.
+  // Gateway account: no browser, no TTY — verify + register right here.
   if (hasFlag(tokens, 'api') || hasFlag(tokens, 'url')) return addApiAccount(tokens, id);
 
   // oauth subscription: needs the browser + terminal → hand off to arc-runner.
   if (!session) {
-    return { ok: false, message: 'adding a SUBSCRIPTION needs the arc wrapper (launch with `arc`). For a gateway/pool, use: /arc-add-account ' + id + ' --api --url <gateway>.' };
+    return { ok: false, message: 'adding a SUBSCRIPTION needs the arc wrapper (launch with `arc`). For a gateway, use: /arc-add-account ' + id + ' --api --url <gateway>.' };
   }
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });

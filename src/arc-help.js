@@ -10,7 +10,7 @@ const C = require('./arc-config');
 function renderHelp() {
   let accounts = [];
   try { accounts = C.loadConfig().accounts.map((a) => a.id); } catch {}
-  const example = accounts[1] || accounts[0] || 'pool';
+  const example = accounts[1] || accounts[0] || 'mate';
 
   return `arc — commands
 =============
@@ -22,7 +22,7 @@ Switch account (keeps your conversation, preserves model/effort/mode):
 
 Add / manage accounts:
   /arc-add-account                  open the WIZARD — it asks WHICH PROVIDER first:
-                                     Claude (Anthropic)  → Subscription, or Gateway/pool
+                                     Claude (Anthropic)  → Subscription, or Gateway
                                      Codex / GPT         → run a GPT model INSIDE Claude Code. You give
                                                            a gateway that serves GPT on the OpenAI API;
                                                            arc runs a LOCAL translator for you (auto-
@@ -32,7 +32,7 @@ Add / manage accounts:
                                    the login is saved to the account's OWN private profile
                                    (~/.claude/arc-profiles/<id>) — accounts never share a login
   /arc-add-account <id> --api --url <gateway> [--label L --color #hex --default]
-                                   add a GATEWAY/POOL (like mate): verifies it, auto-detects
+                                   add a GATEWAY (like mate): verifies it, auto-detects
                                    models, DPAPI-encrypts the key (from clipboard, or --file/--key)
                                    advanced: --header Key:Value (repeat) · --model opus=<name> (pin,
                                    repeat) · --env KEY=VALUE (repeat; harness tweaks this gateway

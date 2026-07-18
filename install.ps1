@@ -39,12 +39,7 @@ $marker = @{ version = $pkgVer; installedAt = (Get-Date).ToString('o'); source =
 [System.IO.File]::WriteAllText((Join-Path $scripts 'arc-version.json'), $marker)
 Write-Host "  version -> arc v$pkgVer"
 
-# pool-DB metrics tooling (feeds the statusline + pool MCP tools when arc-config
-# has poolDb; harmless otherwise). No /pool slash command — it wasn't universal.
-Copy-Item (Join-Path $kit 'pool\pool-query.js') $scripts -Force
-Copy-Item (Join-Path $kit 'pool\pool-neon-url.js') $scripts -Force
-
-# arc MCP server (account management + pool metrics tools)
+# arc MCP server (account management tools)
 $mcpDest = Join-Path $scripts 'arc-mcp'
 New-Item -ItemType Directory -Force $mcpDest | Out-Null
 Copy-Item (Join-Path $kit 'mcp\server.js') $mcpDest -Force
@@ -63,7 +58,7 @@ if ($hasClaude) {
   claude mcp remove --scope user arc 2>$null | Out-Null
   claude mcp add --scope user arc node (Join-Path $mcpDest 'server.js') 2>$null | Out-Null
   $ErrorActionPreference = $eap
-  Write-Host "  arc MCP server installed + registered (account_* / config_update / pool_* tools)"
+  Write-Host "  arc MCP server installed + registered (account_* / config_update tools)"
 } else {
   Write-Host "  arc MCP server installed (register later: claude mcp add --scope user arc node `"$mcpDest\server.js`")"
 }
@@ -215,6 +210,6 @@ if ($LASTEXITCODE -ne 0) { throw 'settings.json wiring failed — nothing was ch
 
 Write-Host ""
 Write-Host "Done. Next:" -ForegroundColor Green
-Write-Host "  arc setup    # choose your account style (single / two subs / sub+pool / pool only)"
+Write-Host "  arc setup    # choose your account style (single / two subs / sub+gateway / gateway only)"
 Write-Host "  arc doctor   # verify"
 Write-Host "  arc          # launch"
