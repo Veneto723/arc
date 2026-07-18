@@ -353,7 +353,7 @@ const HANDLERS = {
 // ---- server wiring ---------------------------------------------------------------
 
 const server = new Server(
-  { name: 'arc-mcp', version: '2.0.0' },
+  { name: 'arc-mcp', version: '1.0.0' },
   { capabilities: { tools: {} } }
 );
 
