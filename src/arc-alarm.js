@@ -127,5 +127,16 @@ function clear(cwd) {
   catch { return { ok: true, cleared: false, message: `no active alarm on "${board.name}".` }; }
 }
 
-module.exports = { raise, clear, checkAndAck, readFlag, readAck, stampAck,
+// A compact one-line indicator for an ACTIVE alarm, or '' when there is none (or it is stale past
+// its TTL — readFlag already drops those, so the status bar and the gate agree on "active"). The
+// caller styles and positions it; this just owns the flag's on-screen shape. A raised alarm is a
+// board-wide STATE, so it belongs in the persistent status bar, not only the one-time raise line.
+function badge(board) {
+  let f; try { f = readFlag(board); } catch { return ''; }
+  if (!f) return '';
+  const body = String(f.body || '').replace(/\s+/g, ' ').trim().slice(0, 44);
+  return `ALARM: ${body}`;
+}
+
+module.exports = { raise, clear, badge, checkAndAck, readFlag, readAck, stampAck,
   flagPath, ackPath, TTL_MS, DEBOUNCE_MS, BODY_CAP };

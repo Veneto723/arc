@@ -92,7 +92,7 @@ function run(raw) {
   // stop_hook_active guard and can never nag mid-continuation.
   const inj = require('./arc-notes').injection(session, cwd);
   if (inj) {
-    const more = inj.count > inj.shown;   // a capped batch — the rest arrives on the next stop
+    const more = inj.count > inj.consumed;   // a capped batch — the rest arrives on the next stop
     // FOLD THE ARM-NUDGE INTO THE DELIVERY (measured fix, 2026-07-18). A role-holder that is not
     // listening is deaf the moment it idles — and the standalone offer below is UNREACHABLE for a
     // busy session, because this delivery block returns first on every turn that has a note. That

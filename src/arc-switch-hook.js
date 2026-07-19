@@ -218,6 +218,17 @@ function run(raw) {
     }
     return r.plain ? block(r.message) : clBlock(r.message);
   }
+  if (action === 'alarm') {
+    // Raise (or clear) a board-wide fire alarm from the human's tab, at zero tokens — the same
+    // effect as an agent's terminal `arc alarm`: a broadcast note wakes idle peers, and a flag
+    // interrupts busy peers at their next tool call. A fire-and-report action, so BLOCK with the
+    // result (the prompt is erased; the raise already happened here in-hook).
+    const AL = require('./arc-alarm');
+    const cwd = require('./arc-notes').resolveCwd(session, typeof hook.cwd === 'string' ? hook.cwd : null);
+    const a = String(arg || '').trim();
+    const r = (a === '--clear' || a === 'clear') ? AL.clear(cwd) : AL.raise(session, a, cwd);
+    return block(`[arc alarm] ${r.message}`);
+  }
   if (action === 'peek' || action === 'usage') {
     // Read-only usage readout — rendered entirely here (no trigger, no relaunch).
     // Its message is self-contained (own header), so no `[arc]` prefix.

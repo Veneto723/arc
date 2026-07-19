@@ -1924,9 +1924,14 @@ try {
   // seen (profile names are user-chosen, even localized; a wrong -p is wt's silent no-tab).
   // Set, wt applies that profile's icon/theme while our commandline still overrides the run.
   ok('by default a peer tab names NO wt profile (a guessed name is a failed launch elsewhere)',
+    // Sample BOTH the launch line AND spawnProfile() while ARC_SPAWN_PROFILE is removed — the
+    // "default" this asserts is "no env override, no config key", and spawnProfile() reads the env
+    // FIRST. Checking it AFTER restoring the ambient override read the developer's real
+    // ARC_SPAWN_PROFILE=PowerShell and failed on this box while passing on a bare CI runner.
     (() => { const prev = process.env.ARC_SPAWN_PROFILE; delete process.env.ARC_SPAWN_PROFILE;
-      const line = winOf('0'); if (prev !== undefined) process.env.ARC_SPAWN_PROFILE = prev;
-      return !/ -p /.test(line) && QI.spawnProfile() === ''; })());
+      const line = winOf('0'); const prof = QI.spawnProfile();
+      if (prev !== undefined) process.env.ARC_SPAWN_PROFILE = prev;
+      return !/ -p /.test(line) && prof === ''; })());
   ok('...and ARC_SPAWN_PROFILE dresses the tab in a named profile, quoted through the PS chain',
     (() => { const prev = process.env.ARC_SPAWN_PROFILE; process.env.ARC_SPAWN_PROFILE = 'Power Shell';
       const line = winOf('0'); if (prev === undefined) delete process.env.ARC_SPAWN_PROFILE; else process.env.ARC_SPAWN_PROFILE = prev;
@@ -2516,6 +2521,8 @@ try {
     && /ALARM: STOP/.test(RMa.allNotes(aboard).slice(-1)[0].body));
   ok('the raiser auto-acks — it does NOT block on its own alarm',
     AL.checkAndAck(RAISER, aboard) === null);
+  ok('badge() renders the ACTIVE alarm for the status bar (the raise line scrolls; the state persists)',
+    /^ALARM: STOP/.test(AL.badge(aboard)));
 
   // BUSY peer: interrupted ONCE at its next tool call, then never again for the same alarm.
   const first = armgate('ls -la', BUSY);
@@ -2556,8 +2563,26 @@ try {
 
   // CLEAR: removes the flag; the gate falls through again for everyone.
   AL.clear(arepo);
-  ok('clear removes the flag — the gate falls through for everyone',
-    AL.readFlag(aboard) === null && armgate('ls', BUSY).decision === null);
+  ok('clear removes the flag — the gate falls through for everyone, and the status-bar badge clears',
+    AL.readFlag(aboard) === null && armgate('ls', BUSY).decision === null && AL.badge(aboard) === '');
+
+  // IDLE-PEER WAKE: an alarm broadcasts a note, so a CAUGHT-UP (idle) peer's listener wake-condition
+  // — arc-await's check(), which fires on unreadFor > 0 — goes true. The idle session wakes and
+  // absorbs the alarm like any note (the note channel; the flag is the ADDITION for busy peers).
+  // Proven live with a real listener process; locked here so it can't silently regress.
+  const IDLE = 'alarm-idle-' + process.pid;
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${IDLE}.json`),
+    JSON.stringify({ pid: process.pid, cwd: arepo, convId: 'ac1' }));
+  Fa.requestRole(IDLE, 'idler', arepo);
+  RMa.markRead(aboard, 'idler');                       // catch the idle peer up: 0 unread
+  const idleBefore = RMa.unreadFor(aboard, 'idler').count;
+  AL.raise(RAISER, 'wake the idle peer', arepo);
+  ok('an alarm wakes an IDLE peer too — a caught-up listener\'s wake-condition (unread>0) goes true',
+    idleBefore === 0 && RMa.unreadFor(aboard, 'idler').count >= 1
+    && /ALARM: wake the idle peer/.test(RMa.unreadFor(aboard, 'idler').notes.slice(-1)[0].body));
+  AL.clear(arepo);
+  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${IDLE}.json`)); } catch {}
+  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-alarmack-${IDLE}.json`)); } catch {}
 
   // DE-DUP (design review #332, claim 6): the alarm reaches a peer on TWO channels — the broadcast
   // note AND the pretool flag-gate. Whichever fires first stamps the shared ack; the other is
@@ -4330,9 +4355,9 @@ try {
   // The capped burst above must NOT have consumed the overflow — the cursor advances
   // only over what was actually delivered, so the rest stay unread. (Regression for the
   // bug where injection showed ~30 but marked ALL 80 read, silently dropping the tail.)
-  ok('the capped burst did NOT consume the overflow', R2.unreadFor(board2, 'coding').count === 80 - big.shown && big.shown < 80);
-  let drained = big.shown, guard = 0;
-  while (R2.unreadFor(board2, 'coding').count && guard++ < 30) drained += F.injection('sb', repo2).shown;
+  ok('the capped burst did NOT consume the overflow', R2.unreadFor(board2, 'coding').count === 80 - big.consumed && big.consumed < 80);
+  let drained = big.consumed, guard = 0;
+  while (R2.unreadFor(board2, 'coding').count && guard++ < 30) drained += F.injection('sb', repo2).consumed;
   ok('the whole backlog drains over turns — every note once, none skipped',
     drained === 80 && R2.unreadFor(board2, 'coding').count === 0);
   // and a returning session catches up in ONE uncapped `arc notes`
@@ -4601,6 +4626,29 @@ try {
   ok('/arc-mode + prose passes through; only passive|balanced|active dispatch',
     !ask('/arc-mode I think balanced fits best').decision
     && !ask('/arc-switch to whichever account has headroom').decision);
+
+  // /arc-alarm: the human's tab can raise a board-wide fire alarm at zero tokens (dispatch + EFFECT,
+  // on a dedicated board so it can't couple to the shared TMP one). A message dispatches and raises;
+  // --clear takes it down. This drives the REAL hook, not a copied regex.
+  const AL2 = require(path.join(SRC, 'arc-alarm.js'));
+  const B2 = require(path.join(SRC, 'arc-board.js'));
+  const arepo3 = fs.mkdtempSync(path.join(os.tmpdir(), 'slashalarm-'));
+  spawnSync('git', ['init', '-q'], { cwd: arepo3 });
+  const askIn = (prompt, cwd) => {
+    const r = spawnSync(process.execPath, [swhook], {
+      input: JSON.stringify({ prompt, cwd }), encoding: 'utf8',
+      env: { ...process.env, ARC_SESSION: '', ARC_PEEK_NO_REFRESH: '1' } });
+    try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
+  };
+  const raiseAsk = askIn('/arc-alarm the schema changed, everyone stop', arepo3);
+  ok('/arc-alarm dispatches and RAISES — blocks with the result, the flag lands on the board',
+    /ALARM raised/i.test(raiseAsk.reason || '') && !!AL2.readFlag(B2.resolveBoard(arepo3)));
+  ok('...and /arc-alarm --clear dispatches and clears the flag',
+    /cleared/i.test(askIn('/arc-alarm --clear', arepo3).reason || '')
+    && AL2.readFlag(B2.resolveBoard(arepo3)) === null);
+  ok('...a bare "/arc-alarm" with prose still dispatches (a message is not a one-token verb)',
+    !!(askIn('/arc-alarm', arepo3).reason || '').length);   // empty -> a helpful "refusing empty" block
+  fs.rmSync(arepo3, { recursive: true, force: true });
 
   // ORDERING TRAP (documented in arc-slash.js): delete-account must not misfire as a
   // conversation delete. Same-handler equality proves the routing.

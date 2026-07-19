@@ -594,10 +594,13 @@ function stanceSeg(stance) {
   return '\x1b[2m○ passive\x1b[0m';
 }
 
-function renderCompact(data, sessionEta, acc, model, effort, board, stance) {
+function renderCompact(data, sessionEta, acc, model, effort, board, stance, alarm) {
   // Two-row layout: line 1 = accounts/usage (switching-critical), line 2 = this
   // session's stats (model/effort · stance · unread notes). Loading/alert states stay single line.
-  const line2 = [formatModel(model, effort), stanceSeg(stance), boardSeg(board)].filter(Boolean).join(' | ');
+  // An ACTIVE board alarm is a stop-the-line STATE, so it rides at the FRONT of line 2, alerting —
+  // the raise line scrolls away, but the status bar persists until someone clears it.
+  const alarmSeg = alarm ? blinkAlert(`⚠ ${alarm} · arc alarm --clear`) : '';
+  const line2 = [alarmSeg, formatModel(model, effort), stanceSeg(stance), boardSeg(board)].filter(Boolean).join(' | ');
   const withL2 = (line1) => (line2 ? `${line1}\n${line2}` : line1);
 
   if (!acc) return 'arc: run `arc setup`';
@@ -729,9 +732,17 @@ async function main() {
   let stance = require('./arc-stance').DEFAULT;
   try { stance = require('./arc-stance').getStance(process.env.ARC_SESSION); } catch {}
 
+  // An ACTIVE board alarm — surfaced so a stop-the-line is visible in the persistent bar, not only
+  // in the one-time raise line. Best-effort and role-independent: anyone in the folder should see it.
+  let alarm = '';
+  try {
+    const cwd = sl && sl.workspace ? sl.workspace.current_dir : null;
+    if (cwd) alarm = require('./arc-alarm').badge(require('./arc-board').resolveBoard(cwd));
+  } catch {}
+
   process.stdout.write(
     compact
-      ? renderCompact(usageData, sessionEta, acc, model, effort, board, stance)
+      ? renderCompact(usageData, sessionEta, acc, model, effort, board, stance, alarm)
       : renderFull(usageData, sessionEta, weekEta, acc, model, effort)
   );
 }

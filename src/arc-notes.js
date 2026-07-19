@@ -1000,7 +1000,10 @@ function injection(session, cwd) {
       `\`arc notes all\` shows the whole board.)`;
 
     R.writeCursor(board, role, newCursor);   // advance ONLY over what we delivered — lossless
-    return { text, count: u.count, role, board: board.name, shown: picked.length, spills };
+    // `consumed` = notes the cursor advanced over (shown + any suppressed alarm note), NOT the
+    // displayed count — its consumer is `count > consumed` ("is the batch capped?"), which wants
+    // consumed. A displayed count would under-report by a suppressed alarm and mis-answer that.
+    return { text, count: u.count, role, board: board.name, consumed: picked.length, spills };
   } catch { return null; }    // the board must NEVER wedge a prompt
 }
 

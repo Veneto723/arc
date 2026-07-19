@@ -22,7 +22,7 @@
 //     CONVERSATION delete. They route to remove-account.
 //   - `notes` MUST precede `note` (a plain alternation would try `note` first and only
 //     backtrack; being explicit costs nothing and documents the intent).
-const VERBS = 'switch|restart|delegate|mode|stance|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|role|join|help|arc';
+const VERBS = 'switch|restart|delegate|mode|stance|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|alarm|role|join|help|arc';
 
 // STRIP-ONLY (retired 2026-07-18): the dead `arc:<verb>` prompt shape, with its old
 // tolerances (leading /!, whitespace). Its one consumer is stripConvArgs, which DELETES
@@ -108,6 +108,7 @@ const MENU = [
   { verb: 'role',           hint: '[role]',                          fallback: 'arm',      desc: 'Claim a board role, or see who am I and who else is here (bare)' },
   { verb: 'notes',          hint: '[all]',                           fallback: 'run',      desc: 'Read your unread board notes now; "all" shows the whole board' },
   { verb: 'note',           hint: '<role|all> <text>',               fallback: 'run',      desc: 'Leave a sticky note for a peer; "all" broadcasts to the board' },
+  { verb: 'alarm',          hint: '<msg> | --clear',                 fallback: 'run',      desc: 'Raise a board-wide fire alarm — every peer stops at its next tool call; --clear clears it' },
   { verb: 'peek',           hint: '',                                fallback: 'run',      desc: 'Show usage of every account and where a launch would land' },
   { verb: 'switch',         hint: '[account]',                       fallback: 'sentinel', desc: 'Switch account, keeping this conversation (bare opens the picker)' },
   { verb: 'restart',        hint: '',                                fallback: 'sentinel', desc: 'Reload the arc wrapper and relaunch this conversation, same account' },
