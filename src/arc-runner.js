@@ -203,7 +203,11 @@ function releaseConv(convId) {
 // listener markers were sitting in the cache. Same disease as install.ps1's hook list, and the
 // same fix: a test now asserts that every `arc-<kind>-` file written anywhere in src/ appears
 // below, so the next feature cannot quietly leak.
-const SWEEP_RX = /^arc-(state|prefs|active|effort|turn|convlock|rmpending|delpending|win|role|stance|armed|listen-offered|await)-.*\.json$/;
+// DRIFT, BOTH WAYS, TWICE. `prefs` was listed here and nothing in src/ has ever written it; alarmack,
+// status and purgepending were written and never listed. The test that was supposed to stop exactly
+// this could not fail (audit #236) — see the sweep-coverage guard in test/run.js, which now proves
+// itself capable of going red before it reports.
+const SWEEP_RX = /^arc-(state|active|effort|turn|convlock|rmpending|delpending|win|role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-.*\.json$/;
 // A TRIGGER is a blocked /arc- command's message to one specific session's poll loop (arc-<action>-<session>
 // .trigger). It is consumed on the next poll — unless that session dies first, and then it sits
 // there forever. One was found from a session dead for days. Session-keyed, so the same liveness
@@ -238,7 +242,11 @@ function sweepStaleStates() {
       // session that is alive and working — it would simply stop receiving notes, with nothing to
       // say why. So: if the owning session is knowable, its liveness decides. If it is not
       // knowable, only bin the file once it is far too old to belong to anyone.
-      const comp = f.match(/^arc-(?:role|stance|armed|listen-offered|await)-(.+)\.json$/);
+      // alarmack/status/purgepending are session-keyed too, so they belong on the LIFE rule with the
+      // rest — age-sweeping arc-status-* would blank a working session's activity line mid-turn.
+      // purgepending falls back to the literal key 'terminal' when there is no session; that is not
+      // a session id, sessionPidOf returns null for it, and it correctly lands on the 7-day floor.
+      const comp = f.match(/^arc-(?:role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-(.+)\.json$/);
       if (comp) {
         // await carries its OWN pid (the listener process) — more precise than the session's.
         let pid = null;
@@ -473,6 +481,99 @@ function explicitConvId(args) {
     if (v && UUID.test(v)) return v;
   }
   return null;
+}
+
+// `arc --resume code` — resolve a ROLE NAME to the conversation that holds it, in place.
+//
+// Nobody remembers a UUID. A human resuming a chair types its NAME, and before this that name went
+// straight through to claude (arc reads this slot only for a UUID), which knew no conversation by
+// that name — so the session came up with no role and nothing said why. arc already stores the
+// mapping: a claim file is role -> convId, and it is the same lookup `arc delegate` uses to revive
+// a peer as itself.
+//
+// Rewrites args IN PLACE so every downstream reader — explicitConvId, the duplicate-conversation
+// guard, and claude itself — sees one real id and none of them need to know a role was ever named.
+//
+// Deliberately NOT applied to --session-id: that flag ASSIGNS an id to a new session rather than
+// reopening one, so a role name there is meaningless, not shorthand.
+// Bare `--resume` (no value) is the picker and is left alone. A UUID is left alone.
+// Returns null when there was nothing to do, or {ok:false, message} to abort with a real reason —
+// refusing beats guessing here, since the fallbacks are "resume the wrong conversation" or "start
+// fresh and silently drop the chair", which is the very bug this fixes.
+function resolveResumeRole(args, cwd) {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let idx = -1, role = null, inline = false;
+  for (let i = 0; i < args.length; i++) {
+    const x = args[i];
+    if (x === '--resume' || x === '-r') {
+      const v = args[i + 1];
+      if (!v || v.startsWith('-') || UUID.test(v)) return null;   // picker, or already an id
+      idx = i + 1; role = v; break;
+    }
+    if (x.startsWith('--resume=')) {
+      const v = x.slice('--resume='.length);
+      if (!v || UUID.test(v)) return null;
+      idx = i; role = v; inline = true; break;
+    }
+  }
+  if (!role) return null;
+
+  // VALIDATE BEFORE THE NAME TOUCHES A PATH. `role` is interpolated into `claim-${role}.json`
+  // (arc-board.js:176), so an unchecked '../../../evil' escapes the board directory — and the repo —
+  // to read and JSON.parse an arbitrary local file, then hand its .convId to claude. It crosses no
+  // privilege boundary today (every other --resume caller passes a convId, never a role name), so
+  // this is a wrong shape on a launch path rather than an exploit. Fixed anyway: it stops being
+  // local the day something else starts calling this. Same regex arc-notes already enforces on this
+  // exact namespace, so a name that cannot be CLAIMED cannot be RESUMED either.
+  const N = require('./arc-notes');
+  if (!N.VALID_ROLE.test(role)) {
+    return { ok: false, message: `invalid role "${role}" — letters/digits/dash/underscore, starting with a letter.` };
+  }
+
+  const R = require('./arc-board');
+  let board; try { board = R.resolveBoard(cwd); } catch { return null; }
+  let claim = null; try { claim = R.readClaimFile(board, role); } catch {}
+  if (!claim) {
+    let known = [];
+    try {
+      known = fs.readdirSync(board.planDir)
+        .map((f) => (f.match(/^(?:claim|lease)-(.+)\.json$/) || [])[1])
+        .filter((r, i, a) => r && a.indexOf(r) === i);
+    } catch {}
+    return { ok: false, message: `no role "${role}" on the "${board.name}" board`
+      + (known.length ? ` (chairs here: ${known.join(', ')})` : ' (no chairs here yet)') };
+  }
+  // A LIVE holder must never be shoved out of its own chair: two arc processes on one conversation
+  // write the same transcript and can die together (the duplicate-session guard below exists for
+  // exactly that). Point the human at the running session instead of racing it.
+  let held = false; try { held = R.isHolder(claim); } catch {}
+  if (held) {
+    return { ok: false, message: `"${role}" is HELD by a live session (pid ${claim.pid}) — resuming it `
+      + `would open one conversation twice. Talk to that window, or use \`arc delegate ${role} "<packet>"\`.` };
+  }
+  if (!claim.convId) {
+    return { ok: false, message: `"${role}" has a chair but no conversation to resume `
+      + `(claimed, never launched under arc). Start a session and \`/arc-role ${role}\` instead.` };
+  }
+  // A vacant claim's convId is a LEAD, not a guarantee (arc-invite:513) — a /exit can leave the
+  // claim pointing at a transcript that was never written. Say so here rather than letting claude
+  // fail with its own "No conversation found" and no mention of the role.
+  let ok = false; try { ok = require('./arc-invite').hasTranscript(claim.convId); } catch {}
+  if (!ok) {
+    return { ok: false, message: `"${role}" points at conversation ${claim.convId}, but no transcript `
+      + `for it exists on this machine (a conversation is machine-local — it does not travel).` };
+  }
+  // NORMALISE THE INLINE FORM TO THE BARE ONE — do not emit `--resume=<conv>`. Every downstream
+  // reader tests EXACT tokens (`passArgs.includes('--resume')` at the userManagesConv gate, and
+  // stripConvArgs), so an `--resume=<id>` token is invisible to all of them: userManagesConv stays
+  // false, a FRESH random convId is minted, and the launch carries both `--resume=<conv>` and
+  // `--session-id <other-uuid>` — two terminals then both pass the duplicate-conversation guard,
+  // the exact collision that guard exists to prevent (audit #235 blocker 2). Emitting two tokens
+  // puts us on the path that works instead of teaching a fourth reader about a fifth spelling.
+  // (`--resume=<uuid>` typed directly by a human hits the same pre-existing seam; unchanged here.)
+  if (inline) args.splice(idx, 1, '--resume', claim.convId);
+  else args[idx] = claim.convId;
+  return { ok: true, role, convId: claim.convId, board: board.name };
 }
 
 // RE-ARM A LISTENER ACROSS A RESPAWN (roadmap #3). A /restart or /switch re-execs the runner and
@@ -1714,6 +1815,15 @@ async function main() {
     passArgs.push(x);
   }
 
+  // `arc --resume <role>` → `--resume <that role's conversation>`. Done HERE, before anything reads
+  // the args: userManagesConv, explicitConvId and the duplicate-conversation guard all then see a
+  // real id, and the role is adopted by the ordinary "role follows the conversation" path with no
+  // second mechanism to keep in step. A respawn re-execs with args we already rewrote, so it is a
+  // no-op the second time through (the value is a UUID by then).
+  const rr0 = resolveResumeRole(passArgs, process.cwd());
+  if (rr0 && !rr0.ok) { process.stderr.write(`[arc] ${rr0.message}\n`); process.exit(1); }
+  if (rr0 && rr0.ok) process.stdout.write(`\x1b[2m[arc] resuming "${rr0.role}" — its conversation on the "${rr0.board}" board\x1b[0m\n`);
+
   const state = readState();
   let account = state.account;
   let switchCount = state.switchCount;
@@ -2116,7 +2226,7 @@ async function main() {
 // it silently ate an invited peer's conversation (a surviving --fork-session re-forked the
 // session on every relaunch) and nothing could unit-test it, because requiring this file used to
 // LAUNCH CLAUDE. A function that decides how a conversation is re-opened has to be testable.
-module.exports = { stripConvArgs, explicitConvId, preservedFlags, SWEEP_RX, sweepStaleStates, reArmPromptOnRespawn };
+module.exports = { stripConvArgs, explicitConvId, resolveResumeRole, preservedFlags, SWEEP_RX, sweepStaleStates, reArmPromptOnRespawn };
 
 if (require.main === module) {
   main().catch((e) => {

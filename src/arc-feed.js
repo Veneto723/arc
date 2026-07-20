@@ -39,8 +39,36 @@ const FEED_PORT = parseInt(process.env.ARC_FEED_PORT || '8791', 10);   // next t
 // self-reported "working on" line, from `arc status`, stored in arc-status-<session>.json), the note
 // `text` (body) on each waiting/cooperation edge so a note is click-to-read, and a per-repo `roadmap`
 // parsed from docs/ROADMAP.md. All still loopback-only + read-only; the bump restarts stale feeds.
-const VERSION = 5;
+// v6 = the two-level arc-scope contract: per-role `state` (active/idle/deaf, from the listener
+// marker + the transcript heartbeat), `roster` (every chair, live or closed — membership is a CLAIM,
+// never an appearance in a note), `pending` (notes the recipient has NOT CONSUMED — the graph's
+// edges, which is NOT `waiting`), `flow` (the last 60 ledger notes, every kind), and
+// {items,file} from parseRoadmap so "no roadmap" and "a roadmap arc cannot read" stay distinct.
+// v7 = `lastTurn` per role (the transcript's last write) so the operator can see when a session
+// actually last worked, rather than only what it chose to self-report via `arc status`.
+// v8 = per-role `doing` — the newest tool call or sentence from the tail of the session's own
+// transcript, so the operator sees what a session is doing NOW rather than what it last told a
+// peer. Widens what the loopback feed carries; controls unchanged (127.0.0.1 + Host allowlist).
+// v9 = the doing clip widened 160 -> 420 chars, with an explicit ellipsis when truncated so a cut
+// line can never read as a complete one. More assistant text on the loopback feed than v8.
+// v10 = per-role `task` — the last substantive HUMAN ask from the transcript, cached on file size.
+// "running Bash" answers the wrong question; the last thing a session was ASKED is the job it is on.
+// v11 = the DEAF state is GONE. It was inferred from the listener marker, and a session is legitimately
+// markerless while working (post-wake, and after a revive), so it painted hard-working peers red.
+// States are now active / idle / closed only. Reachability lives on the statusline, where it also
+// requires a MISSED NOTE as evidence.
+// v12 = per-repo `bonds` — lifetime note count per PAIR, plus strength relative to the strongest pair
+// on that board. A relationship, not an event: arrows say what is owed now, a bond says who has worked
+// with whom. Computed over the WHOLE ledger, not the 60-note flow window.
+// v13 = `priority` (high for blocker/correction) on pending + flow, so an ALERT note can be coloured
+// as one. Red is reserved for exactly this; ordinary in-flight notes are the neutral accent.
+// LESSON, twice over: v6's fields were added WITHOUT bumping this, and the running feed served the
+// old shape for hours while `snapshot()` returned the new one correctly when called directly —
+// stop/start does not settle it, because a healthy same-version feed is left alone on purpose.
+// Change the snapshot's SHAPE, bump this in the same edit.
+const VERSION = 13;
 const COOP_MAX = 20;               // recent reply edges kept per board
+const FLOW_MAX = 60;               // recent ledger notes kept per board (the transcript, all kinds)
 const pidFile = (port) => path.join(CACHE_DIR, `arc-feed-${port}.json`);
 
 function pidAlive(pid) {
@@ -107,31 +135,208 @@ function watchDirs() {
   return [...new Set(dirs)];
 }
 
-// A repo's roadmap, parsed from docs/ROADMAP.md: one numbered "## N. Title ..." heading per open
-// item, the owner from its "Owner of the next move"/"Next move: `role`" line, and a coarse open/prog
-// state. The "## Parked elsewhere" section is not numbered, so it is naturally excluded. Read fresh
-// per snapshot (the file is small); a missing file just means no roadmap for that repo.
+const ROADMAP_MAX = 20;
+const PENDING_PER_ROLE = 12;       // unconsumed notes reported per chair — this is a graph edge, not a mailbox
+
+// One roadmap line, cleaned of markdown: the title up to the first ' — ' or ' · '.
+function roadmapTitle(s) {
+  let t = String(s || '');
+  const cuts = [' — ', ' · '].map((k) => t.indexOf(k)).filter((k) => k >= 0);
+  if (cuts.length) t = t.slice(0, Math.min(...cuts));
+  return t.replace(/\*\*/g, '').replace(/`/g, '').replace(/^[★☆*\s]+/, '').trim().slice(0, 90);
+}
+
+// A repo's roadmap: one numbered "## N. Title" heading per open item in docs/ROADMAP.md, the owner
+// from its "Owner of the next move"/"Next move: `role`" line, and a coarse open/prog state.
+//
+// ONE dialect, ON PURPOSE. A looser fallback (status sections, items scraped from table rows) was
+// written and then REMOVED the same day: whalephone's docs/ROADMAP.md is a doc-status INVENTORY —
+// its own subtitle says so, and names the real build-order roadmap in another file — so scraping
+// its first table column turned 13 filenames into 13 "roadmap items". Guessing a file's MEANING
+// from its NAME manufactures content, which is worse than showing none. If a repo does not write
+// the numbered form, arc reports that it found no items and says the file is there; it does not
+// invent a backlog out of whatever the file happened to contain.
+//
+// Returns { items, file } — `file` says a ROADMAP.md EXISTS, so a caller can tell "this repo has
+// no roadmap" apart from "arc read no items from this repo's roadmap". Those must never look alike.
 function parseRoadmap(root) {
-  let md; try { md = fs.readFileSync(path.join(root, 'docs', 'ROADMAP.md'), 'utf8'); } catch { return []; }
+  let md;
+  try { md = fs.readFileSync(path.join(root, 'docs', 'ROADMAP.md'), 'utf8'); } catch { return { items: [], file: false }; }
+
+  // ---- dialect 1: numbered headings ----
   const heads = [];
   const rx = /^##\s+\d+\.\s+(.+)$/gm;
   let m; while ((m = rx.exec(md))) heads.push({ idx: m.index, line: m[1] });
   const items = [];
-  for (let i = 0; i < heads.length && items.length < 20; i++) {
+  for (let i = 0; i < heads.length && items.length < ROADMAP_MAX; i++) {
     const h = heads[i];
     const body = md.slice(h.idx, i + 1 < heads.length ? heads[i + 1].idx : md.length);
-    let title = h.line;                                            // title: up to the first ' — ' or ' · '
-    const cuts = [' — ', ' · '].map((d) => title.indexOf(d)).filter((k) => k >= 0);
-    if (cuts.length) title = title.slice(0, Math.min(...cuts));
-    title = title.replace(/\*\*/g, '').replace(/`/g, '').trim().slice(0, 90);
-    let owner = null;
+    const title = roadmapTitle(h.line);
     const om = body.match(/(?:Owner of the next move|Next move)[^`\n]*`([a-z][a-z0-9_-]*)`/i);
-    if (om) owner = om[1];
     const state = /picked up|in progress|building|\bLIVE\b/i.test(h.line) ? 'prog' : 'open';
-    if (title) items.push({ title, owner, state });
+    if (title) items.push({ title, owner: om ? om[1] : null, state });
   }
-  return items;
+  return { items, file: true };
 }
+
+const IDLE_MS = 15 * 60 * 1000;    // no transcript turn for this long => idle (see the caveat below)
+
+// A live chair's state, from TWO independent signals — reachability and recent work.
+//
+// REACHABILITY is the `arc join` marker at arc-await-<session>.json. Read its meaning carefully: the
+// marker says the listener is ARMED, which is arc's normal steady state — the doctrine is arm ONCE
+// and leave it armed for the session's whole life, so a peer working flat out has a marker the entire
+// time. An earlier version read "marker present" as "idle" and painted every healthy working peer
+// yellow while painting an UNARMED one green; that was the meaning exactly inverted. A live
+// chair-holder with no armed listener is arc's DEAF condition (the rate-limit squat) — no note can
+// wake it — so that, not idleness, is the fault worth a colour.
+// The role must MATCH: arc-await:85 is explicit that "waiting" without "waiting-as-whom" reports a
+// deaf session as reachable.
+//
+// WORKING vs IDLE is the transcript's last entry timestamp — when the session last actually wrote.
+// It is the only evidence arc has of work; self-reported `activity` cannot answer it, because a
+// session that never called `arc status` is SILENT, not idle. A bounded 64KB tail read, so a 130MB
+// transcript costs the same as a small one.
+// CAVEAT: one very long tool call (a big build) writes nothing meanwhile and can read as idle. Idle
+// is therefore the SOFT state — unknown or unreadable always falls back to 'active', never to a
+// claim of idleness, because asserting a live peer is idle is the false statement to avoid.
+//   no/dead/mismatched marker -> 'deaf'    live but unreachable — a note cannot wake it
+//   armed, wrote recently     -> 'active'
+//   armed, silent > IDLE_MS   -> 'idle'
+// WHAT THE SESSION IS DOING RIGHT NOW, read from the tail of its own transcript.
+//
+// The alternatives both fail: `arc status` is optional and almost nobody calls it, and a session's
+// most recent NOTE is what it last told a peer — often hours old, and never "now". The transcript is
+// the only always-present evidence, and its newest entry is literally the thing in progress: the
+// tool being run, or the sentence being written.
+//
+// EXPOSURE, stated plainly: this puts a slice of assistant output on the loopback feed, which is
+// more than the metadata it used to carry. Controls are unchanged and still the right ones —
+// 127.0.0.1 bind plus the Host allowlist — but the value behind them goes up again, so it is clipped
+// hard and prefers the tool NAME (an action, not content) whenever a tool call is the newest thing.
+const DOING_MAX = 420;   // long enough to read a real thought; still bounded (exposure + payload)
+const TASK_MAX = 200;
+const TASK_TAIL = 256 * 1024;    // enough history to reach past a long run of assistant turns
+
+// THE TASK — what this session was last ASKED to do. "running Bash" is a true answer to the wrong
+// question: it describes a keystroke, not a job. The last substantive human turn is the job, and it
+// is already on disk. Measured against live transcripts, it reads like a task list:
+//   arc/code            "user wants a more global status, e.g. working on feat X"
+//   whalephone/research "mine the OCR failures from our data"
+//   whalephone/android  "tear down the local test server"
+// Harness noise is skipped (hook feedback, system notifications, <tags>), as are one-word replies
+// like "ok"/"yes" — they are answers to a question, never a statement of the work.
+// A board note delivered to a peer also arrives as a user turn, which is correct: for a peer, "audit
+// this diff" IS the ask.
+//
+// CACHED on (convId, size): a transcript only gains meaning when it GROWS, so an idle session is
+// read once and then answered from memory — otherwise this is a 256KB read per role per snapshot,
+// and the snapshot rebuilds on a 1.2s tick.
+const taskMemo = new Map();
+function transcriptTask(convId) {
+  try {
+    const tp = require('./arc-invite').transcriptPath(convId);
+    if (!tp) return null;
+    const size = fs.statSync(tp).size;
+    const memo = taskMemo.get(convId);
+    if (memo && memo.size === size) return memo.task;
+
+    const fd = fs.openSync(tp, 'r');
+    const span = Math.min(TASK_TAIL, size);
+    const buf = Buffer.alloc(span);
+    fs.readSync(fd, buf, 0, span, size - span);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split('\n');
+    let task = null;
+    for (let i = lines.length - 1; i >= 0 && task == null; i--) {
+      const ln = lines[i].trim();
+      if (!ln.startsWith('{')) continue;
+      let j; try { j = JSON.parse(ln); } catch { continue; }
+      if (j.type !== 'user' || !j.message) continue;
+      const c = j.message.content;
+      let t = typeof c === 'string' ? c
+        : Array.isArray(c) ? c.filter((x) => x && x.type === 'text').map((x) => x.text).join(' ') : '';
+      t = String(t || '').replace(/\s+/g, ' ').trim();
+      if (!t || t.length < 12) continue;                                  // "ok", "yes", "hi"
+      if (/^(<|\[|Stop hook|Caveat:|SYSTEM NOTIFICATION|This session is being continued)/i.test(t)) continue;
+      // A PASTE IS NOT AN ASK. Measured on a live board: the newest human turn was a pasted API
+      // document, and it rendered as that session's "task". A real instruction is a sentence or two;
+      // past this length it is material handed over, and the instruction is the turn before it.
+      if (t.length > 600) continue;
+      // NOR IS A FOLLOW-UP. "whats the result?", "continue", "go on" are the newest human turns but
+      // carry no job — they refer to one stated earlier, which is the one worth showing.
+      if (/^(what'?s?\b.{0,24}\?$|how about|and\b.{0,12}\?$|continue|go on|carry on|proceed|next|any (update|progress)|done\?|result\??)/i.test(t)) continue;
+      task = t.length > TASK_MAX ? t.slice(0, TASK_MAX - 1) + '…' : t;
+    }
+    if (taskMemo.size > 64) taskMemo.clear();                            // bounded, never a leak
+    taskMemo.set(convId, { size, task });
+    return task;
+  } catch { return null; }
+}
+function transcriptDoing(convId) {
+  try {
+    const tp = require('./arc-invite').transcriptPath(convId);
+    if (!tp) return null;
+    const fd = fs.openSync(tp, 'r');
+    const size = fs.fstatSync(fd).size;
+    const span = Math.min(96 * 1024, size);          // same bounded tail as the heartbeat read
+    const buf = Buffer.alloc(span);
+    fs.readSync(fd, buf, 0, span, size - span);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const ln = lines[i].trim();
+      if (!ln.startsWith('{')) continue;
+      let j; try { j = JSON.parse(ln); } catch { continue; }
+      if (j.type !== 'assistant' || !j.message || !Array.isArray(j.message.content)) continue;
+      const tool = j.message.content.find((c) => c && c.type === 'tool_use');
+      if (tool && tool.name) return 'running ' + tool.name;
+      const text = j.message.content.find((c) => c && c.type === 'text' && c.text);
+      if (text) {
+        const t = String(text.text).replace(/\s+/g, ' ').trim();
+        // an explicit ellipsis when cut — a truncated line must never read as a complete one
+        return t.length > DOING_MAX ? t.slice(0, DOING_MAX - 1) + '…' : t;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+// Returns { state, lastTurn } — lastTurn is the transcript's last write (ms epoch, or null when
+// unreadable). It was computed here and discarded; the operator view needs it, because "when did
+// this session last actually do something" is the one evidence-backed answer to "what is it doing"
+// that does not depend on the session having self-reported via `arc status`.
+function roleStateOf(claim) {
+  if (!claim || !claim.sessionId) return { state: 'active', lastTurn: null, doing: null, task: null };
+
+  // THE HEARTBEAT FIRST. The transcript beats only during work — it advances with every tool call
+  // while a turn runs and stops the moment the session idles (arc-notes.js:748).
+  let last = null;
+  try { last = require('./arc-invite').lastTurnAt(claim.convId, null); } catch {}
+  const doing = transcriptDoing(claim.convId);
+  const task = transcriptTask(claim.convId);
+  // null, NOT Infinity: an unreadable transcript is NO EVIDENCE, and Infinity would quietly read as
+  // "silent forever" — asserting idle (or deaf) about a session nothing is known about. Both are
+  // accusations; neither may be made without the heartbeat to back it.
+  const quiet = last ? Date.now() - last : null;
+
+  // NO DEAF STATE. It was derived from the `arc join` listener marker, and it cried wolf twice on
+  // sessions that were working their hardest:
+  //   1. the listener EXITS on delivery (that exit IS the wake) and only re-arms at turn end, so a
+  //      session is markerless for the whole turn a note triggered;
+  //   2. a REVIVE deletes the marker outright (arc-runner.js:591), and the revived session then does
+  //      a long tool call — a web search, a build — writing nothing meanwhile. Unarmed plus quiet
+  //      looked exactly like deafness while `research` was mid-investigation.
+  // A 90s heartbeat gate did not save it, because a single tool call can exceed 90s. The honest
+  // position is that this feed cannot distinguish "cannot be reached" from "busy and not writing",
+  // and a status colour that is wrong when it matters most is worse than one fewer colour.
+  // Reachability still has a home: arc-notes.js:820 badges DEAF on the statusline, where it also
+  // requires evidence of a MISSED NOTE — not merely a missing marker — which is the check this
+  // never had. (Operator's call, this session.)
+  return { state: (quiet != null && quiet > IDLE_MS) ? 'idle' : 'active', lastTurn: last, doing, task };
+}
+// The state alone, for callers that do not want the heartbeat.
+function roleState(claim) { return roleStateOf(claim).state; }
 
 // The whole operator view. Timestamps (not computed ages) so the widget derives elapsed locally and
 // the change-detector stays quiet on an idle board.
@@ -172,6 +377,112 @@ function snapshot() {
       if (tgt) coop.push({ from: n.from, to: tgt.from, seq: n.seq, reSeq: tgt.seq, text: clip(n.body) });
     }
 
+    // NOTE FLOW: the ledger itself — every kind, newest last, capped. This is deliberately NOT the
+    // waiting list. `waiting` holds only UNANSWERED requests, so a board with 300 notes and 2 open
+    // asks renders two rows and reads as "the history is gone" — replies, results, broadcasts and
+    // every answered request are all missing from it. The GRAPH still draws from `waiting` (an arrow
+    // means an unconsumed note and dissolves when consumed); this is the transcript underneath it.
+    const openIds = new Set(open.map((n) => n.id));
+    // BONDS — how much each PAIR has ever worked together. A different kind of fact from `pending`:
+    // an arrow is an event (this note is owed, right now), a bond is a relationship (these two have
+    // exchanged 84 notes). Both directions are merged, because a bond is mutual — who asked and who
+    // answered is what the arrows are for.
+    // Computed over the WHOLE ledger, deliberately, NOT over `flow`: flow is the last 60 notes, so a
+    // bond derived from it would silently be "recent traffic" wearing the word history.
+    // `strength` is RELATIVE to the strongest pair on this board (0..1). An absolute count cannot be
+    // drawn — a 500-note board would saturate every line — and the operator's question is "who works
+    // together MOST here", which is a comparison within one board.
+    const bondN = new Map();
+    for (const n of notes) {
+      const from = n.from, to = n.to;
+      if (!from || to == null) continue;                       // a broadcast has no pair
+      if (from === 'arc') continue;                            // the tool's own freshness briefs
+      for (const t of (Array.isArray(to) ? to : [to])) {
+        if (!t || t === from) continue;
+        const key = from < t ? from + '|' + t : t + '|' + from;
+        bondN.set(key, (bondN.get(key) || 0) + 1);
+      }
+    }
+    let bondMax = 0;
+    for (const v of bondN.values()) if (v > bondMax) bondMax = v;
+    const bonds = [];
+    for (const [key, v] of bondN) {
+      const [a, b] = key.split('|');
+      bonds.push({ a, b, notes: v, strength: bondMax ? v / bondMax : 0 });
+    }
+    bonds.sort((x, y) => y.notes - x.notes);
+
+    const flow = notes.slice(-FLOW_MAX).map((n) => ({
+      from: n.from,
+      // a broadcast has no single recipient (to == null) — say so rather than inventing one
+      to: n.to == null ? null : Array.isArray(n.to) ? n.to.join('+') : String(n.to),
+      seq: n.seq, id: n.id, ts: n.ts, kind: n.kind || null, priority: n.priority === 'high' ? 'high' : 'normal',
+      open: openIds.has(n.id),        // still awaiting an answer
+      text: clip(n.body),
+    }));
+
+    // THE ROSTER: every chair ever claimed on this board, live or closed. A CLAIM FILE is what makes
+    // a role a member here — not appearing in a note. Reasoning from note text put a `code` node on
+    // whalephone's graph because a peer had written *about* arc's `code`; the board has no
+    // claim-code.json, so `code` was never a session there at all. Membership is a claim, full stop.
+    const roster = [];
+    try {
+      const files = fs.readdirSync(board.planDir)
+        .map((f) => (f.match(/^(?:claim|lease)-(.+)\.json$/) || [])[1])
+        .filter((r, i, a) => r && a.indexOf(r) === i);
+      const liveNames = new Set(roles.map((r) => r.role));
+      for (const r of files) {
+        const live = roles.find((x) => x.role === r);
+        const rs = live && liveNames.has(r) ? roleStateOf(live) : null;
+        roster.push(live ? { role: r, state: rs ? rs.state : 'closed', pid: live.pid, lastTurn: rs && rs.lastTurn ? new Date(rs.lastTurn).toISOString() : null, doing: rs ? rs.doing : null, task: rs ? rs.task : null }
+                         : { role: r, state: 'closed', pid: 0, lastTurn: null });
+      }
+    } catch {}
+
+    // PENDING: notes the recipient has NOT CONSUMED — its cursor has not passed them. This, not
+    // `waiting`, is what an arrow on the graph means: "a note is owed until consumed", so the arrow
+    // dissolves when the note is READ. `waiting` answers a different question (which REQUESTS are
+    // unanswered), and a request can sit open for days after being read — whalephone drew a quiz→
+    // research arrow for note #114 that had been consumed long ago, while the live android↔research
+    // traffic was invisible.
+    const pending = [];
+    const pendingMore = {};        // role -> directed notes the cap discarded (0 entries = nothing hidden)
+    for (const chair of roster) {
+      // A CLOSED chair can never consume, so its unread pile never drains and every note in it
+      // becomes an immortal arrow — the exact staleness this field exists to remove. What a departed
+      // session owes is a dead letter, not pending cooperation.
+      if (chair.state === 'closed') continue;
+      try {
+        const u = B.unreadFor(board, chair.role);
+        // FILTER FIRST, THEN CAP. The other order silently loses every directed note older than the
+        // trailing window: take the last 12 unread and THEN drop broadcasts, and a chair whose 12
+        // newest unread are announcements reports ZERO owed notes while real asks sit behind them.
+        // That is this field's own motivating bug inverted — not a phantom arrow, a missing one
+        // (audit #235 blocker 1). Directedness decides membership; the cap only bounds the payload.
+        const directed = u.notes.filter((n) => n.to != null);
+        const kept = directed.slice(-PENDING_PER_ROLE);
+        for (const n of kept) {
+          pending.push({
+            from: n.from, to: chair.role, seq: n.seq, id: n.id, ts: n.ts, text: clip(n.body),
+            // an ALERT note (blocker/correction) is stamped high by arc-board.js:326 — the operator
+            // needs that on the graph, not only in a list they may not scroll to
+            kind: n.kind || null, priority: n.priority === 'high' ? 'high' : 'normal',
+            // UNCONSUMED IS UNSEEN — by definition, this is the recipient's unread pile. The GUI
+            // colours an edge by `seen`, and a missing key reads as false there, so every arrow
+            // rendered permanently red once edges moved from waiting[] to pending[] (blocker 3).
+            // Ship it explicitly rather than let the consumer infer it from an absent field.
+            seen: false,
+          });
+        }
+        // A cap that hides work must SAY it hid work: a genuine backlog and a truncated one are
+        // otherwise byte-identical to the consumer — the same reason roadmapFile exists.
+        if (directed.length > kept.length) {
+          pendingMore[chair.role] = directed.length - kept.length;
+        }
+      } catch {}
+    }
+
+    const rm = parseRoadmap(board.root);
     const unread = {};
     for (const rc of roles) { try { unread[rc.role] = B.unreadFor(board, rc.role).count; } catch {} }
 
@@ -180,13 +491,20 @@ function snapshot() {
       name: board.name,
       roles: roles.map((rc) => {
         const a = actBy.get(rc.sessionId) || {};   // the session behind this role, for its activity
-        return { role: rc.role, pid: rc.pid, session: rc.sessionId, convId: rc.convId || null, since: rc.at, activity: a.activity || null, activityAt: a.activityAt || null };
+        const rst = roleStateOf(rc);
+        return { role: rc.role, pid: rc.pid, session: rc.sessionId, convId: rc.convId || null, since: rc.at, activity: a.activity || null, activityAt: a.activityAt || null, state: rst.state, lastTurn: rst.lastTurn ? new Date(rst.lastTurn).toISOString() : null, doing: rst.doing, task: rst.task };
       }),
       sessionCount: sessions.length,
       board: { notes: notes.length, lastTs: notes.length ? notes[notes.length - 1].ts : null, unread },
+      roster,      // every chair on this board, live or closed — the graph's node set
+      bonds,       // per-PAIR lifetime note counts + relative strength — the relationship layer
+      pending,     // notes NOT YET CONSUMED by their recipient — the graph's edges
+      pendingMore, // role -> how many directed notes the cap hid, so "capped" never looks like "none"
       waiting,
+      flow,
       cooperation: coop.slice(-COOP_MAX),
-      roadmap: parseRoadmap(board.root),
+      roadmap: rm.items,
+      roadmapFile: rm.file,     // a ROADMAP.md exists — lets the UI say "unreadable", never "empty"
     });
   }
   repos.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -421,8 +739,12 @@ function serve(port) {
     // Only a SESSION change (arc-state) matters from this BUSY dir — ignore await/offer/alarm-ack/
     // pidfile churn, which would otherwise trigger a full multi-board rebuild for nothing (audit
     // #343 perf note). Note posts are caught by the per-board ledger watches in syncWatches().
+    // `await` joined this list when roleState started reading the listener marker: arming or losing
+    // a listener CHANGES THE SNAPSHOT, so a filter that ignored it left the feed reporting a state
+    // it was no longer watching — visible only when the 1.2s tick happened to catch up.
+    // The rule: every file the snapshot READS must be a file the watcher WAKES on.
     try { fs.watch(CACHE_DIR, { persistent: false }, (ev, fn) => {
-      if (!fn || /^arc-(state|status)-/.test(String(fn))) debouncedPush();
+      if (!fn || /^arc-(state|status|await)-/.test(String(fn))) debouncedPush();
     }); } catch {}
   });
 
@@ -436,6 +758,7 @@ function serve(port) {
 }
 
 module.exports = { snapshot, liveSessions, activeBoards, watchDirs, hostAllowed, dashboardHtml, ensureFeed, stopFeed, feedStatus,
-  sweepOrphans, health, readPid, pidFile, FEED_PORT, VERSION };
+  sweepOrphans, health, readPid, pidFile, FEED_PORT, VERSION,
+  __parseRoadmap: parseRoadmap };   // exported for the dialect tests — parsing is the part that silently lies
 
 if (require.main === module) serve(parseInt(process.argv[2] || FEED_PORT, 10));

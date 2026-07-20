@@ -1361,18 +1361,57 @@ try {
   // THE DRIFT GUARD. Scan src/ for every `arc-<kind>-${...}` file arc actually writes, and demand
   // the sweeper knows about each. A new feature that adds a file now fails here until someone
   // decides its lifetime — swept, or deliberately exempt.
-  const kinds = new Set();
+  // Each kind is checked against the sweeper matching its REAL on-disk extension, so the extension
+  // must be extracted too — not synthesised. The predecessor built the string `arc-<k>-x.trigger`
+  // itself and tested it against a pattern accepting any lowercase kind, making covered() a
+  // TAUTOLOGY: it returned true for "totally-made-up", `leaks` was always [], and this assertion
+  // could never go red. It held for weeks while the thing it guarded drifted twice (audit #236) —
+  // and the comment above still promised "a new feature now fails here". A test that cannot fail is
+  // a green light wired to nothing.
+  const kinds = new Map();   // kind -> extension ('json' | 'trigger' | 'txt' | 'tgz' | 'dir')
   for (const f of fs.readdirSync(SRC).filter((x) => x.endsWith('.js'))) {
     const t = fs.readFileSync(path.join(SRC, f), 'utf8');
-    for (const m of t.matchAll(/[`'"]arc-([a-z][a-z-]*)-\$\{/g)) kinds.add(m[1]);
+    for (const m of t.matchAll(/arc-([a-z][a-z-]*)-\$\{/g)) {
+      // read to end-of-line, NOT to the next quote: `arc-purgepending-${session || 'x'}.json`
+      // carries quotes inside its own interpolation and a quote-bounded scan stops short of .json
+      const line = t.slice(m.index, m.index + 200).split(/\r?\n/)[0];
+      const e = line.match(/\.(json|trigger|txt|tgz)\b/);
+      const ext = e ? e[1] : 'dir';
+      if (!kinds.has(m[1]) || kinds.get(m[1]) === 'dir') kinds.set(m[1], ext);
+    }
   }
-  // arc-claudex-<port>: keyed by PORT, not session, and arc-claudex reclaims a stale one itself
-  // (it must survive to BE reclaimed — the record is how the port's owner is identified).
-  const EXEMPT = new Set(['claudex']);
-  const covered = (k) => RUN2.SWEEP_RX.test(`arc-${k}-x.json`) || /^arc-[a-z-]+-(.+)\.trigger$/.test(`arc-${k}-x.trigger`);
-  const leaks = [...kinds].filter((k) => !EXEMPT.has(k) && !covered(k));
+  const TRIGGER_RX_T = /^arc-[a-z-]+?-(.+)\.trigger$/;
+  // Each exemption states WHY, so "exempt" can never become a place to hide an unswept file.
+  const EXEMPT = new Map([
+    ['claudex', 'keyed by PORT not session; arc-claudex reclaims a stale one itself, so it must survive to BE reclaimed'],
+    ['feed', 'keyed by PORT not session (shape lifted from claudex); the feed reclaims its own stale record via sweepOrphans'],
+    ['birth', 'a one-shot birth packet consumed by the newborn on first read'],
+    ['export', 'an operator ARTEFACT (arc-export-<ts>.tgz) — the human owns it; arc must never reap it'],
+    ['export-list', 'transient manifest, written and read inside one arc export run'],
+    ['import', 'a staging DIRECTORY, removed by arc import itself when it completes'],
+    ['deleted', 'the RECOVERY trash dir — reaping it would destroy the thing that makes a delete undoable'],
+  ]);
+  const covered = (k) => {
+    const ext = kinds.get(k);
+    if (ext === 'json') return RUN2.SWEEP_RX.test(`arc-${k}-x.json`);
+    if (ext === 'trigger') return TRIGGER_RX_T.test(`arc-${k}-x.trigger`);
+    return false;   // txt/tgz/dir have no sweeper — they must be EXEMPT with a reason, or they leak
+  };
+  // THE GUARD'S OWN GUARD. The defect this replaces was invisible precisely because nobody asked
+  // whether covered() could ever say no. Assert it can, before trusting what it says.
+  ok('the sweep-coverage guard is CAPABLE OF FAILING (a made-up kind is not covered)',
+    !covered('totally-made-up') && !covered('zzz'));
+
+  const leaks = [...kinds.keys()].filter((k) => !EXEMPT.has(k) && !covered(k));
   ok(`every per-session file kind is swept or exempt (${kinds.size} kinds found in src/)`,
-    leaks.length === 0, leaks.length ? 'LEAKS: ' + leaks.join(', ') : '');
+    leaks.length === 0, leaks.length ? 'LEAKS: ' + leaks.map((k) => `${k}.${kinds.get(k)}`).join(', ') : '');
+
+  // SWEEP_RX drifts BOTH ways. A kind listed but never written is dead weight that outlives the
+  // feature that justified it, and reads as coverage nobody has.
+  const listed = (String(RUN2.SWEEP_RX).match(/\(([a-z|-]+)\)/) || [, ''])[1].split('|').filter(Boolean);
+  const dead = listed.filter((k) => kinds.get(k) !== 'json');
+  ok('...and SWEEP_RX lists no kind that src/ never writes (drift the other way)',
+    dead.length === 0, dead.length ? 'DEAD ENTRIES: ' + dead.join(', ') : '');
 
   // A LIVE session must never lose its companions to a clock. This is the reason the missing
   // kinds could not simply be bolted onto the age sweep: taking arc-role-* from a session that
@@ -2684,10 +2723,242 @@ try {
   ok('...each WAITING/COOPERATION edge carries the note TEXT (body) so a note is click-to-read',
     !!repo && (repo.waiting.find((w) => w.seq === 2) || {}).text === 'and Y'
     && (repo.cooperation.find((c) => c.reSeq === 1) || {}).text === 'DONE X');
+  // v6 FLOW: the ledger, every kind — NOT the waiting list. The widget fed its "NOTE FLOW" section
+  // from `waiting` (unanswered requests only), so a board with 3 notes and 1 open ask rendered a
+  // single row and looked like the history had been lost. `flow` carries all three.
+  ok('...the FLOW carries EVERY note kind, not just the unanswered ones (waiting shows 1, flow shows 3)',
+    !!repo && repo.waiting.length === 1 && repo.flow.length === 3
+    && repo.flow.map((n) => n.seq).join(',') === '1,2,3');
+  ok('...each FLOW note carries from/to/text + an OPEN flag marking the one still awaiting an answer',
+    !!repo && (repo.flow.find((n) => n.seq === 3) || {}).from === 'audit'
+    && (repo.flow.find((n) => n.seq === 3) || {}).to === 'code'
+    && (repo.flow.find((n) => n.seq === 3) || {}).text === 'DONE X'
+    && (repo.flow.find((n) => n.seq === 2) || {}).open === true
+    && (repo.flow.find((n) => n.seq === 1) || {}).open === false);
+
+  // v6 ROSTER: the board's chairs, live AND closed. Membership is a CLAIM FILE — never an
+  // appearance in a note. The graph drew a phantom `code` node on whalephone because a peer had
+  // written a note ABOUT arc's `code`; that board has no claim-code.json and `code` never sat there.
+  fs.writeFileSync(path.join(fboard.planDir, 'claim-gone.json'),
+    JSON.stringify({ role: 'gone', pid: DEAD_PID, sessionId: 'gone-sess', convId: 'gc1', at: 7000 }));
+  RMf.appendNote(fboard, { from: 'code', to: 'stranger', kind: 'info', body: 'a note NAMING a role that holds no chair here' });
+  const rRepo = (F.snapshot().repos || []).find((r) => r.root === fboard.root);
+  ok('...the ROSTER carries every chair, live AND closed (a closed chair is still a session here)',
+    !!rRepo && rRepo.roster.map((c) => c.role).sort().join(',') === 'audit,code,gone'
+    && (rRepo.roster.find((c) => c.role === 'gone') || {}).state === 'closed');
+  ok('...but a role that only ever APPEARS IN A NOTE is not on the roster (the phantom-node bug)',
+    !!rRepo && !rRepo.roster.some((c) => c.role === 'stranger'));
+  try { fs.unlinkSync(path.join(fboard.planDir, 'claim-gone.json')); } catch {}
+
+  // v6 PENDING: notes the recipient has NOT CONSUMED — the graph's arrows. Three rules, each of
+  // which drew a false arrow on whalephone before it existed.
+  {
+    // audit is LIVE and has read nothing, so #2 (code->audit) is genuinely owed.
+    const pRepo = (F.snapshot().repos || []).find((r) => r.root === fboard.root);
+    ok('...PENDING carries a note whose recipient has not consumed it (the arrow that IS owed)',
+      !!pRepo && pRepo.pending.some((p) => p.from === 'code' && p.to === 'audit' && p.seq === 2));
+
+    // (1) a BROADCAST is in everyone's mailbox but is NOT a directed edge
+    RMf.appendNote(fboard, { from: 'code', to: null, kind: 'info', body: 'ARC UPDATE — everyone' });
+    const bRepo = (F.snapshot().repos || []).find((r) => r.root === fboard.root);
+    ok('...a BROADCAST (to:null) is never a pending EDGE — it was aimed at nobody in particular',
+      !!bRepo && !bRepo.pending.some((p) => /ARC UPDATE/.test(p.text || '')));
+
+    // BLOCKER 1 (audit #235): the cap must run AFTER the broadcast filter, never before. Take the
+    // last N unread and THEN drop broadcasts, and a chair whose N newest unread are announcements
+    // reports ZERO owed notes while real asks sit behind them — this field's motivating bug,
+    // inverted. Exercised with MORE than PENDING_PER_ROLE trailing broadcasts, which no earlier test
+    // did: every other pending assertion runs on a ~4-note board where the slice is a no-op.
+    RMf.appendNote(fboard, { from: 'audit', to: 'code', kind: 'request', body: 'THE BURIED ASK' });
+    for (let i = 0; i < 20; i++) RMf.appendNote(fboard, { from: 'audit', to: null, kind: 'info', body: 'announcement ' + i });
+    const capRepo = (F.snapshot().repos || []).find((r) => r.root === fboard.root);
+    ok('...a directed note survives 20 TRAILING BROADCASTS — the cap filters first, then slices',
+      !!capRepo && capRepo.pending.some((p) => p.to === 'code' && /THE BURIED ASK/.test(p.text || '')));
+    ok('...and no broadcast is ever an edge, however many of them there are',
+      !!capRepo && !capRepo.pending.some((p) => /announcement /.test(p.text || '')));
+
+    // A cap that hides work must SAY so — a truncated backlog and a real one are otherwise identical.
+    for (let i = 0; i < 15; i++) RMf.appendNote(fboard, { from: 'audit', to: 'code', kind: 'request', body: 'ask ' + i });
+    const capRepo2 = (F.snapshot().repos || []).find((r) => r.root === fboard.root);
+    const codePend = (capRepo2.pending || []).filter((p) => p.to === 'code');
+    // derive the total rather than hardcode it — the fixture already held a directed note to `code`,
+    // so a literal count here asserts my arithmetic instead of the invariant
+    const directedTotal = RMf.unreadFor(fboard, 'code').notes.filter((n) => n.to != null).length;
+    ok('...pending is CAPPED at PENDING_PER_ROLE and pendingMore reports exactly what it hid',
+      codePend.length === 12 && directedTotal > 12
+      && capRepo2.pendingMore.code === directedTotal - 12);
+    ok('...every pending note ships seen:false explicitly (unconsumed IS unseen — no inferred key)',
+      codePend.every((p) => p.seen === false));
+
+    // (2) a CLOSED chair can never consume, so what it owes is a dead letter, not a live arrow
+    fs.writeFileSync(path.join(fboard.planDir, 'claim-ghost2.json'),
+      JSON.stringify({ role: 'ghost2', pid: DEAD_PID, sessionId: 'g2-sess', convId: 'g2', at: 7000 }));
+    RMf.appendNote(fboard, { from: 'code', to: 'ghost2', kind: 'request', body: 'nobody will ever read this' });
+    const gRepo = (F.snapshot().repos || []).find((r) => r.root === fboard.root);
+    ok('...a CLOSED chair contributes NO pending edge — its unread pile never drains (immortal arrow)',
+      !!gRepo && !gRepo.pending.some((p) => p.to === 'ghost2')
+      && gRepo.roster.some((c) => c.role === 'ghost2' && c.state === 'closed'));
+    try { fs.unlinkSync(path.join(fboard.planDir, 'claim-ghost2.json')); } catch {}
+  }
+
+  // THE WATCHER INVARIANT: every cache file the snapshot READS must be one the watcher WAKES on.
+  // roleState began reading arc-await-<session>.json while the filter still only matched
+  // state|status, so arming a listener changed the snapshot but pushed nothing — the feed reported a
+  // state it was not watching, and only the 1.2s fallback tick hid it. Broken again the day someone
+  // reads a new cache file, so it is asserted here rather than left to a comment.
+  {
+    const src = fs.readFileSync(path.join(SRC, 'arc-feed.js'), 'utf8');
+    const m = src.match(/\/\^arc-\(([a-z|]+)\)-\//);
+    const watched = m ? m[1].split('|') : [];
+    ok('the cache watcher wakes on EVERY prefix the snapshot reads (state + status + await)',
+      ['state', 'status', 'await'].every((p) => watched.indexOf(p) >= 0));
+  }
+
+  // STATUSLINE FRESHNESS: stdin vs the polled cache. Claude Code's rate_limits blob is that
+  // session's LAST API RESPONSE, so an IDLE session's stdin freezes. The old rule was
+  // `stdinUsage || cache` ("stdin is fresher"), true only while a session takes turns — an idle
+  // session rendered every 10s and discarded the correct cached number every time, showing 93%
+  // against a 5h window that had already reset while the cache held the true 9%.
+  {
+    const um = fs.readFileSync(path.join(SRC, 'usage-monitor.js'), 'utf8');
+    const pickFresher = new Function(
+      um.slice(um.indexOf('function pickFresher'), um.indexOf('// Bridge ARC_SESSION')) + '; return pickFresher;')();
+    const W = (pct, iso) => ({ five_hour: { utilization: pct, resets_at: iso }, seven_day: { utilization: 0 } });
+    const past = new Date(Date.now() - 5 * 3600e3).toISOString();
+    const future = new Date(Date.now() + 3600e3).toISOString();
+    const pct = (u) => u && u.five_hour.utilization;
+    ok('an IDLE session\'s ELAPSED stdin window loses to the polled cache (the frozen-bar bug)',
+      pct(pickFresher(W(93, past), W(9, future))) === 9);
+    ok('...but a LIVE session\'s stdin still wins on the same or a newer window (it IS fresher there)',
+      pct(pickFresher(W(12, future), W(9, future))) === 12
+      && pct(pickFresher(W(3, future), W(9, past))) === 3);
+    ok('...and with no cache, or an unreadable stdin timestamp, stdin still stands (never worse than before)',
+      pct(pickFresher(W(93, past), null)) === 93
+      && pct(pickFresher(W(50, 'garbage'), W(9, future))) === 50
+      && pct(pickFresher(null, W(9, future))) === 9);
+  }
+
+  // THE REPAINT INVARIANT (audit #235 blocker 4): every snapshot field the GUI's detail view DRAWS
+  // must appear in RepoSig, or the change-gate suppresses the redraw and the panel shows a state
+  // that has already passed. It missed state/roster/pending/flow, which broke both headline features
+  // at once — the status dot never repainted and the arrow never dissolved on consumption. C# has no
+  // suite of its own, so the invariant is asserted here against the source rather than trusted.
+  {
+    const gui = fs.readFileSync(path.join(__dirname, '..', 'scope', 'arc-scope.cs'), 'utf8');
+    const sig = gui.slice(gui.indexOf('static string RepoSig'), gui.indexOf('// ---- OVERVIEW ----'));
+    const drawn = ['roster', 'pending', 'flow', 'waiting', 'roadmap', 'roadmapFile', 'state'];
+    const missing = drawn.filter((f) => sig.indexOf('"' + f + '"') < 0);
+    ok('RepoSig hashes every field the detail view draws (or a change never repaints): '
+      + (missing.length ? 'MISSING ' + missing.join(',') : 'all present'), missing.length === 0);
+
+    // ...and every SUB-field of each item, not just the collection's name. The check above passes as
+    // soon as "roadmap" appears anywhere in RepoSig, so a per-item field could still be unhashed:
+    // `owner` was drawn at RenderDetail but absent from the ;R segment, so editing only the "Owner of
+    // the next move" line left the panel showing the previous owner. Same drift as audit #235
+    // blocker 4, one level deeper — which is exactly how the collection-level check let it through.
+    const subs = [
+      ['roadmap', ['title', 'state', 'owner']],
+      ['roster', ['role', 'state']],
+      ['pending', ['seq', 'to', 'seen']],
+    ];
+    const subMissing = [];
+    for (const [coll, fields] of subs) {
+      const at = sig.indexOf('"' + coll + '"');
+      const seg = at < 0 ? '' : sig.slice(at, sig.indexOf('\n', at) + 1 || sig.length);
+      for (const f of fields) if (seg.indexOf('"' + f + '"') < 0) subMissing.push(coll + '.' + f);
+    }
+    ok('...including each item SUB-field the view draws: '
+      + (subMissing.length ? 'MISSING ' + subMissing.join(',') : 'all present'), subMissing.length === 0);
+  }
+
+  // v6 STATE: a role's live state comes from the `arc join` listener marker, NOT from self-reported
+  // activity. The distinction that matters: NO marker means the session is mid-turn (working), never
+  // idle — a silent session is not an idle one, and painting it idle was a real bug in the widget.
+  const awaitFile = (s) => path.join(CLAUDE, 'cache', `arc-await-${s}.json`);
+  const sRepo = () => (F.snapshot().repos || []).find((r) => r.root === fboard.root);
+  const stOf = (rp, role) => ((rp || {}).roles || []).find((x) => x.role === role) || {};
+
+  // THE LISTENER MARKER NO LONGER DECIDES STATE AT ALL (operator's call). Two attempts to read it
+  // both painted hard-working sessions as faulty: first "marker present" was read as idle, which
+  // inverted the meaning (arm-once is the normal state, so every healthy worker went yellow); then a
+  // MISSING marker was read as deaf behind a 90s heartbeat gate, which still fired on a revived
+  // session whose single web-search tool call outran the gate. State is the transcript clock only.
+  const projd3 = path.join(CLAUDE, 'projects', 'state-proj');
+  fs.mkdirSync(projd3, { recursive: true });
+  const cf3 = path.join(projd3, 'fc1.jsonl');
+  const writeTurn = (msAgo) => fs.writeFileSync(cf3, JSON.stringify({ type: 'user', timestamp: new Date(Date.now() - msAgo).toISOString() }) + '\n');
+
+  writeTurn(2000);
+  ok('...NO listener but the transcript is BEATING reads ACTIVE — mid-turn is not a fault',
+    stOf(sRepo(), 'code').state === 'active');
+  writeTurn(200000);   // silent 200s: once DEAF, now simply not-yet-idle
+  ok('...NO listener and silent 200s is STILL ACTIVE — a missing marker is never a fault by itself',
+    stOf(sRepo(), 'code').state === 'active');
+
+  writeTurn(2000);
+  fs.writeFileSync(awaitFile(CODE), JSON.stringify({ pid: process.pid, role: 'code', at: Date.now() }));
+  ok('...an ARMED listener + a fresh transcript turn reads ACTIVE (armed means reachable, not idle)',
+    stOf(sRepo(), 'code').state === 'active');
+
+  // A DEAD listener pid used to force deaf. It is now irrelevant: only the heartbeat speaks.
+  fs.writeFileSync(awaitFile(CODE), JSON.stringify({ pid: DEAD_PID, role: 'code', at: Date.now() }));
+  ok('...a marker whose pid is DEAD does not change the state — reachability is not this feed\'s job',
+    stOf(sRepo(), 'code').state === 'active');
+  fs.writeFileSync(awaitFile(CODE), JSON.stringify({ pid: process.pid, role: 'audit', at: Date.now() }));
+  ok('...nor does a marker belonging to a DIFFERENT role',
+    stOf(sRepo(), 'code').state === 'active');
+
+  ok('...and NO state is ever "deaf" now, whatever the marker says',
+    stOf(sRepo(), 'code').state !== 'deaf');
+  writeTurn(2000);
+
+  // IDLE is the transcript's clock, and it is the SOFT state: no readable transcript must never be
+  // reported as idleness — asserting a live peer is idle without evidence is the false statement.
+  fs.writeFileSync(awaitFile(CODE), JSON.stringify({ pid: process.pid, role: 'code', at: Date.now() }));
+  const projd2 = path.join(CLAUDE, 'projects', 'state-proj');
+  fs.mkdirSync(projd2, { recursive: true });
+  const convFile = path.join(projd2, 'fc1.jsonl');
+  fs.writeFileSync(convFile, JSON.stringify({ type: 'user', timestamp: new Date(Date.now() - 90 * 60000).toISOString() }) + '\n');
+  ok('...ARMED but silent for 90 minutes reads IDLE (the transcript is the only evidence of work)',
+    stOf(sRepo(), 'code').state === 'idle');
+  fs.writeFileSync(convFile, JSON.stringify({ type: 'user', timestamp: new Date().toISOString() }) + '\n');
+  ok('...and a turn written just now flips it back to ACTIVE',
+    stOf(sRepo(), 'code').state === 'active');
+  try { fs.unlinkSync(convFile); } catch {}
+  ok('...with NO readable transcript it falls back to ACTIVE — never assert idle without evidence',
+    stOf(sRepo(), 'code').state === 'active');
+  try { fs.unlinkSync(awaitFile(CODE)); } catch {}
+
   ok('...the repo ROADMAP is parsed from docs/ROADMAP.md — numbered items only, with owner + open/prog state',
     !!repo && repo.roadmap.length === 2
     && repo.roadmap[0].title === 'First item' && repo.roadmap[0].owner === 'code' && repo.roadmap[0].state === 'prog'
     && repo.roadmap[1].title === 'Second item' && repo.roadmap[1].owner === 'research' && repo.roadmap[1].state === 'open');
+  ok('...and roadmapFile marks that a ROADMAP.md EXISTS (so "unreadable" never renders as "empty")',
+    !!repo && repo.roadmapFile === true);
+
+  // A ROADMAP.md that is NOT a roadmap of work. whalephone's is a doc-status INVENTORY (its own
+  // subtitle says so, and points at the real build-order plan elsewhere). A looser fallback parser
+  // scraped its table rows and reported 13 FILENAMES as roadmap items; that fallback was removed.
+  // arc must report nothing here rather than manufacture a backlog from a file's contents.
+  const drepo = fs.mkdtempSync(path.join(os.tmpdir(), 'rmdial-'));
+  spawnSync('git', ['init', '-q'], { cwd: drepo });
+  fs.mkdirSync(path.join(drepo, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(drepo, 'docs', 'ROADMAP.md'),
+    '# ROADMAP — doc status: shipped vs active vs pending\n\n'
+    + '> This is the doc-status view. The build-order roadmap lives elsewhere.\n\n'
+    + '## 🟡 Active — partial\n| Doc | Built / Pending |\n|---|---|\n| `speed-harness.md` | Fuse shipped; verify pending. |\n'
+    + '| ★ `faster-legs.md` | residuals parked. |\n\n'
+    + '## 📖 Reference — living docs\n| Doc | Note |\n|---|---|\n| `catalog.md` | not buildable. |\n');
+  const dRm = F.__parseRoadmap(drepo);
+  ok('a doc-INVENTORY ROADMAP.md yields NO items — arc never mints a backlog out of filenames',
+    dRm.items.length === 0);
+  ok('...but it still reports file:true, so the UI says "no items read", never "nothing parked"',
+    dRm.file === true);
+
+  // the honest-empty distinction
+  const erepo = fs.mkdtempSync(path.join(os.tmpdir(), 'rmnone-'));
+  ok('a repo with NO docs/ROADMAP.md reports file:false — distinguishable from an unreadable one',
+    F.__parseRoadmap(erepo).file === false && F.__parseRoadmap(erepo).items.length === 0);
   ok('a DEAD session is NOT shown — liveness is genuine, not a stale arc-state file',
     (() => { const D = 'feed-dead-' + process.pid;
       fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${D}.json`), JSON.stringify({ pid: 999999, cwd: frepo }));
@@ -4408,7 +4679,11 @@ try {
   const bg = F.badge('sb', repo2);
   ok('badge counts unread + names the sender', bg && bg.count === 1 && bg.senders[0] === 'research');
   R2.markRead(board2, 'coding');
-  ok('badge clears itself once read', F.badge('sb', repo2) === null);
+  // The ALERT clears; the badge itself now reports quiet PRESENCE instead of null, so a healthy
+  // role-holder still sees which chair it holds. Asserting `=== null` tested the old contract.
+  const cleared = F.badge('sb', repo2);
+  ok('badge clears itself once read (no count, no deafness — quiet presence remains)',
+    !!cleared && cleared.count === 0 && !cleared.deaf && cleared.quiet === true && cleared.role === 'coding');
 
   // FAIL-OPEN: a truncated ledger must not silently swallow notes
   R2.writeCursor(board2, 'coding', 999);                    // cursor past the end
@@ -4429,6 +4704,27 @@ try {
   ok('digest stays far under the 10k hook cap', inj.text.length < 10000);
   ok('injection marks them read — delivered exactly once', F.injection('sb', repo2) === null);
   ok('but the notes stay on the board (rd()-only)', R2.noteCount(board2) === countBeforeInject);
+
+  // AN ALARM MUST NOT BE BURIED BY VOLUME. Delivery walks oldest-first and stops at the injection
+  // budget, so a burst of routine notes can push a BLOCKER past the cut, where it is invisible inside
+  // "…and N more still unread". The float-to-top sort cannot help — it only reorders what is SHOWN.
+  // Reordering delivery is NOT the fix (the cursor is a high-water mark; picking a later note ahead
+  // of an earlier one and advancing past both would silently consume the skipped ones), so the
+  // deferred urgent notes must be NAMED instead.
+  {
+    const filler = 'x'.repeat(900);                         // ~5 of these exhaust INJECT_MAX (4000)
+    for (let i = 0; i < 8; i++) R2.appendNote(board2, { from: 'research', to: 'coding', body: `routine ${i} ${filler}` });
+    R2.appendNote(board2, { from: 'research', to: 'coding', kind: 'blocker', body: 'THE BURIED BLOCKER' });
+    const inj2 = F.injection('sb', repo2);
+    ok('a burst of routine notes DOES push the blocker out of this batch (the hazard is real)',
+      !!inj2 && inj2.text.indexOf('THE BURIED BLOCKER') < 0 && /more still unread/.test(inj2.text));
+    ok('...but the deferred HIGH-PRIORITY note is NAMED, not left inside "N more still unread"',
+      !!inj2 && /HIGH PRIORITY/.test(inj2.text) && /<blocker>/.test(inj2.text) && /read THOSE first/.test(inj2.text));
+    // and it is still there to be read — deferral must never be consumption
+    const inj3 = F.injection('sb', repo2);
+    ok('...and the blocker is still delivered on the NEXT batch (deferred, never consumed)',
+      !!inj3 && inj3.text.indexOf('THE BURIED BLOCKER') >= 0);
+  }
 
   // A NOTE ADDRESSED TO YOU IS YOUR WORK — deliver it whole. Caught live: `code` sent research a
   // 1400-char review request; it arrived clipped to 400, cut mid-sentence, and 4 of the 5 questions
@@ -4885,6 +5181,88 @@ try {
     && RUNNER.stripConvArgs(['  arc:restart']).length === 0);
   ok('...but a plain positional survives (only command spellings are stripped)',
     RUNNER.stripConvArgs(['hello']).length === 1);
+
+  // ---- `arc --resume <role>` — nobody remembers a UUID -------------------------------------
+  // The human types the chair's NAME. Before this it went straight to claude, which knows no
+  // conversation by that name, so the session came up role-less and nothing said why.
+  {
+    const RMr = require(path.join(SRC, 'arc-board.js'));
+    const rrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'resrole-'));
+    spawnSync('git', ['init', '-q'], { cwd: rrepo });
+    const rboard = RMr.resolveBoard(rrepo); RMr.ensureBoard(rboard);
+    const CONV = '11111111-2222-3333-4444-555555555555';
+    // a transcript must EXIST — a vacant claim's convId is a lead, not a guarantee
+    const projd = path.join(CLAUDE, 'projects', 'resrole-proj');
+    fs.mkdirSync(projd, { recursive: true });
+    fs.writeFileSync(path.join(projd, `${CONV}.jsonl`), '{"type":"user"}\n');
+    fs.writeFileSync(path.join(rboard.planDir, 'claim-code.json'),
+      JSON.stringify({ role: 'code', pid: DEAD_PID, sessionId: 'r-sess', convId: CONV, at: 7000 }));
+
+    const a1 = ['--resume', 'code'];
+    const r1 = RUNNER.resolveResumeRole(a1, rrepo);
+    ok('`arc --resume <role>` rewrites the role NAME to that chair\'s conversation id',
+      !!r1 && r1.ok === true && r1.role === 'code' && a1[1] === CONV);
+
+    // BLOCKER 2 (audit #235): the inline form must NORMALISE to two tokens. Every downstream reader
+    // tests exact tokens, so an emitted `--resume=<id>` is invisible to all of them — userManagesConv
+    // stays false, a fresh random convId is minted alongside it, and two terminals both clear the
+    // duplicate-conversation guard.
+    const a2 = ['--resume=code'];
+    const r2 = RUNNER.resolveResumeRole(a2, rrepo);
+    ok('...the --resume=<role> inline spelling NORMALISES to the bare two-token form',
+      !!r2 && r2.ok && a2.length === 2 && a2[0] === '--resume' && a2[1] === CONV);
+    ok('...so the userManagesConv gate (which tests EXACT tokens) actually sees it',
+      a2.includes('--resume') && RUNNER.explicitConvId(a2) === CONV);
+
+    // audit #235 D: the role name is interpolated into `claim-${role}.json` — an unvalidated
+    // traversal escapes the board dir and reads an arbitrary local .json.
+    for (const evil of ['../../../evil', '../../../../Users/yanyu/.claude/arc-config', 'Bad', 'x'.repeat(40)]) {
+      const av = ['--resume', evil];
+      const rv = RUNNER.resolveResumeRole(av, rrepo);
+      ok('...a role name that could not be CLAIMED is refused before it reaches a path: ' + evil.slice(0, 22),
+        !!rv && rv.ok === false && /invalid role/.test(rv.message) && av[1] === evil);
+    }
+
+    // the three things it must NOT touch
+    const a3 = ['--resume', CONV];
+    ok('...a UUID is left exactly alone (no lookup, no rewrite)',
+      RUNNER.resolveResumeRole(a3, rrepo) === null && a3[1] === CONV);
+    const a4 = ['--resume'];
+    ok('...bare `--resume` stays the interactive picker',
+      RUNNER.resolveResumeRole(a4, rrepo) === null && a4.length === 1);
+    const a5 = ['--session-id', 'code'];
+    ok('...--session-id is NOT translated (it assigns a new id, it does not reopen one)',
+      RUNNER.resolveResumeRole(a5, rrepo) === null && a5[1] === 'code');
+
+    // refusals — each names the real reason instead of guessing
+    const r6 = RUNNER.resolveResumeRole(['--resume', 'nosuch'], rrepo);
+    ok('...an unknown role REFUSES and lists the chairs that do exist',
+      !!r6 && r6.ok === false && /no role "nosuch"/.test(r6.message) && /code/.test(r6.message));
+
+    fs.writeFileSync(path.join(rboard.planDir, 'claim-live.json'),
+      JSON.stringify({ role: 'live', pid: process.pid, sessionId: 'l-sess', convId: CONV, at: Date.now() }));
+    const r7 = RUNNER.resolveResumeRole(['--resume', 'live'], rrepo);
+    ok('...a role held by a LIVE session REFUSES — two arc processes on one conversation collide',
+      !!r7 && r7.ok === false && /HELD by a live session/.test(r7.message));
+
+    fs.writeFileSync(path.join(rboard.planDir, 'claim-noconv.json'),
+      JSON.stringify({ role: 'noconv', pid: DEAD_PID, sessionId: 'n-sess', convId: null, at: 7000 }));
+    const r8 = RUNNER.resolveResumeRole(['--resume', 'noconv'], rrepo);
+    ok('...a chair with no conversation REFUSES (claimed, never launched under arc)',
+      !!r8 && r8.ok === false && /no conversation to resume/.test(r8.message));
+
+    fs.writeFileSync(path.join(rboard.planDir, 'claim-ghost.json'),
+      JSON.stringify({ role: 'ghost', pid: DEAD_PID, sessionId: 'g-sess', convId: '99999999-0000-0000-0000-000000000000', at: 7000 }));
+    const r9 = RUNNER.resolveResumeRole(['--resume', 'ghost'], rrepo);
+    ok('...a convId with NO transcript on this machine REFUSES by name, not claude\'s cryptic error',
+      !!r9 && r9.ok === false && /no transcript/.test(r9.message));
+
+    // the rewrite must feed the EXISTING machinery, not a parallel one
+    const a10 = ['--resume', 'code'];
+    RUNNER.resolveResumeRole(a10, rrepo);
+    ok('...and the rewritten args flow into explicitConvId, so the launch path needs no special case',
+      RUNNER.explicitConvId(a10) === CONV);
+  }
 
   // skillOverrides wiring: only-if-absent — a user's own per-skill choice survives.
   const W = require(path.join(SRC, 'arc-wire-settings.js'));

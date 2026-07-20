@@ -304,6 +304,30 @@ function usageFromStdin(sl) {
   return { five_hour: conv(rl.five_hour), seven_day: conv(rl.seven_day) };
 }
 
+// WHICH SOURCE IS ACTUALLY FRESHER — stdin or the polled cache.
+//
+// This used to be `stdinUsage || usage.data` with the comment "stdin is fresher/more accurate".
+// That is true only while a session is TAKING TURNS. Claude Code's rate_limits blob reflects that
+// session's LAST API RESPONSE, so an idle session's stdin is frozen at whatever its final turn saw
+// — and unconditional precedence meant it beat the freshly-polled cache forever. Measured on a real
+// idle session: the bar showed 93% against an expired 5h window while the cache held the true 9%,
+// re-rendering every 10s and discarding the correct number each time. Rendering was never the
+// problem; precedence was.
+//
+// A window that has already RESET is the tell: its numbers describe a period that is over. So stdin
+// wins only when its window is the same one the cache is describing, or a later one.
+// Unparseable/absent timestamps fall back to preferring stdin — the pre-existing behaviour, correct
+// for the active case, and never worse than what it replaced.
+function pickFresher(stdin, cached) {
+  if (!stdin) return cached;
+  if (!cached) return stdin;
+  const t = (u) => { try { const v = u && u.five_hour && u.five_hour.resets_at; const n = v ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : null; } catch { return null; } };
+  const s = t(stdin), c = t(cached);
+  if (s == null || c == null) return stdin;
+  if (s < Date.now() && c > s) return cached;   // stdin's window has ELAPSED and the cache moved on
+  return s >= c ? stdin : cached;
+}
+
 // Bridge ARC_SESSION (arc's per-terminal id) -> CLAUDE_CODE_SESSION_ID (the real
 // session id, even for a picker-resumed one) so the arc wrapper can find, re-resume
 // and preserve THIS session across an account switch.
@@ -570,8 +594,21 @@ function boardSeg(f) {
   // launched re-invokes the agent), so it would look fixed while staying deaf. Only the agent can
   // arm — so ask the agent.
   const deaf = f.deaf ? `\x1b[1;91m⚠ ${f.role} · DEAF (tell me to re-arm)\x1b[0m` : '';
+  // QUIET PRESENCE. Nothing is wrong, so this is DIM and never coloured — but the bar used to go
+  // completely blank here, which meant a healthy role-holder could not see which chair it held or
+  // whether anyone else was up. It is a readout, not an alert; anything louder would train the eye
+  // to ignore the segment that also carries DEAF.
+  if (!f.count && !f.deaf && f.quiet) {
+    const peers = f.peers ? ` · ${f.peers} peer${f.peers === 1 ? '' : 's'}` : '';
+    return `\x1b[2m${f.role}${peers}\x1b[0m`;
+  }
   if (!f.count) return deaf;
-  const notes = `\x1b[1;93m📌 ${f.count} from ${f.senders.join(', ')}\x1b[0m`;
+  // NOTES ARE INFORMATION, AN ALARM IS AN ALARM — and they must not read alike. They were both warm
+  // (yellow text vs a red block), so at a glance the bar showed "two warning-ish things" and you had
+  // to stop and parse which was which. An unread note is the board working: someone wrote to you.
+  // Blue says that; red is reserved for the alarm, which keeps the inverse-video block on its own.
+  // Same convention as arc-scope, deliberately — the two surfaces should not disagree about colour.
+  const notes = hexColor(`✉ ${f.count} from ${f.senders.join(', ')}`, '#5AA3FF');
   return deaf ? `${deaf} ${notes}` : notes;
 }
 
@@ -620,7 +657,7 @@ function renderCompact(data, sessionEta, acc, model, effort, board, stance, alar
       const sd = Math.round(data.seven_day.utilization);
       const reset = formatResetTime(data.five_hour.resets_at) || formatResetTime(data.seven_day.resets_at);
       const resetPart = reset ? ` (resets ${reset})` : '';
-      subPart = ` | ${hexColor(`${sub.label} ${fh}%/${sd}%${resetPart}`, sub.color)}`;
+      subPart = ` | ${hexColor(`${sub.label} 5h ${fh}% · 7d ${sd}%${resetPart}`, sub.color)}`;
     }
     // Gateway account's own usage (e.g. MATE /v1/usage), from cache. Guarded so a
     // weird payload can never break the statusline (falls back to the plain label).
@@ -645,7 +682,7 @@ function renderCompact(data, sessionEta, acc, model, effort, board, stance, alar
     // (5h window) or be stuck for days (weekly cap). See bindingResetLabel.
     const bindReset = bindingResetLabel(s, w, SWITCH_WEEK);
     const resetPart = bindReset ? ` (resets ${bindReset})` : '';
-    return withL2(blinkAlert(`⚠ ${acc.label} ${sv}%/${wv}% ${lbl}${resetPart} — /arc-switch to ${target}`));
+    return withL2(blinkAlert(`⚠ ${acc.label} 5h ${sv}% · 7d ${wv}% ${lbl}${resetPart} — /arc-switch to ${target}`));
   }
 
   const sEta = formatEta(sessionEta);
@@ -655,7 +692,9 @@ function renderCompact(data, sessionEta, acc, model, effort, board, stance, alar
   // the parenthetical entirely if neither exists, rather than print a 1970 time.
   const oReset = formatResetTime(s.resets_at) || formatResetTime(w.resets_at);
   const oResetPart = oReset ? ` (resets ${oReset}${sEtaPart})` : '';
-  return withL2(`${label(acc)} ${sv}%/${weekStr}${oResetPart}`);
+  // "5h X% · 7d Y%", not "X%/Y%": the bare pair made the reader remember which window was which,
+  // and `arc peek` already labels them this way — the statusline was the inconsistent surface.
+  return withL2(`${label(acc)} 5h ${sv}% · 7d ${weekStr}${oResetPart}`);
 }
 
 async function main() {
@@ -693,6 +732,14 @@ async function main() {
 
   // Statusline path: paint INSTANTLY from stdin + caches; refresh detached.
   const sl = await readStdinJson();
+  // RENDER STAMP — which sessions are actually painting, and when. A statusline that stops painting
+  // shows its last frame forever, which is indistinguishable from one that is up to date and merely
+  // unchanged; nothing else on the machine can tell the two apart. One tiny write per render.
+  try {
+    const rsId = (sl && sl.session_id) || process.env.CLAUDE_CODE_SESSION_ID || process.env.ARC_SESSION;
+    if (rsId) fs.writeFileSync(path.join(C.CACHE_DIR, `arc-render-${rsId}.json`),
+      JSON.stringify({ at: Date.now(), arc: process.env.ARC_SESSION || null, pid: process.ppid }));
+  } catch {}
   const model = sl && sl.model ? sl.model.display_name : undefined;
   const effort = resolveEffort(sl && sl.effort ? sl.effort.level : undefined); // xhigh->ultracode via transcript
   writeActiveConv(); // bridge cl<->claude session id so `arc` can preserve this session on switch
@@ -702,7 +749,7 @@ async function main() {
   // slice that some other account happened to populate.
   const subAcc = subscriptionAccount();
   const usage = readCachedUsageFor(subAcc && subAcc.id);
-  const usageData = stdinUsage || usage.data; // stdin is fresher/more accurate
+  const usageData = pickFresher(stdinUsage, usage.data);
 
   // Keep the background refresh running (it maintains the ETA history and the
   // api-mode subscription numbers) whenever the cache is stale.

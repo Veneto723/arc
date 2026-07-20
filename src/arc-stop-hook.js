@@ -229,7 +229,7 @@ function run(raw) {
   //     listed a CHARTERED standing duty (`research`) as something to close, and the human caught
   //     it: closing a standing peer is not free (revive pays boot + prefill on its whole history),
   //     and the process it saves costs RAM, not quota (an armed listener is blocked on a poll, it
-  //     makes no API calls). So the nag now fires ONLY for an idle spawn with NO committed charter
+  //     makes no API calls). So the nag now fires ONLY for an idle spawn with NO charter file
   //     — a temp worker, the one thing the doctrine says should barely exist. A chartered peer is a
   //     teammate; it is never listed. Only ones that OWE NOTHING are candidates; a peer mid-answer
   //     is working.
@@ -247,7 +247,7 @@ function run(raw) {
       // Idle = live, and owes me nothing. Anything still holding an unanswered request is working.
       const idle = mine.filter((b) => live.some((l) => l.role === b.role)
         && !R.openRequests(board, b.role).some((n) => n.to === b.role));
-      // A CHARTERED role — one with a committed .arc/roles/<role>.md — is a STANDING DUTY, and the
+      // A CHARTERED role — one with an .arc/roles/<role>.md FILE on disk — is a STANDING DUTY, and the
       // nag must NEVER push you to close it. That was the bug the human caught: it listed a chartered
       // `research` as something to reap, and closing a standing peer is not free — reviving it pays
       // boot + prefill on its whole history, while the process it "saves" costs a little RAM, not
@@ -270,7 +270,7 @@ function run(raw) {
           decision: 'block',
           reason: `[arc] You spawned ${leaks.length} peer(s) with NO charter, still running and owing you nothing:\n`
             + `${leaks.map((b) => `  "${b.role}"`).join(', ')}\n\n`
-            + `A peer with no committed .arc/roles/ charter is a temp worker — and reaching for one is a `
+            + `A peer with no .arc/roles/ charter FILE is a temp worker — and reaching for one is a `
             + `smell the doctrine warns about: if its job is real it earns a chartered standing duty; if `
             + `it is not, it was probably noise. So either WRITE its charter (\`arc role\` shows the shape) `
             + `— then it is a teammate, not a leak — or close it. Closing what you opened is YOUR job, not `
