@@ -1042,6 +1042,11 @@ namespace ArcScope {
     const double EDGE_SLOT = 6;    // half the gap between a pair's two directions, at the card
     const double EDGE_BOW  = 16;   // how far the bezier bows; the two directions bow to opposite sides
     static readonly double[] SIDE_ANGLE = { 0, 90, 180, 270 };   // R, B, L, T (screen y-down)
+    // Cards are WIDE pills, so their top/bottom edges are long and their left/right edges short. A
+    // neighbour sitting DIAGONALLY (near a 45° corner) reads better entering the long edge than being
+    // crammed onto the short side — so give the vertical sides (T,B) a small edge on the near-45° call.
+    // Modest on purpose: a clearly side-on neighbour (well past the diagonal) still takes left/right.
+    const double VERT_BIAS = 22;   // degrees; shifts the top/right decision boundary from 315° to ~326°
     static double AngGap(double a, double b) { double d = Math.Abs(a - b) % 360; return d > 180 ? 360 - d : d; }
     static double BestGap(double a) { double b = 1e9; foreach (var pa in SIDE_ANGLE) b = Math.Min(b, AngGap(a, pa)); return b; }
     static Point PortPoint(Point c, double hw, double hh, int side) {
@@ -1067,11 +1072,17 @@ namespace ArcScope {
           ideal.Add(new KeyValuePair<string, double>(m, ang));
         }
         ideal.Sort((x, y) => BestGap(x.Value).CompareTo(BestGap(y.Value)));
+        // The vertical bias is only a FREE improvement when the node has a spare side to choose. A
+        // high-degree node (4+ neighbours) already uses every side, so biasing toward top/bottom just
+        // crowds two edges onto the long edges and pushes a diagonal neighbour off the left/right side
+        // it should own — the exact "android put uiux on the bottom, not the left" case. So bias only
+        // low-degree nodes (≤3 neighbours, ≥1 side to spare); high-degree ones use pure nearest-cardinal.
+        bool biasVert = ideal.Count <= 3;
         var used = new HashSet<int>(); var map = new Dictionary<string, int>();
         foreach (var kv in ideal) {
           int best = -1; double bd = 1e9;
-          for (int p = 0; p < 4; p++) { if (used.Contains(p)) continue; double d = AngGap(kv.Value, SIDE_ANGLE[p]); if (d < bd) { bd = d; best = p; } }
-          if (best < 0) for (int p = 0; p < 4; p++) { double d = AngGap(kv.Value, SIDE_ANGLE[p]); if (d < bd) { bd = d; best = p; } }  // >4 neighbours: share
+          for (int p = 0; p < 4; p++) { if (used.Contains(p)) continue; double d = AngGap(kv.Value, SIDE_ANGLE[p]) - (biasVert && (p == 1 || p == 3) ? VERT_BIAS : 0); if (d < bd) { bd = d; best = p; } }
+          if (best < 0) for (int p = 0; p < 4; p++) { double d = AngGap(kv.Value, SIDE_ANGLE[p]) - (biasVert && (p == 1 || p == 3) ? VERT_BIAS : 0); if (d < bd) { bd = d; best = p; } }  // >4 neighbours: share
           if (best >= 0) { used.Add(best); map[kv.Key] = best; }
         }
         res[n] = map;
@@ -1351,9 +1362,16 @@ namespace ArcScope {
         // the canvas simply grows to hold it.
         double need = 0, maxHalf = 0;
         foreach (var k in ring) { need += halfW[k] * 2 + 34; if (halfW[k] > maxHalf) maxHalf = halfW[k]; }
-        double r0 = need / (2 * Math.PI);                       // radius the pills need to not touch
+        double r0 = need / (2 * Math.PI);                       // radius the pills need to not touch (around the arc)
         double rCap = (width / 2) - maxHalf - 12;               // radius the width can afford
         double rr = Math.Max(46, Math.Min(r0, rCap));
+        // ...but the arc budget only stops pills OVERLAPPING around the ring; on a SMALL ring the
+        // straight-line CHORD between two ADJACENT pills is far shorter than that arc, so 3 nodes sit
+        // research and code side by side at the bottom with barely a gap. Grow the radius until the
+        // adjacent chord (2·rr·sin(π/N)) clears both widest half-widths plus a real gap — still capped
+        // by the width so it never overflows. Only bites small N; for large N r0 already exceeds this.
+        double chordNeed = (2 * maxHalf + 30) / (2 * Math.Sin(Math.PI / ringN));
+        rr = Math.Min(Math.Max(rr, chordNeed), rCap);
         double cx0 = width / 2, cy0 = rr + 22;
         // start at the top and go clockwise, so the first name alphabetically is always at 12 o'clock
         for (int i = 0; i < ringN; i++) {
