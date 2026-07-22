@@ -372,11 +372,15 @@ function stageBoardInto(board, stage, name) {
   for (const f of listDir(rolesDir)) {
     if (f.endsWith('.md')) { try { put(`roles/${f}`, fs.readFileSync(path.join(rolesDir, f))); roleMds++; } catch {} }
   }
+  // the field guide travels with the board like the charters do (it is board-level, one file). Absent
+  // → nothing staged, so an old bundle without it imports unchanged.
+  let fieldguide = 0;
+  try { put('fieldguide.md', fs.readFileSync(path.join(board.root, '.arc', 'fieldguide.md'))); fieldguide = 1; } catch {}
   // the source repo root is recorded HERE, where the tree exists — repoRoot() fabricates
   // rather than errors on a missing path, so import could never recover it after the fact
   put('board.json', JSON.stringify({ tool: 'arc-sync', board: 1, root: board.root, name: board.name, at: new Date().toISOString() }, null, 2));
   const notes = String(ledger).split('\n').filter((l) => l.trim()).length;
-  return { stage, rels, notes, claims, roleMds };
+  return { stage, rels, notes, claims, roleMds, fieldguide };
 }
 
 // ---- export ----------------------------------------------------------------
@@ -816,6 +820,26 @@ function importBoard(stageDir, ctx) {
     }
     if (!dryRun) { fs.mkdirSync(rolesDst, { recursive: true }); fs.copyFileSync(src, dst); }
     lines.push(`    charter ${f}: ${action}`);
+  }
+
+  // 5. field guide — append-only lessons, so UNION the two (dedup by lesson core) rather than let a
+  // newer mtime clobber the other machine's lessons. Neither side loses a lesson; order is local-first.
+  const fgSrc = path.join(stageDir, 'fieldguide.md');
+  if (fs.existsSync(fgSrc)) {
+    const FG = require('./arc-fieldguide');
+    const srcLessons = FG.parse(fs.readFileSync(fgSrc, 'utf8'));
+    const fgDst = FG.guidePath(board);
+    const dstExists = fs.existsSync(fgDst);
+    const merged = dstExists ? FG.parse(fs.readFileSync(fgDst, 'utf8')) : [];
+    const seen = new Set(merged.map(FG.core));
+    let added = 0;
+    for (const l of srcLessons) { if (!seen.has(FG.core(l))) { seen.add(FG.core(l)); merged.push(l); added++; } }
+    if (added || !dstExists) {
+      if (!dryRun) { fs.mkdirSync(path.dirname(fgDst), { recursive: true }); fs.writeFileSync(fgDst, FG.render(merged)); }
+      lines.push(`    field guide: ${dstExists ? `merged (+${added} lesson${added === 1 ? '' : 's'})` : 'added'}`);
+    } else {
+      lines.push('    field guide: no new lessons');
+    }
   }
 }
 

@@ -16,6 +16,7 @@ that form is consumed by a hook before it ever reaches you.
 arc role                  # who's in the board? what's my role?
 arc notes                 # read what's waiting (also arrives automatically at your turn start)
 arc note all "<line>"     # leave a note for everyone
+arc fieldguide "<lesson>" # leave a hard-won gotcha for whoever works here next
 ```
 
 If `arc role` reports no peer (*"nobody else here yet"*), you're solo — **do nothing**.
@@ -104,9 +105,24 @@ arc note research --kind request --body-file ./packet.md    # more than one — 
     ○ frontend  closed — the web surface   ← empty chair: arc delegate frontend
 ```
 
-Every role's duty is declared in `.arc/roles/<role>.md` — committed, so it is the same on every
-machine and it **outlives the session that wrote it**. That's what makes an empty chair readable:
-`frontend` is a real job here, nobody is in it right now.
+Every role's duty is declared in `.arc/roles/<role>.md` — it travels with the board (`arc export` /
+`arc import`, never git) and **outlives the session that wrote it**. That's what makes an empty chair
+readable: `frontend` is a real job here, nobody is in it right now.
+
+### The field guide — a gotcha that outlives you, shared between peers
+
+`.arc/fieldguide.md` is a board-level lessons file: one line per hard-won trap that cost a peer a turn
+and is **not** already in the code, CLAUDE.md, or git. It is delivered to you automatically when you
+claim a role, and any peer can add to it:
+
+```
+arc fieldguide "arc join must be run_in_background or it is not a wakeable listener"
+arc fieldguide                 # print every lesson
+```
+
+It is not a scratchpad and not doctrine — keep it disciplined: one line, delete a lesson that goes
+stale, and don't add what CLAUDE.md or a charter already says. Like the charters it travels with the
+board (export/import), never git. Use it only for the lesson the *next* peer would otherwise re-pay.
 
 ### You decide WHO. arc decides HOW.
 

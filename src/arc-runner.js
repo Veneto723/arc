@@ -1822,6 +1822,25 @@ async function main() {
     process.stdout.write(msg + '\n');
     process.exit(r.ok ? 0 : 1);
   }
+  // `arc fieldguide "<lesson>"` appends a shared lesson; bare `arc fieldguide` prints them all. A
+  // terminal-only verb (no /arc- prompt form, like `arc status`), so it needs no arc-slash entry.
+  if (userArgs[0] === 'fieldguide') {
+    const FG = require('./arc-fieldguide');
+    const RB = require('./arc-board');
+    let board; try { board = RB.resolveBoard(process.cwd()); } catch { process.stderr.write('[arc fieldguide] not inside a board (a git repo).\n'); process.exit(1); }
+    const lesson = userArgs.slice(1).join(' ').trim();
+    if (lesson) {
+      const who = require('./arc-notes').getRole(process.env.ARC_SESSION || '', board) || 'someone';
+      const r = FG.appendLesson(board, who, lesson);
+      if (r.ok) process.stdout.write(`[arc fieldguide] added — ${FG.guideRel()} now has ${FG.lessons(board).length} lesson(s).\n`);
+      else process.stdout.write(`[arc fieldguide] not added (${r.reason === 'duplicate' ? 'already there' : r.reason}).\n`);
+      process.exit(r.ok ? 0 : 1);
+    }
+    const all = FG.lessons(board);
+    if (!all.length) process.stdout.write(`[arc fieldguide] empty. Add the first lesson:  arc fieldguide "<a trap that cost you a turn>"\n`);
+    else process.stdout.write(`field guide — ${FG.guideRel()} (${all.length} lesson(s)):\n` + all.map((l) => '  · ' + l).join('\n') + '\n');
+    process.exit(0);
+  }
   // (`arc watch` lived here. REMOVED — it streamed forever and NEVER exited, so it could only
   //  wake a session through the Monitor tool's output events, while `arc await` wakes one
   //  through a background command's EXIT: the channel we actually verified. Two mechanisms for

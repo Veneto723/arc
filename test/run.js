@@ -1151,10 +1151,54 @@ try {
   const st2 = spawnSync(process.execPath, [runner, 'status', '--clear'], { cwd: repo, env, encoding: 'utf8' });
   ok('`arc status --clear` removes the activity file', st2.status === 0 && !fs.existsSync(stPath));
 
+  // ---- arc fieldguide: a peer-written shared lessons file ----------------------------------------
+  const FG = require(path.join(SRC, 'arc-fieldguide.js'));
+  const fg1 = spawnSync(process.execPath, [runner, 'fieldguide', 'arc join must be run_in_background or it is not a wakeable listener'], { cwd: repo, env, encoding: 'utf8' });
+  ok('`arc fieldguide "<lesson>"` appends and exits 0', fg1.status === 0 && FG.lessons(board).length === 1);
+  ok('...attributed to the caller\'s role', /— android$/.test(FG.lessons(board)[0]));
+  ok('...and it lands at .arc/fieldguide.md (board-level, beside roles/)',
+    fs.existsSync(path.join(board.root, '.arc', 'fieldguide.md')));
+  const fgDup = spawnSync(process.execPath, [runner, 'fieldguide', 'arc join  MUST be run_in_background or it is not a wakeable listener'], { cwd: repo, env, encoding: 'utf8' });
+  ok('...a duplicate lesson (whitespace/case-insensitive) is not stacked', fgDup.status === 1 && FG.lessons(board).length === 1);
+  // audit #296 — a DISTINCT lesson whose body ENDS in "— <text>" must be ADDED, not falsely deduped
+  // (the old core() stripped the body's own trailing clause off the raw text and called it a dup).
+  const em1 = FG.appendLesson(board, 'code', 'use the SID');
+  const em2 = FG.appendLesson(board, 'audit', 'use the SID — not the localized name');
+  ok('...a distinct lesson ending in "— <text>" is NOT dropped as a false duplicate (audit #296)',
+    em1.ok === true && em2.ok === true && FG.lessons(board).some((l) => /not the localized name/.test(l)));
+  // ...and the MIRROR still holds: a genuine re-add of that em-dash lesson IS deduped
+  ok('...but a genuine re-add of an em-dash lesson is still caught as a duplicate',
+    FG.appendLesson(board, 'research', 'use the SID  —  not the localized name').ok === false);
+  spawnSync(process.execPath, [runner, 'fieldguide', '.StartTime.Ticks is LOCAL — use ToFileTimeUtc'], { cwd: repo, env, encoding: 'utf8' });
+  const fgShow = spawnSync(process.execPath, [runner, 'fieldguide'], { cwd: repo, env, encoding: 'utf8' });
+  ok('bare `arc fieldguide` prints every lesson', fgShow.status === 0 && /run_in_background/.test(fgShow.stdout) && /ToFileTimeUtc/.test(fgShow.stdout));
+
+  // delivered ON CLAIM — a role-holder sees the lessons in the /arc-role context, reusing that block.
+  // The claim path verifies a live arc-runner pid, so seed a state file pointing at THIS process.
+  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${S}.json`), JSON.stringify({ pid: process.pid, cwd: repo }));
+  const claim = require(path.join(SRC, 'arc-notes.js')).requestRole(S, 'android', repo);
+  ok('the field guide is injected into the role-claim context (peers see it when they join)',
+    /field guide — lessons peers left here/.test(claim.message) && /ToFileTimeUtc/.test(claim.message), claim.message);
+
+  // export STAGES the guide (so it travels), and import UNION-MERGES it (append-only — neither machine
+  // loses a lesson). stageBoard writes into ~/.claude/projects (the throwaway HOME), returns counts.
+  const SY = require(path.join(SRC, 'arc-sync.js'));
+  const staged = SY.stageBoard(board, new Set());
+  ok('export stages .arc/fieldguide.md with the board', staged && staged.fieldguide === 1
+    && fs.existsSync(path.join(staged.stage, 'fieldguide.md')));
+  try { fs.rmSync(staged.stage, { recursive: true, force: true }); } catch {}
+  // the import merge is a UNION by lesson core: a shared lesson does not double, remote-only is gained
+  const A = FG.parse(FG.render(['local only  — a', 'shared one  — a']));
+  const B = FG.parse(FG.render(['shared one  — b', 'remote only  — b']));
+  const seen = new Set(A.map(FG.core)); let gained = 0;
+  for (const l of B) if (!seen.has(FG.core(l))) { seen.add(FG.core(l)); gained++; }
+  ok('the import merge is a UNION (dedup by lesson core) — shared lesson not doubled, remote gained',
+    gained === 1 && A.length === 2 && B.length === 2 && seen.size === 3);
+
   fs.rmSync(repo, { recursive: true, force: true });
   try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-role-${S}.json`)); } catch {}
   try { fs.unlinkSync(stPath); } catch {}
-} catch (e) { ok('arc-runner board CLI works', false, e.message); }
+} catch (e) { ok('arc-runner board CLI works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- the bin shims: `arc` must be runnable BY THE AGENT ---------------------------
 // Found in the wild, not by a test: the Stop hook told this very session to run

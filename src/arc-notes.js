@@ -349,10 +349,16 @@ function requestRole(session, arg, cwd) {
       + `        (Peers read the owns: line to route work to you, and it outlives this session — it is\n`
       + `         how a future peer knows this chair exists. Expand below with ## sections if warranted.)\n`;
   const ros = rosterLines(board, role);
+  // The FIELD GUIDE — lessons peers left for whoever sits here. Delivered ON CLAIM (the one moment a
+  // board member is guaranteed to be looking), reusing this context rather than a per-turn nag. Empty
+  // guide → nothing shown. Indented to sit under the claim block like the roster.
+  let fg = '';
+  try { const b = require('./arc-fieldguide').injectBlock(board); if (b) fg = '  ' + b.replace(/\n/g, '\n  ') + '\n'; } catch {}
   return { ok: true, role, armNeeded, duty: mineDuty, message:
     `✓ you are "${role}" on the "${board.name}" board  (${board.root})\n` +
     dutyLine +
     (ros ? `  roster:\n${ros}\n` : '') +
+    fg +
     (unread.count ? `  📌 ${unread.count} unread note(s) — read them: /arc-notes\n` : '  board is empty for you\n') +
     listen };
 }
