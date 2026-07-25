@@ -588,8 +588,8 @@ function render(snap){if(!snap){return;}last=snap;
  meta.textContent=E(snap.host)+' · '+snap.repos.length+' repo'+(snap.repos.length===1?'':'s')+' · '+ago(snap.at)+' ago';
  grid.innerHTML=snap.repos.map(function(r){
   var roles=r.roles.length?r.roles.map(function(x){return '<span class="chip"><span class="d"></span>'+E(x.role)+' <span class="pid">'+E(x.pid)+'</span></span>';}).join(''):'<span class="empty">no live roles</span>';
-  var w=r.waiting.length?r.waiting.map(function(e){return '<div class="edge '+(e.seen?'':'unseen')+'"><span class="f">'+E(e.from)+'</span><span class="a">→</span><span class="t">'+E(e.to)+'</span><span class="g">#'+e.seq+' · '+ago(e.ts)+(e.seen?'':' · unseen')+'</span></div>';}).join(''):'<span class="empty">nobody waiting</span>';
-  var c=r.cooperation.length?r.cooperation.slice(-6).reverse().map(function(e){return '<div class="edge coop"><span class="f">'+E(e.from)+'</span><span class="a">↩</span><span class="t">'+E(e.to)+'</span><span class="g">re #'+e.reSeq+'</span></div>';}).join(''):'<span class="empty">no replies yet</span>';
+  var w=r.waiting.length?r.waiting.map(function(e){return '<div class="edge '+(e.seen?'':'unseen')+'"><span class="f">'+E(e.from)+'</span><span class="a">→</span><span class="t">'+E(e.to)+'</span><span class="g">#'+E(e.seq)+' · '+ago(e.ts)+(e.seen?'':' · unseen')+'</span></div>';}).join(''):'<span class="empty">nobody waiting</span>';
+  var c=r.cooperation.length?r.cooperation.slice(-6).reverse().map(function(e){return '<div class="edge coop"><span class="f">'+E(e.from)+'</span><span class="a">↩</span><span class="t">'+E(e.to)+'</span><span class="g">re #'+E(e.reSeq)+'</span></div>';}).join(''):'<span class="empty">no replies yet</span>';
   return '<div class="repo"><h2>'+E(r.name)+'</h2><div class="path">'+E(r.root)+'</div><div class="roles">'+roles+'</div><div class="stat">'+r.sessionCount+' session'+(r.sessionCount===1?'':'s')+' · '+r.board.notes+' notes</div><div class="sec"><h3>⧗ waiting on</h3>'+w+'</div><div class="sec"><h3>↩ recent replies</h3>'+c+'</div></div>';
  }).join('')||'<div class="empty" style="padding:24px">no live arc sessions right now</div>';}
 render(INITIAL);
@@ -605,8 +605,13 @@ function renderCards(snap) {
   if (!snap || !snap.repos || !snap.repos.length) return '<div class="empty" style="padding:24px">no live arc sessions right now</div>';
   return snap.repos.map((r) => {
     const roles = (r.roles || []).length ? r.roles.map((x) => `<span class="chip"><span class="d"></span>${esc(x.role)} <span class="pid">${esc(x.pid)}</span></span>`).join('') : '<span class="empty">no live roles</span>';
-    const w = (r.waiting || []).length ? r.waiting.map((e) => `<div class="edge ${e.seen ? '' : 'unseen'}"><span class="f">${esc(e.from)}</span><span class="a">→</span><span class="t">${esc(e.to)}</span><span class="g">#${e.seq} · ${ago(e.ts)}${e.seen ? '' : ' · unseen'}</span></div>`).join('') : '<span class="empty">nobody waiting</span>';
-    const c = (r.cooperation || []).length ? r.cooperation.slice(-6).reverse().map((e) => `<div class="edge coop"><span class="f">${esc(e.from)}</span><span class="a">↩</span><span class="t">${esc(e.to)}</span><span class="g">re #${e.reSeq}</span></div>`).join('') : '<span class="empty">no replies yet</span>';
+    // seq/reSeq ARE ESCAPED TOO. They read like integers and were the two fields left bare on the
+    // whole surface — but a note's shape is not this renderer's to assume (audit #352's lock probed
+    // every string field and pinned seq as a NUMBER, so it never covered them). Escape at the sink
+    // regardless of what upstream promises: allNotes now computes seq itself, and this is the
+    // second lock on the same door.
+    const w = (r.waiting || []).length ? r.waiting.map((e) => `<div class="edge ${e.seen ? '' : 'unseen'}"><span class="f">${esc(e.from)}</span><span class="a">→</span><span class="t">${esc(e.to)}</span><span class="g">#${esc(e.seq)} · ${ago(e.ts)}${e.seen ? '' : ' · unseen'}</span></div>`).join('') : '<span class="empty">nobody waiting</span>';
+    const c = (r.cooperation || []).length ? r.cooperation.slice(-6).reverse().map((e) => `<div class="edge coop"><span class="f">${esc(e.from)}</span><span class="a">↩</span><span class="t">${esc(e.to)}</span><span class="g">re #${esc(e.reSeq)}</span></div>`).join('') : '<span class="empty">no replies yet</span>';
     return `<div class="repo"><h2>${esc(r.name)}</h2><div class="path">${esc(r.root)}</div><div class="roles">${roles}</div><div class="stat">${r.sessionCount} session${r.sessionCount === 1 ? '' : 's'} · ${r.board.notes} notes</div><div class="sec"><h3>⧗ waiting on</h3>${w}</div><div class="sec"><h3>↩ recent replies</h3>${c}</div></div>`;
   }).join('');
 }

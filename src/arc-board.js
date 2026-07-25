@@ -200,6 +200,13 @@ function readSeen(board, role) {
 const legacyClaimPath = (board, role) => path.join(board.planDir, `lease-${role}.json`);
 const CLAIM_FILE_RX = /^(?:claim|lease)-(.+)\.json$/;
 const VALID_ROLE = /^[a-z][a-z0-9_-]{0,23}$/;
+// A conversation id is a UUID and nothing else. VALID_ROLE has always gated the role half of a
+// claim; this gates the OTHER half, because a convId is not merely cosmetic — it becomes a filename
+// (`<convId>.jsonl`) and a launch argument. `arc import` writes a convId an ARCHIVE declared, and
+// a Windows filename may legally contain `;` and `$(`, so an unchecked pointer is attacker-authored
+// text on a command line. Same grammar the runner already uses at arc-runner.js:475.
+const VALID_CONV = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const validConv = (id) => typeof id === 'string' && VALID_CONV.test(id);
 function readClaimFile(board, role) {
   for (const p of [claimPath(board, role), legacyClaimPath(board, role)]) {
     try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* try the next name */ }
@@ -490,7 +497,12 @@ function allNotes(board) {
     // changes — union-append preserves it, but a `git rebase` of a SHARED ledger would not. Out of
     // scope by design: .peer/ self-ignores, so the ledger never enters a rebased branch in normal
     // flow. If that ever changes, ord's monotonicity across the rewrite is not guaranteed.
-    out.push({ seq: i + 1, ord: (ord[org] = (ord[org] || 0) + 1), ...n });
+    // SPREAD FIRST — the computed fields MUST win. With `...n` last, a ledger line carrying its own
+    // "seq" (or "ord") overrode the position arc computed here, and neither is cosmetic: seq reaches
+    // the feed's HTML unescaped, and ord is what a read cursor advances on. appendNote cannot emit
+    // either (it whitelists fields), but `arc import` merges archive lines VERBATIM — so this is the
+    // door an archive came through.
+    out.push({ ...n, seq: i + 1, ord: (ord[org] = (ord[org] || 0) + 1) });
   });
   return out;
 }
@@ -1041,6 +1053,7 @@ module.exports = {
   readCursor, readCursorMap, readFloor, writeCursor, unreadFor, markRead, stampSeen, readSeen,
   boardOrigin, machineId, noteOrigin, noteKey, refKey, resolveRef, refSeq, legacyId,
   isAlive, isHolder, procStarts, roleClaim, readClaimFile, claimRole, releaseRole, liveRoles, vacantClaimForRole,
+  validConv,
   atomicWriteJson, withLock, vacantClaimForConv,
   recordBirth, readBirth, clearBirth, spawnsOf, closePeer, treeOf,
 };

@@ -2515,7 +2515,7 @@ try {
   // and trusting that would fork nothing and silently birth a cold grandchild while the context it
   // needed sat on disk unread. (The same null-state/live-bridge split the scout peer found.)
   ok('...forking the conversation of the peer that staffed it (via the bridge), so context follows the tree',
-    spawnedFork.join(' ').includes('-Resume fork-conv-9999')
+    spawnedFork.join(' ').includes("-Resume 'fork-conv-9999'")
     && spawnedFork.join(' ').includes('-Fork'));
 
   // The CLAIM was written before the id was knowable, so it carries null — and role adoption on
@@ -3288,6 +3288,34 @@ try {
     && (evil.match(/<script/gi) || []).length === 1                        // exactly ONE <script — the shell's own
     && /&lt;img src=x onerror=alert\(4\)&gt;/.test(evil));                 // the role rendered as ESCAPED text
 
+  // ...AND THE NUMERIC-LOOKING FIELDS. The probe above pinned `seq` as a NUMBER, so it proved the
+  // escaping of every STRING field and silently exempted the two that read like integers — which
+  // were, in fact, the only unescaped sinks on the surface. seq/reSeq are not this renderer's to
+  // assume: `arc import` merges archive lines verbatim, and a line may carry its own "seq".
+  const evilSeq = F.dashboardHtml({ host: 'h', at: Date.now(), version: F.VERSION,
+    repos: [{ root: 'C:/repo', name: 'r', roles: [], sessionCount: 1,
+      board: { notes: 1, lastTs: null, unread: {} },
+      waiting: [{ from: 'a', to: 'b', seq: '1<img src=x onerror=alert(6)>', id: 'x', ts: new Date().toISOString(), seen: false }],
+      cooperation: [{ from: 'a', to: 'b', seq: 2, reSeq: '1<svg/onload=alert(7)>', id: 'y', ts: new Date().toISOString(), text: 't' }] }] });
+  ok('dashboardHtml escapes seq/reSeq — a ledger-supplied note position cannot inject markup',
+    !/<img[^>]*onerror/i.test(evilSeq) && !/<svg[^>]*onload/i.test(evilSeq)
+    && /&lt;img src=x onerror=alert\(6\)&gt;/.test(evilSeq)                 // waiting[].seq escaped
+    && /&lt;svg\/onload=alert\(7\)&gt;/.test(evilSeq));                     // cooperation[].reSeq escaped
+
+  // ...and the SOURCE of that taint: a ledger line carrying its own "seq"/"ord" must not override
+  // the position arc computes. appendNote whitelists fields, but importBoard merges lines verbatim.
+  {
+    const xrepo = path.join(TMP, 'xss-seq-repo');
+    fs.mkdirSync(path.join(xrepo, '.git'), { recursive: true });
+    const xb = RMf.resolveBoard(xrepo); RMf.ensureBoard(xb);
+    fs.appendFileSync(RMf.notesPath(xb), JSON.stringify({ id: 'aabb:1', from: 'a', to: 'b', kind: 'request',
+      body: 'x', ts: new Date().toISOString(), seq: '1<img src=x onerror=alert(8)>', ord: 999 }) + '\n');
+    const got = RMf.allNotes(xb)[0];
+    ok('allNotes computes seq/ord itself — a ledger line cannot override them (XSS taint source)',
+      got.seq === 1 && got.ord === 1);
+    fs.rmSync(xrepo, { recursive: true, force: true });
+  }
+
   for (const s of [CODE, AUD]) { try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`)); } catch {} }
   try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-status-${CODE}.json`)); } catch {}
   fs.rmSync(frepo, { recursive: true, force: true });
@@ -3645,7 +3673,7 @@ try {
   // MEASURED, the combination never run until then (fork + stripped env): own sessionId on all 2589
   // entries, 6,680,047 bytes, still on disk after the pid was gone, hasTranscript() true.
   ok('a NEW peer is FORKED from the CALLER, so it opens already knowing the project',
-    /-Resume conv-abc-123\b/.test(psOf()) && /-Fork\b/.test(psOf()));
+    /-Resume 'conv-abc-123'/.test(psOf()) && /-Fork\b/.test(psOf()));
   // THE BIRTH PROMPT IS REAL PROSE, NOT A COMMAND — and that is what makes the peer revivable.
   // An /arc- command is BLOCKED at UserPromptSubmit (zero tokens, by design), so it never reaches
   // the model; every later input arrives as a hook injection or a Stop-block reason, never a user
@@ -3682,18 +3710,77 @@ try {
   const psLaunch = I.buildLaunch(true, 'veneto', null, 'frontend', 'E:/arc', 'pwsh', null,
     (t) => { tplPrompt = t; return 'C:\\Temp\\p.txt'; });
   ok('a PowerShell launch fills the SHIPPED template and passes the prompt by path, not by value',
-    /-File '[^']*arc-birth\.ps1' -Role frontend -PromptFile '/.test(psLaunch)
+    /-File '[^']*arc-birth\.ps1' -Role 'frontend' -PromptFile '/.test(psLaunch)
     && /Take the frontend role on this board now/.test(tplPrompt)
     && !psLaunch.includes('Take the frontend role'));
   ok('...and cmd keeps its own nesting, which survives there',
     /cmd \/k arc\b/.test(I.buildLaunch(true, 'veneto', null, 'frontend', 'E:/arc', 'cmd')));
+  // INJECTION LOCK: the launch line is handed to `powershell.exe -Command`, i.e. it is SCRIPT, so
+  // every value on it must be a PS literal and not a statement. `-Resume` used to go bare on the
+  // reasoning that a convId is "a safe token" — but a convId is read verbatim out of
+  // claim-<role>.json, and `arc import` writes what an ARCHIVE declared there. `;` and `$(` are
+  // legal in a Windows filename, so the archive could also ship the matching <convId>.jsonl that
+  // satisfies the revive gate. Both shapes are locked: nothing unquoted, no naked metacharacter.
+  // ASSERT INERTNESS, NOT SHAPE. The first version of this lock asserted the value APPEARED as
+  // `-Resume '<value>'` — and that passed while the value EXECUTED, because PowerShell has FIVE
+  // interchangeable single-quote delimiters (U+0027 plus U+2018/U+2019/U+201A/U+201B) and psQuote
+  // doubled only the ASCII one: a typographic quote closed the literal FROM THE INSIDE and the
+  // wrapper still looked correct (audit #489, measured with PowerShell's own tokenizer). A shape
+  // test cannot see that. So model the lexer instead — any delimiter opens, ANY delimiter closes,
+  // a doubled one escapes — and assert the payload survives as ONE literal decoding back to itself.
+  const PSQ = "'\u2018\u2019\u201A\u201B";
+  const psLiteralAfter = (s, flag) => {
+    const k = s.indexOf(flag); if (k < 0) return null;
+    const i = k + flag.length; if (!PSQ.includes(s[i])) return null;
+    let out = '';
+    for (let j = i + 1; j < s.length; j++) {
+      if (PSQ.includes(s[j])) {
+        if (s[j + 1] === s[j]) { out += s[j]; j++; continue; }   // doubled -> an escaped delimiter
+        return { value: out, end: j };                            // this one CLOSES the literal
+      }
+      out += s[j];
+    }
+    return null;                                                  // unterminated
+  };
+  const inert = (line, flag, payload) => {
+    const lit = psLiteralAfter(line, flag);
+    return !!lit && lit.value === payload && (lit.end === line.length - 1 || line[lit.end + 1] === ' ');
+  };
+  const PAYLOADS = [
+    'abc;calc.exe;$(hostname)',            // statement separator + subexpression
+    'a\nWrite-Output PWNED',               // newline vector (separator count is BLIND to this)
+    "a'; Write-Output PWNED; '",           // ASCII quote break-out
+    'a\u2019; Write-Output PWNED; \u2019', // U+2019 — the vector that defeated the first fix
+    'a\u2018b\u201Ac\u201Bd',              // the rest of the delimiter class
+  ];
+  ok('a hostile convId stays ONE INERT literal on both shapes — ASCII and TYPOGRAPHIC quotes alike',
+    PAYLOADS.every((p) =>
+      inert(I.buildLaunch(true, null, p, 'frontend', 'E:/arc', 'pwsh', null, () => 'C:/T/p.txt'), '-Resume ', p)
+      && inert(I.buildLaunch(true, null, p, 'frontend', 'E:/arc', 'cmd'), '--resume ', p)));
+  // psQuote is the load-bearing primitive, so lock IT directly: every delimiter round-trips.
+  ok('psQuote escapes the WHOLE PowerShell quote class, so no value can close its own literal',
+    PAYLOADS.concat(["'", '\u2019', "''", 'plain']).every((p) => {
+      const lit = psLiteralAfter(`X ${I.psQuote(p)}`, 'X ');
+      return !!lit && lit.value === p && lit.end === `X ${I.psQuote(p)}`.length - 1;
+    }));
+  // Shape is still worth locking — it is what routes every value THROUGH psQuote, so a new field
+  // cannot quietly go bare the way -Resume did. It is necessary, not sufficient: the inertness comes
+  // from the two assertions above.
+  {
+    const DATA_FLAGS = ['-File', '-Role', '-PromptFile', '-Account', '-Mode', '-Resume'];
+    const allQuoted = (s) => DATA_FLAGS.every((f) => !new RegExp(`${f} (?!')`).test(s));
+    const birthLine = I.buildLaunch(true, 'acct', null, 'frontend', 'E:/arc', 'pwsh', 'caller-conv', () => 'C:/T/p.txt');
+    const reviveLine = I.buildLaunch(true, 'acct', 'own-conv', 'frontend', 'E:/arc', 'pwsh', null, () => 'C:/T/p.txt');
+    ok('...and EVERY data value on the pwsh line is routed through psQuote (birth AND revive)',
+      allQuoted(birthLine) && allQuoted(reviveLine));
+  }
   // A STAFFED PEER HAS NOBODY TO ANSWER A PROMPT. Born in `manual` it stops at the first
   // permission request and sits claimed-but-deaf — holding the role so nothing else may staff it,
   // while answering nothing. The board allowlist covers arc's OWN commands only; a research peer
   // also needs Read/Grep/Edit to do the work it was staffed for, and each would stop it.
   // (Observed live: a staffed tab showing `manual mode on` while its caller ran `auto`.)
   ok('a BORN peer starts in AUTO permission mode (it has no human to answer a prompt)',
-    /-Mode auto/.test(psOf()));
+    /-Mode 'auto'/.test(psOf()));
 
   // THE ONE THAT COST A DAY. staffRole runs inside a HOOK of a live session, so its env carries
   // that session's Claude Code identity — CLAUDE_CODE_SESSION_ID (the CALLER's conversation) and
@@ -3776,7 +3863,7 @@ try {
   // and the session that staffed it were indistinguishable and reviving the right conversation by
   // hand was guesswork. (Caught live: the tab said "arc: research", the session still said "arc".)
   ok('...and the session is NAMED for its role (else the --resume picker is a list of "arc")',
-    /-Role frontend/.test(psOf()));
+    /-Role 'frontend'/.test(psOf()));
   // THE CONFIRMATION MUST DESCRIBE THE BIRTH THAT ACTUALLY HAPPENED — in BOTH directions. This
   // asserted the exact opposite ("starts FRESH ... not from your context") and went on passing for a
   // commit after birth began forking: born-not-cloned prose outliving its own behaviour, telling
@@ -3809,15 +3896,15 @@ try {
   // copy of the CALLER wearing the role's name; resume WITHOUT it and the real peer walks back in.
   RM3.ensureBoard(RM3.resolveBoard(vrepo));
   const vboard = RM3.resolveBoard(vrepo);
-  RM3.claimRole(vboard, 'ghost', DEAD_PID, 'ghost-sess', 'ghost-conv-777');   // held, then died
+  RM3.claimRole(vboard, 'ghost', DEAD_PID, 'ghost-sess', '77777777-7777-4777-8777-777777777777');   // held, then died
   ok('a vacant claim (dead pid + a convId) is what makes a closed peer revivable',
     !!RM3.vacantClaimForRole(vboard, 'ghost')
-    && RM3.vacantClaimForRole(vboard, 'ghost').convId === 'ghost-conv-777');
+    && RM3.vacantClaimForRole(vboard, 'ghost').convId === '77777777-7777-4777-8777-777777777777');
 
   const rev = I.staffRole(VS, 'ghost', { spawn: rec, hasWt: true, hasTranscript: () => true });
   ok('REVIVE: a closed peer with a live transcript resumes ITS OWN conversation, NOT the caller\'s',
     rev.ok === true && rev.revived === true
-    && /-Resume ghost-conv-777/.test(psOf()) && !/conv-abc-123/.test(psOf()));
+    && /-Resume '77777777-7777-4777-8777-777777777777'/.test(psOf()) && !/conv-abc-123/.test(psOf()));
   ok('...and CRUCIALLY without --fork-session — a fork would be a copy of ME wearing its name',
     !/--fork-session/.test(psOf()));
   ok('...and it says so, because "it is back with what it knew" is the whole point',
@@ -3827,12 +3914,12 @@ try {
   // `--resume <gone>` dies with "No conversation found" — a tab that opens only to fail.
   const gone = I.staffRole(VS, 'ghost', { spawn: rec, hasWt: true, hasTranscript: () => false });
   ok('a vacant claim whose TRANSCRIPT IS GONE is BORN fresh (never resumes into a corpse)',
-    gone.ok === true && gone.revived === false && !/ghost-conv-777/.test(psOf()));
+    gone.ok === true && gone.revived === false && !/77777777-7777-4777-8777-777777777777/.test(psOf()));
   // ...but "not the corpse" is not "no context": the two conversations are DIFFERENT ids and only
   // one of them is dead. Falling back to a cold birth here would silently punish the peer for
   // having been purged — it would come back knowing less than a peer who never existed.
   ok('...and it still forks the CALLER, so a purged peer is reborn with context, not blank',
-    /-Resume conv-abc-123/.test(psOf()) && /-Fork/.test(psOf()));
+    /-Resume 'conv-abc-123'/.test(psOf()) && /-Fork/.test(psOf()));
   RM3.releaseRole(vboard, 'ghost', DEAD_PID);
 
   // A ROLE MOVE MUST NOT BURN THE REVIVE POINTER (fired live 2026-07-18): releaseRole used to
@@ -3841,11 +3928,11 @@ try {
   // mis-adoption moved its session to another role). Now it tombstones exactly like closePeer.
   const ghostTomb = RM3.readClaimFile(vboard, 'ghost');
   ok('releaseRole leaves a TOMBSTONE, not a void — the convId survives the release',
-    !!ghostTomb && !ghostTomb.pid && ghostTomb.convId === 'ghost-conv-777');
+    !!ghostTomb && !ghostTomb.pid && ghostTomb.convId === '77777777-7777-4777-8777-777777777777');
   ok('...which still reads VACANT (a pid-less claim holds nothing)',
     RM3.roleClaim(vboard, 'ghost') === null);
   ok('...and stays findable for revive (vacantClaimForRole sees the conversation)',
-    (RM3.vacantClaimForRole(vboard, 'ghost') || {}).convId === 'ghost-conv-777');
+    (RM3.vacantClaimForRole(vboard, 'ghost') || {}).convId === '77777777-7777-4777-8777-777777777777');
   RM3.claimRole(vboard, 'bare-release', DEAD_PID, 'br-sess', null);
   RM3.releaseRole(vboard, 'bare-release', DEAD_PID);
   ok('...while releasing a claim with NO convId unlinks it (nothing to revive — the chair is bare)',
@@ -3991,7 +4078,9 @@ try {
     const FRS = 'fresh-sess-' + process.pid;
     fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${FRS}.json`),
       JSON.stringify({ pid: process.pid, cwd: frepo, convId: 'caller-conv-fresh' }));
-    RM3.claimRole(fboard, 'sleeper', DEAD_PID, 'sleeper-sess', 'sleeper-conv-1');   // held, then died
+    // a REAL conversation id: the revive path gates convId on the UUID grammar (audit #489), so a
+    // placeholder here would degrade to a cold birth and this brief would never be posted
+    RM3.claimRole(fboard, 'sleeper', DEAD_PID, 'sleeper-sess', '51ee9e12-0000-4000-8000-000000000001');
     const frec = [];
     const revd = I.staffRole(FRS, 'sleeper', {
       spawn: (cmd, args) => { frec.push({ cmd, args }); return { status: 0 }; },
@@ -4024,7 +4113,7 @@ try {
   // The account still pins: a REVIVE resumes a conversation that only exists in that profile, and
   // a birth must land in the profile whose hooks/settings the caller is already running under.
   ok('staffing PINS the caller\'s account (a revive resumes a conv that exists only there)',
-    /-Account veneto/.test(psOf()) && /-Role backend/.test(psOf()));
+    /-Account 'veneto'/.test(psOf()) && /-Role 'backend'/.test(psOf()));
   if (oldAcct === undefined) delete process.env.ARC_RUNTIME_ACCOUNT; else process.env.ARC_RUNTIME_ACCOUNT = oldAcct;
 
   // No wt: fall back to a fresh console window via `start`.
@@ -6557,6 +6646,38 @@ try {
 } catch {}
 console.log(`  directory junction: ${junctionOk ? 'OK' : 'UNSUPPORTED'}`);
 console.log(`  claude on PATH: ${has('claude', ['--version']) ? 'yes' : 'no (fine for CI)'}`);
+
+// MODEL vs INTERPRETER (audit #491 residual). The CORE injection lock models PowerShell's
+// single-quoted-literal lexer in Node — the right call for a hermetic suite, but a MODEL, and this
+// whole bug class existed because a reasonable mental model of PS quoting was incomplete. arc is
+// Windows-only, so the real parser is always to hand: ask it whether it agrees. Informational by
+// design — it must never fail the build (a missing/odd PowerShell is not a code defect), but a
+// DISAGREES line is a loud signal that the model has drifted from the thing it imitates.
+try {
+  const INV = require(path.join(SRC, 'arc-invite.js'));
+  const payloads = [
+    'abc;Write-Output PWNED;x', 'a\nWrite-Output PWNED', 'a$(Write-Output PWNED)b',
+    "a'; Write-Output PWNED; '", 'a\u2019; Write-Output PWNED; \u2019',
+    'a\u2018x\u201Ay\u201Bz', "a\u2019\u2019; Write-Output PWNED; \u2019",   // pre-doubled: the escaper-breaker
+  ];
+  const lines = payloads.map((p) => INV.buildLaunch(true, 'veneto', p, 'frontend', 'E:/arc', 'pwsh', null, () => 'C:/T/p.txt'));
+  const jf = path.join(TMP, 'probe-tok.json');
+  fs.writeFileSync(jf, JSON.stringify(lines), 'utf8');
+  const ps = `$rows = Get-Content -LiteralPath '${jf.replace(/\\/g, '\\\\')}' -Raw -Encoding UTF8 | ConvertFrom-Json
+$bad = 0
+foreach ($l in $rows) { $e = $null
+  $t = [System.Management.Automation.PSParser]::Tokenize($l, [ref]$e)
+  $sep = @($t | Where-Object { $_.Type -eq 'StatementSeparator' }).Count
+  $cmds = @($t | Where-Object { $_.Type -eq 'Command' }).Count
+  if ($sep -ne 0 -or $cmds -ne 1) { $bad++ } }
+Write-Output $bad`;
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', ps], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+  const bad = (r.stdout || '').trim();
+  console.log(`  PS lexer model vs real parser: ${
+    r.status !== 0 || bad === '' ? 'UNKNOWN (powershell unavailable — model untested here)'
+      : bad === '0' ? `AGREES (${lines.length} hostile payloads inert under [PSParser]::Tokenize)`
+      : `*** DISAGREES — ${bad}/${lines.length} payload(s) parse as executable: the CORE model has drifted ***`}`);
+} catch { console.log('  PS lexer model vs real parser: UNKNOWN (probe could not run)'); }
 
 // ---- cleanup + verdict -------------------------------------------------------
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}

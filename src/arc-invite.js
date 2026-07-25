@@ -277,7 +277,17 @@ function ensureTrusted(launchDir, opts) {
 //      ~half-second the handoff needs; the session in the tab is independent after that.
 // The '"<prompt>"' nesting is deliberate: PS strips '…' → wt/cmd sees "/arc-role X" →
 // arc.cmd %* keeps the quotes → node receives ONE argv slot. Verified end-to-end.
-const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
+// POWERSHELL HAS FIVE SINGLE-QUOTE DELIMITERS, NOT ONE. U+0027 and the typographic variants
+// U+2018/U+2019/U+201A/U+201B all open AND close a single-quoted literal, and they are
+// interchangeable: a U+2019 closes a literal that a U+0027 opened. Doubling only the ASCII one
+// therefore produced a wrapper that LOOKED right and could be closed from the INSIDE — the tail then
+// parsed as statements, i.e. the quoting was not quoting at all (audit #489, measured on the
+// shipping path with PowerShell's own tokenizer: `-Resume 'a<U+2019>; Write-Output PWNED; <U+2019>'`
+// tokenized as TWO statements). Double every delimiter in the class; PowerShell resolves each
+// doubling back to the original character, so a real value still arrives byte-identical.
+// This is not convId-specific: a Windows path may legitimately contain a typographic apostrophe.
+const PS_QUOTES = /['‘’‚‛]/g;
+const psQuote = (s) => `'${String(s).replace(PS_QUOTES, (q) => q + q)}'`;
 // `fork:false` = REVIVE: we are resuming the role's OWN conversation, so it must NOT be forked —
 // it comes back as itself, with everything it learned. `fork:true` = a NEW peer born from the
 // caller's context, which is the only sensible thing when the role has no history to return to.
@@ -369,7 +379,11 @@ function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, qu
   // caller's model. Inheritance is a CONSEQUENCE of the fork, not a second mechanism.
   // With no caller conversation to fork (a session that never persisted one), birth still works —
   // the peer is simply born cold, which is what every peer was until now.
-  const resume = conv ? ` --resume ${conv}` : (from ? ` --resume ${from} --fork-session` : '');
+  // psQuote on the ids here for the same reason the pwsh form quotes everything: this string is
+  // ALSO handed to `powershell.exe -Command` (the wt line wraps it), so a convId carrying `;` or
+  // `$(` would be script, not an argument. A real id passes through a PS single-quoted literal
+  // unchanged, so the proven cmd nesting below is untouched.
+  const resume = conv ? ` --resume ${psQuote(conv)}` : (from ? ` --resume ${psQuote(from)} --fork-session` : '');
   // THE BIRTH PROMPT IS REAL PROSE, NOT A COMMAND — and that is what makes the peer revivable.
   // A `/arc-role <role>` prompt is eaten at UserPromptSubmit (zero tokens, the point of the
   // hook), so it never reaches the model. Everything the newborn then received arrived as hook
@@ -440,10 +454,19 @@ function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, qu
     if (!conv) pairs.push(['-Mode', 'auto']);
     if (resumeId) pairs.push(['-Resume', resumeId]);
     if (!conv && from) pairs.push(['-Fork']);
-    // wt form, UNCHANGED and deliberately so: flags bare, the two PATHS quoted. This exact shape
-    // is the one proven live through powershell -> wt -> pwsh; it is not being re-derived today.
-    inner = pairs.map(([f, v]) => (v === undefined ? f
-      : `${f} ${(f === '-File' || f === '-PromptFile') ? psQuote(v) : v}`)).join(' ');
+    // wt form: flags bare, every PAIR VALUE psQuote'd. (Scope, stated honestly: `wt -w <win>` and the
+    // cmd branch's `--account` are composed elsewhere and are still bare — both are env-sourced
+    // (ARC_SPAWN_WINDOW / ARC_RUNTIME_ACCOUNT), i.e. they need env control rather than a file write,
+    // and a CORE test pins the bare `-w`. Named here so the next reader is not misled the way audit
+    // #489 caught this comment misleading them.) It used to quote only the two PATHS and pass the
+    // rest raw, on the reasoning that they were all "safe tokens". That reasoning held for -Role
+    // (VALID_ROLE gates it) and for the env-sourced -Account, and NOT for -Resume: a convId is read
+    // verbatim out of claim-<role>.json, and `arc import` writes whatever an ARCHIVE declared there.
+    // `;` and `$(` are legal in a Windows filename, so a crafted export bundle could plant a convId
+    // that this string hands to `powershell.exe -Command` as SCRIPT — arbitrary execution on the next
+    // delegate. Quoting is not a re-derivation of the launch shape: psQuote wraps a single-quoted PS
+    // literal, so a real token passes through byte-identical (quietArgs below has always done it).
+    inner = pairs.map(([f, v]) => (v === undefined ? f : `${f} ${psQuote(v)}`)).join(' ');
     // Start-Process form: EVERY element its own quoted argument. PowerShell passes an -ArgumentList
     // array to the process as-is, so nothing downstream re-splits it — which is the whole reason
     // the quiet path uses Start-Process instead of `cmd /c start` (see below).
@@ -463,6 +486,13 @@ function buildLaunch(wt, account, conv, role, root, shell, from, writeScript, qu
     // from the project folder like every other session. The role is still legible from the
     // roster and the tab's initial name; the live status icon is worth more than a pinned label.
     const prof = spawnProfile();
+    // `-w ${win}` IS BARE, AND THAT IS A CONDITION, NOT AN EXEMPTION. It is safe only because `win`
+    // comes from ARC_SPAWN_WINDOW — an env var, so an attacker who sets it already has more than this
+    // line grants. THE TRIGGER TO QUOTE IT (audit #491): the moment any value derived from BOARD DATA
+    // or a FILE — a convId, a role, an imported field — is routed into `-w`, `-p`, `--title`, `-d`, or
+    // the cmd branch's `--account`, that position must be psQuote'd in the same change. The safety
+    // here is "the SOURCE is trusted", never "the POSITION is safe". A CORE test pins the bare `-w`,
+    // so changing it is a deliberate edit, not a drive-by.
     return `wt -w ${win || '0'} new-tab${prof ? ` -p ${psQuote(prof)}` : ''} --title ${psQuote(role)} -d ${psQuote(root)} ${pre} ${inner}`;
   }
   // QUIET: Start-Process -WindowStyle HIDDEN. Not Minimized — that was WRONG, and it was wrong in
@@ -667,7 +697,15 @@ function staffRole(session, role, opts) {
   // a LEAD, not a guarantee — the conversation may have been deleted or purged — so it is only
   // trusted once the transcript is confirmed on disk. Otherwise: fork the caller.
   const vacant = R.vacantClaimForRole(board, role);
-  const revive = !!(vacant && (o.hasTranscript || hasTranscript)(vacant.convId));
+  // SHAPE BEFORE DISK — and this gate is NOT redundant with the import one. The import gate stops a
+  // hostile pointer arriving in an ARCHIVE; this one stops a hostile pointer that was written
+  // straight to .arc/peer/claim-<role>.json, which needs no import at all. That door was open on the
+  // reasoning that the sink was provably inert; it was not (audit #489 — a typographic quote broke
+  // out of psQuote), so the grammar has to hold it too: validConv is ASCII-hex-and-dashes, which
+  // excludes the whole quote class BY CONSTRUCTION rather than by escaping it correctly.
+  // A bad shape degrades to BIRTH — the same graceful fallback as a transcript that is gone, never a
+  // refusal, so a legacy claim loses its context rather than its ability to staff.
+  const revive = !!(vacant && R.validConv(vacant.convId) && (o.hasTranscript || hasTranscript)(vacant.convId));
   // BIRTH needs no conversation — the runner mints one. Only a REVIVE names one, and it names the
   // ROLE's own, never the caller's. (The old "nothing to fork" refusal died with the fork: a peer
   // no longer needs the caller to have a saved conversation in order to exist.)
@@ -1021,4 +1059,4 @@ function requestClose(session, arg, cwd, opts) {
       : `  It never persisted a conversation, so there is nothing to revive — a new delegate starts fresh.`) };
 }
 
-module.exports = { staffRole, requestDelegate, requestClose, buildLaunch, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, transcriptPath, lastTurnAt, freshnessBrief, spawnQuiet, spawnWindow, spawnProfile };
+module.exports = { staffRole, requestDelegate, requestClose, buildLaunch, psQuote, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, transcriptPath, lastTurnAt, freshnessBrief, spawnQuiet, spawnWindow, spawnProfile };

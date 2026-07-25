@@ -744,7 +744,15 @@ function importBoard(stageDir, ctx) {
     let c; try { c = JSON.parse(fs.readFileSync(path.join(peerSrc, f), 'utf8')); } catch { continue; }
     const tomb = { role: c.role || role, sessionId: c.sessionId || null, convId: c.convId || null, at: c.at || 0 };
     archClaims.set(role, tomb);
-    if (!tomb.convId || !canRevive(tomb.convId)) {
+    // SHAPE BEFORE REACHABILITY. canRevive asks "is this conversation HERE?", which a crafted
+    // archive answers for itself by shipping a matching transcript file — and a Windows filename may
+    // contain `;` and `$(`. So the convId is checked as a UUID first: it becomes a launch argument
+    // downstream, and an archive is data from someone else's machine, not a trusted caller.
+    if (!B.validConv(tomb.convId)) {
+      lines.push(`    claim ${role}: dropped — its revive pointer is not a conversation id`);
+      continue;
+    }
+    if (!canRevive(tomb.convId)) {
       lines.push(`    claim ${role}: dropped — its conversation is not reachable from this board's root (a revive pointer arc could not honour)`);
       continue;
     }
