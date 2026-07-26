@@ -79,7 +79,7 @@ test('collector preserves auditable fields and clamps significance', async () =>
     sources: [' https://example.com/docs ', 'https://example.com/docs'],
     limitations: ['Applies only to the documented version'],
     incremental: true,
-  }), keepVerdict, { escalateBar: 9 });
+  }), keepVerdict, { escalateBar: 9, now: '2026-07-25T12:00:00.000Z' });
 
   assert.equal(result.dry, false);
   assert.equal(result.roundFindings.length, 3);
@@ -87,11 +87,115 @@ test('collector preserves auditable fields and clamps significance', async () =>
   assert.deepEqual(result.roundFindings[0].sources, ['https://example.com/docs']);
   assert.deepEqual(result.roundFindings[0].evidence, ['The official documentation states the behavior']);
   assert.deepEqual(result.roundFindings[0].limitations, ['Applies only to the documented version']);
-  assert.match(result.roundFindings[0].verifiedAt, /^\d{4}-\d{2}-\d{2}T/);
+  // `new Date()` is unavailable in the Workflow sandbox, so the stamp must arrive via args.
+  assert.equal(result.roundFindings[0].verifiedAt, '2026-07-25T12:00:00.000Z');
   assert.equal(result.roundFindings[0].evidenceAudit.status, 'missing');
   assert.equal(result.escalate.length, 3);
   assert.equal(adapters.get('claude').toTrace(result), result.trace);
   assert.deepEqual(assertConformantTrace(result.trace).escalations, ['angle-1', 'angle-2', 'angle-3']);
+});
+
+// ---- regression guards for the "silent fake-dry" class of bug -------------------------
+// Lived failure: the Workflow sandbox exposes no `URL` global, the ReferenceError was
+// swallowed as "invalid source", every finding failed the support check, and the round
+// reported `dry: true` — "found nothing" — while the skeptic had approved all of them.
+// Plain Node HAS `URL` and `Date`, so the suite could never see it. These tests remove
+// those globals the way the sandbox does.
+
+async function runRoundWithoutGlobals(findingFactory, verdictFactory, args = {}) {
+  const angles = [
+    { lens: 'one', question: 'q1' },
+    { lens: 'two', question: 'q2' },
+    { lens: 'three', question: 'q3' },
+  ];
+  const agent = async (_prompt, options) => {
+    if (options.label === 'diverge') return { angles };
+    if (options.label.startsWith('investigate:')) return findingFactory(options.label);
+    if (options.label.startsWith('skeptic:')) return verdictFactory(options.label);
+    throw new Error(`unexpected agent label: ${options.label}`);
+  };
+  const pipeline = async (items, investigate, verify) => Promise.all(
+    items.map(async (item) => verify(await investigate(item), item)),
+  );
+  // shadow the sandbox-forbidden globals inside the workflow's own scope
+  const execute = new AsyncFunction(
+    'args', 'agent', 'pipeline', 'phase', 'log', 'URL', 'Date',
+    workflowSource,
+  );
+  return execute(
+    { brief: 'Test brief', direction: 'Test direction', limiter: 'Test limiter', ...args },
+    agent, pipeline, () => {}, () => {},
+    undefined, undefined,
+  );
+}
+
+test('round survives a sandbox with no URL global (the fake-dry bug)', async () => {
+  const result = await runRoundWithoutGlobals(() => ({
+    claim: 'Supported claim',
+    evidence: ['The official documentation states the behavior'],
+    sources: ['https://support.google.com/accounts/answer/114129'],
+    limitations: ['Applies only to the documented version'],
+    incremental: true,
+  }), keepVerdict, { now: '2026-07-25T12:00:00.000Z' });
+
+  // Before the fix this was dry:true / 0 findings — research silently thrown away.
+  assert.equal(result.roundFindings.length, 3, 'valid https sources must survive without a URL global');
+  assert.equal(result.dry, false);
+  assert.equal(result.drySuspect, false);
+  assert.deepEqual(result.roundFindings[0].sources, ['https://support.google.com/accounts/answer/114129']);
+});
+
+test('round does not touch Date (unavailable in the Workflow sandbox)', async () => {
+  // Would throw "Date.now() / new Date() are unavailable in workflow scripts" at runtime.
+  const result = await runRoundWithoutGlobals(() => ({
+    claim: 'Supported claim',
+    evidence: ['Documented behavior'],
+    sources: ['https://example.com/docs'],
+    limitations: ['Scoped'],
+    incremental: true,
+  }), keepVerdict, { now: '2026-07-25T12:00:00.000Z' });
+  assert.equal(result.roundFindings[0].verifiedAt, '2026-07-25T12:00:00.000Z');
+  assert.doesNotMatch(workflowSource, /new Date\(|Date\.now\(/,
+    'round.js must never call Date — the sandbox shims it to throw');
+});
+
+test('a dry round proves itself: honest dry vs harness-eaten dry', async () => {
+  // 1) Model genuinely returned junk sources -> honest drop, NOT flagged as suspect.
+  const honest = await runRound(() => ({
+    claim: 'Unsupported claim',
+    evidence: ['A model says this is evidence'],
+    sources: ['not-a-url'],
+    limitations: ['Unknown'],
+    incremental: true,
+  }), keepVerdict);
+  assert.equal(honest.dry, true);
+  assert.equal(honest.drySuspect, false, 'junk sources from the model are an honest drop');
+  assert.equal(honest.dropped.length, 3);
+  assert.match(honest.dropped[0].reasons.join(','), /local:no-valid-source-url/);
+
+  // 2) The skeptic killed everything -> honest dry, reason attributed to the skeptic.
+  const killed = await runRound(() => ({
+    claim: 'Supported claim',
+    evidence: ['Documented'],
+    sources: ['https://example.com/docs'],
+    limitations: ['Scoped'],
+    incremental: true,
+  }), () => ({ ...keepVerdict(), verdict: 'kill' }));
+  assert.equal(killed.dry, true);
+  assert.equal(killed.drySuspect, false);
+  assert.match(killed.dropped[0].reasons.join(','), /skeptic:kill/);
+
+  // 3) The contradiction: url-shaped source that still normalizes to nothing -> SUSPECT.
+  const suspect = await runRound(() => ({
+    claim: 'Supported claim',
+    evidence: ['Documented'],
+    sources: ['https://'],
+    limitations: ['Scoped'],
+    incremental: true,
+  }), keepVerdict);
+  assert.equal(suspect.dry, true);
+  assert.equal(suspect.drySuspect, true, 'url-shaped-but-unusable sources must raise drySuspect');
+  assert.match(String(suspect.note), /SUSPECT DRY/);
 });
 
 test('workflow trace preserves partial investigator and skeptic failures', async () => {

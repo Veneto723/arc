@@ -259,13 +259,22 @@ const normalizeStrings = (values, limit) => Array.from(new Set((Array.isArray(va
   .map((value) => value.trim())
   .filter(Boolean))).slice(0, limit)
 
+// The Workflow sandbox does not always expose the `URL` global. The old bare try/catch
+// swallowed that ReferenceError as "invalid URL", so EVERY source was rejected, every
+// finding failed hasAuditableSupport, and the round reported `dry: true` — "found
+// nothing" — while the skeptic had approved six findings. Probe the global once, and
+// fall back to a syntactic check rather than silently discarding real evidence.
+const HAS_URL_CTOR = typeof URL === 'function'
 const normalizeSources = (values) => normalizeStrings(values, 6).filter((value) => {
-  try {
-    const parsed = new URL(value)
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.hostname
-  } catch {
-    return false
+  if (HAS_URL_CTOR) {
+    try {
+      const parsed = new URL(value)
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.hostname
+    } catch {
+      return false
+    }
   }
+  return /^https?:\/\/[^\s/]+\.[^\s]+$/i.test(value)
 })
 
 const hasAuditableSupport = (finding) =>
@@ -378,7 +387,10 @@ const roundFindings = kept.map((r) => ({
   claimEvidence: normalizeClaimEvidence(r.finding.claimEvidence),
   evidenceAudit: buildEvidenceAudit(r.finding, r.verdict),
   repos: (r.finding.repos || []).slice(0, 8), // open-source implementations to adopt/adapt
-  verifiedAt: new Date().toISOString(),
+  // Date is unavailable in the Workflow sandbox (it would break resume determinism), so the
+  // timestamp arrives via args. This line only ever ran once `kept` was non-empty, which is
+  // why the URL bug above masked it: with kept always empty, the crash never fired.
+  verifiedAt: A.now || 'unstamped',
 }))
 
 // A finding whose SKEPTIC died is NOT a killed finding — it is an UNVERIFIED one. Silently
@@ -400,14 +412,57 @@ const escalate = roundFindings.filter((f) => f.significance >= ESCALATE_BAR)
 const roundFailed = judged.length === 0 && angles.length > 0
 const dry = judged.length > 0 && roundFindings.length === 0
 
+// ---- VERIFICATION LOOP: a dry round must PROVE why every finding was dropped ---------
+// "We found nothing" is the one output that looks identical whether the research was
+// genuinely exhausted or the harness silently ate the evidence. So it is not allowed to
+// be an assertion: name the failing gate for every dropped finding, and flag the shape
+// that means "suspect the harness, not the field".
+const dropReasons = (r) => {
+  const why = []
+  if (r.verdict.verdict !== 'keep') why.push('skeptic:kill')
+  if (!r.verdict.grounded) why.push('skeptic:not-grounded')
+  if (r.verdict.onBrief === false) why.push('skeptic:off-brief')
+  if (r.verdict.redundant) why.push('skeptic:redundant')
+  if (!hasAuditableSupport(r.finding)) {
+    const rawSources = Array.isArray(r.finding.sources) ? r.finding.sources.length : 0
+    why.push(normalizeSources(r.finding.sources).length === 0
+      ? `local:no-valid-source-url (raw sources offered: ${rawSources})`
+      : 'local:no-evidence-text')
+  }
+  return why
+}
+const keptSet = new Set(kept)
+const dropped = judged.filter((r) => !keptSet.has(r))
+  .map((r) => ({ lens: r.angle.lens, reasons: dropReasons(r) }))
+
+// The fake-dry signature is a CONTRADICTION, not merely "the local check dropped it":
+// the skeptic approved the finding, the finding offered a source that IS url-shaped,
+// and yet normalization kept none of them. A model that hands back genuine junk
+// ("not-a-url") is an honest drop and must NOT be flagged — only the impossible case is.
+const looksLikeUrl = (v) => typeof v === 'string' && /^https?:\/\//i.test(v.trim())
+const harnessDropped = judged.filter((r) => {
+  if (!(r.verdict.verdict === 'keep' && r.verdict.grounded &&
+        r.verdict.onBrief !== false && !r.verdict.redundant)) return false
+  if (hasAuditableSupport(r.finding)) return false
+  const raw = Array.isArray(r.finding.sources) ? r.finding.sources : []
+  return raw.some(looksLikeUrl) && normalizeSources(r.finding.sources).length === 0
+})
+const drySuspect = dry && harnessDropped.length === judged.length
+if (dry) log(`DRY — ${dropped.length} judged findings dropped: ${dropped.map((d) => `${d.reasons.join('+')}`).join(' | ')}`)
+if (drySuspect) log(`⚠ DRY IS SUSPECT — all ${judged.length} findings were skeptic-APPROVED and removed ONLY by the local support check. Suspect the harness (source/evidence normalization), NOT the field. Do NOT count this toward loop-until-dry; inspect dropped[] before concluding anything.`)
+
 log(`judged ${judged.length}/${angles.length} · kept ${roundFindings.length} · ${escalate.length} above bar (${ESCALATE_BAR})`
   + (failed ? ` · ${failed} FAILED (${threw} threw, ${probeDied.length} probe died, ${skepticDied.length} skeptic died)` : ''))
 if (roundFailed) log('ROUND FAILED — not one angle was evaluated (agents died: terminal API error / rate limit). This is NOT a dry round. RETRY it; do not count it toward loop-until-dry.')
 else if (failed) log(`PARTIAL — ${failed}/${angles.length} angles lost. Coverage is thin; a "dry" from this round is NOT trustworthy.`)
 
+// Match by CONTENT, not object identity: on a resumed run the cached rows are
+// re-deserialized objects, so `row.angle === angles[i]` is never true and every id list
+// (kept/unverified/escalations) came back empty — which then fails trace conformance.
 const angleIdsFor = (rows) => traceAngles
-  .filter((_angle, index) => rows.some((row) => row.angle === angles[index]))
-  .map((angle) => angle.angleId)
+  .filter((traceAngle) => rows.some((row) => row.angle &&
+    row.angle.lens === traceAngle.lens && row.angle.question === traceAngle.question))
+  .map((traceAngle) => traceAngle.angleId)
 const escalationRows = kept.filter((row) =>
   Math.max(0, Math.min(1, Number(row.verdict.significance) || 0)) >= ESCALATE_BAR)
 emitTrace('round.completed', {
@@ -427,6 +482,8 @@ return {
   escalate,
   unverified,                        // skeptic died — park in open-questions.md, never findings.md
   dry,                               // TRUE only if we judged something and kept nothing
+  dropped,                           // per-dropped-finding gate that killed it — a dry round's proof
+  drySuspect,                        // TRUE = every drop was harness-side, not research-side -> DON'T count as dry
   roundFailed,                       // TRUE if nothing was evaluated at all -> RETRY, don't conclude
   clean: failed === 0,               // only a CLEAN round's `dry` may count toward the streak
   attempted: angles.length,
@@ -436,5 +493,7 @@ return {
   failure: failed ? { threw, probeDied: probeDied.length, skepticDied: skepticDied.length } : null,
   note: roundFailed
     ? 'Every angle failed to evaluate (agents returned null — terminal API error, most often a rate limit). NOT dry. Retry this round. Do NOT count it toward loop-until-dry, and do NOT conclude the research is exhausted.'
-    : (failed ? `${failed}/${angles.length} angles were lost to agent failures — coverage is thin, so a dry signal from this round is untrustworthy.` : undefined),
+    : drySuspect
+      ? `SUSPECT DRY — all ${judged.length} findings passed the skeptic and were removed only by the local source/evidence check. That is the harness failing, not the research being exhausted. Do NOT count this toward loop-until-dry; read dropped[] and fix the pipeline first.`
+      : (failed ? `${failed}/${angles.length} angles were lost to agent failures — coverage is thin, so a dry signal from this round is untrustworthy.` : undefined),
 }

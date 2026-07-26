@@ -71,7 +71,8 @@ calls and may run only through `reference/live-smoke.md` with its explicit gate 
    |---|---|---|
    | `roundFailed: true` | **nothing was evaluated** — the agents died (usually a rate limit) | **RETRY the round.** It did not happen. Do **not** count it toward the dry streak. After 2 failed retries, escalate: *"the engine is failing, likely rate-limited"* — never conclude. |
    | `clean: false` | some angles were lost | coverage is thin. A `dry` from this round is **untrustworthy** — do not count it toward the streak. Log it in `decisions.log`. |
-   | `dry: true` (and `clean`) | it ran and honestly found nothing | count it toward the dry streak (§3). |
+   | `drySuspect: true` | it reported dry, but **every** dropped finding had passed the skeptic and was killed only by the local source/evidence check — the harness ate the evidence | **NOT a dry round.** Do **not** count it toward the streak. Read `dropped[]`, fix the pipeline, re-run. (Lived case: a missing `URL` global rejected every source, so six skeptic-approved findings vanished and the round said "found nothing".) |
+   | `dry: true` (and `clean`, and **not** `drySuspect`) | it ran and honestly found nothing | count it toward the dry streak (§3). Its proof is in `dropped[]` — each entry names the gate that killed it. |
    | `unverified[]` | a finding whose **skeptic died** | park it in `open-questions.md`. It is **not** a finding — it never entered the ledger, because nothing unskepticed ever does. |
    | `error: 'no-brief'` | the args never arrived | STOP and tell the human. Do not proceed. |
 
