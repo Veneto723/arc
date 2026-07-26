@@ -66,7 +66,12 @@ const FEED_PORT = parseInt(process.env.ARC_FEED_PORT || '8791', 10);   // next t
 // old shape for hours while `snapshot()` returned the new one correctly when called directly —
 // stop/start does not settle it, because a healthy same-version feed is left alone on purpose.
 // Change the snapshot's SHAPE, bump this in the same edit.
-const VERSION = 18;   // 18: describeTool clips loosened (desc 160 / cmd 120 / delegate 120) — full content, NOW row wraps
+// v19 = seq/reSeq are ESCAPED in the dashboard (a ledger-supplied note position could inject markup
+// into the served HTML). A SECURITY change with no snapshot-shape change — which is exactly the case
+// this counter exists for: without the bump, a feed already running at 18 would keep serving the
+// vulnerable renderer from memory forever, since a detached process never reloads its source. The
+// same lesson as v2/audit #345, re-learned by deploying the fix and finding the live feed unchanged.
+const VERSION = 19;   // 19: dashboard escapes seq/reSeq (security — must self-activate on live feeds)
 const COOP_MAX = 20;               // recent reply edges kept per board
 const FLOW_MAX = 60;               // recent ledger notes kept per board (the transcript, all kinds)
 const pidFile = (port) => path.join(CACHE_DIR, `arc-feed-${port}.json`);
