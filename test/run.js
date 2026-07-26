@@ -693,7 +693,7 @@ try {
 
     // crack the archive open: the binning must hold ON DISK, not just in the report
     const peek = fs.mkdtempSync(path.join(base, 'peek-'));
-    sync.runTar(['-xzf', tgz], { cwd: peek });
+    sync.extractArchive(tgz, peek);   // format-agnostic: the archive is brotli now
     const stage = fs.readdirSync(peek).find((d) => d.startsWith(sync.BOARD_PREFIX));
     ok('the archive holds a staged board dir', !!stage);
     const sp = (rel) => path.join(peek, stage, rel);

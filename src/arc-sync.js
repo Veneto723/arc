@@ -156,6 +156,64 @@ function runTar(args, opts = {}) {
   return r;
 }
 
+// BROTLI, NOT GZIP — measured on a real 22MB transcript: gzip -6 (what this used to ship) 39.0%,
+// gzip -9 39.0%, brotli q5 26.7%, xz -6 25.9%. Brotli q5 is a THIRD smaller than gzip AND faster
+// (0.2s vs 0.3s), so there is no trade to weigh. xz ties brotli q9 but is not arc's to depend on:
+// the xz on this box comes from Git-for-Windows, and a fresh Windows machine has only the bsdtar in
+// System32 — a compressor arc cannot guarantee at BOTH ends is a broken archive, not a smaller one.
+// Brotli ships inside Node's zlib, so it needs nothing installed anywhere.
+//
+// Run in a CHILD so the stream stays a stream: brotliCompressSync would hold the whole archive in
+// memory (a `global` export is documented as "huge"), and doExport/doImport are synchronous, so the
+// parent blocks on spawnSync while the child pipes read -> brotli -> write with bounded memory.
+// q5 on purpose: q9 buys 0.7 points for 10x the time, q11 for 100x.
+// Values by ENV, not argv: with `node -e` there is no script filename, so argv[1] is the FIRST user
+// argument — reading argv[2..] silently shifts everything by one and the child dies on an undefined
+// path. (It did, on the first run of this.) Env has no such off-by-one.
+const BROTLI_SCRIPT = `const z=require('zlib'),fs=require('fs');
+const m=process.env.ARC_BR_MODE,i=process.env.ARC_BR_IN,o=process.env.ARC_BR_OUT;
+const t=m==='c'?z.createBrotliCompress({params:{[z.constants.BROTLI_PARAM_QUALITY]:5,[z.constants.BROTLI_PARAM_LGWIN]:24}}):z.createBrotliDecompress();
+const die=(e)=>{process.stderr.write(String(e&&e.message||e));process.exit(1)};
+t.on('error',die);
+const rs=fs.createReadStream(i),ws=fs.createWriteStream(o);
+rs.on('error',die);ws.on('error',die);
+ws.on('close',()=>process.exit(0));
+rs.pipe(t).pipe(ws);`;
+function runBrotli(mode, inPath, outPath) {
+  return spawnSync(process.execPath, ['-e', BROTLI_SCRIPT], {
+    encoding: 'utf8', windowsHide: true, timeout: 900_000,
+    env: { ...process.env, ARC_BR_MODE: mode, ARC_BR_IN: inPath, ARC_BR_OUT: outPath },
+  });
+}
+// A gzip member always starts 1f 8b. Every archive arc wrote before brotli is gzip, and an operator
+// may still be handed one — so the FORMAT is sniffed from the bytes, never from the file name
+// (`--out` takes any name the human likes, and the tests pass `.tgz` to a brotli export on purpose).
+function isGzip(file) {
+  try {
+    const fd = fs.openSync(file, 'r'); const b = Buffer.alloc(2);
+    const n = fs.readSync(fd, b, 0, 2, 0); fs.closeSync(fd);
+    return n === 2 && b[0] === 0x1f && b[1] === 0x8b;
+  } catch { return false; }
+}
+// ONE opener for both formats, so no caller has to know which it is holding. Exported because a
+// caller that reaches into an archive with its own `tar -xzf` is a caller that breaks the day the
+// compression changes — which is exactly what happened to the test that cracks the archive open.
+function extractArchive(archive, destDir) {
+  if (isGzip(archive)) {
+    const r = runTar(['-xzf', archive], { cwd: destDir });
+    return r.status === 0 ? { ok: true } : { ok: false, message: `tar: ${(r.stderr || 'unknown').toString().slice(0, 200)}` };
+  }
+  const inner = path.join(destDir, '_arc-inner.tar');
+  const bz = runBrotli('d', archive, inner);
+  if (bz.status !== 0) {
+    try { fs.unlinkSync(inner); } catch {}
+    return { ok: false, message: `not a readable arc archive (neither gzip nor brotli): ${(bz.stderr || bz.error && bz.error.message || 'unknown').toString().slice(0, 160)}` };
+  }
+  const r = runTar(['-xf', '_arc-inner.tar'], { cwd: destDir });
+  try { fs.unlinkSync(inner); } catch {}
+  return r.status === 0 ? { ok: true } : { ok: false, message: `tar: ${(r.stderr || 'unknown').toString().slice(0, 200)}` };
+}
+
 // ---- --dest re-rooting (import a session so it resumes at a DIFFERENT path) ----
 // A project folder is encodeProject(launchCwd), and that launch cwd is stored on the
 // transcript's message lines — so we can recover the real source path even though the
@@ -431,8 +489,9 @@ function doExport(session, argStr) {
   };
   const manPath = path.join(PROJECTS, '.arc-manifest.json');
   const listPath = path.join(CACHE, `arc-export-list-${process.pid}.txt`);
-  const out = flags.out ? path.resolve(flags.out) : path.join(HOME, `arc-export-${stamp()}.tgz`);
+  const out = flags.out ? path.resolve(flags.out) : path.join(HOME, `arc-export-${stamp()}.tar.br`);
   const staged = [];
+  let tarTmp = null;
   try {
     fs.mkdirSync(CACHE, { recursive: true });
     // the sessions' boards ride along — staged under PROJECTS, gone again in the finally
@@ -449,13 +508,19 @@ function doExport(session, argStr) {
     fs.writeFileSync(listPath, ['.arc-manifest.json', ...rels].join('\n'));
     // --force-local: GNU tar otherwise reads a Windows `C:\...` archive path as a
     // remote host `C` ("Cannot connect to C"). This makes colons mean drive letters.
-    const r = runTar(['-czf', out, '-C', PROJECTS, '-T', listPath]);
+    // tar ARCHIVES, brotli COMPRESSES — two steps through a transient .tar rather than tar's own
+    // -z. The .tar is deleted in every path below, including failure.
+    tarTmp = out + '.tar-part';
+    const r = runTar(['-cf', tarTmp, '-C', PROJECTS, '-T', listPath]);
     if (r.status !== 0) return { ok: false, message: `export FAILED — tar: ${(r.stderr || r.error && r.error.message || 'unknown').toString().slice(0, 200)}` };
+    const bz = runBrotli('c', tarTmp, out);
+    if (bz.status !== 0) return { ok: false, message: `export FAILED — compress: ${(bz.stderr || bz.error && bz.error.message || 'unknown').toString().slice(0, 200)}` };
   } catch (e) {
     return { ok: false, message: `export FAILED — ${e.message}` };
   } finally {
     try { fs.unlinkSync(manPath); } catch {}
     try { fs.unlinkSync(listPath); } catch {}
+    if (tarTmp) { try { fs.unlinkSync(tarTmp); } catch {} }   // the transient .tar, on success AND failure
     for (const st of staged) rm(st.stage);
   }
   let archiveSize = 0; try { archiveSize = fs.statSync(out).size; } catch {}
@@ -506,8 +571,10 @@ function doImport(session, argStr) {
     // Extract via spawn cwd, NOT `-C tmp`: some tar builds reject `--force-local -C`
     // with a drive-letter path ("Cannot open: No such file"), though they accept the
     // same colon path via the process working directory.
-    const r = runTar(['-xzf', archive], { cwd: tmp });
-    if (r.status !== 0) { rm(tmp); return { ok: false, message: `import FAILED — tar: ${(r.stderr || 'unknown').toString().slice(0, 200)}` }; }
+    // FORMAT BY BYTES, NOT BY NAME (see extractArchive): exports are brotli now, but an operator may
+    // still hold a gzip .tgz this tool wrote earlier, and `--out` never constrained the extension.
+    const x = extractArchive(archive, tmp);
+    if (!x.ok) { rm(tmp); return { ok: false, message: `import FAILED — ${x.message}` }; }
   } catch (e) { rm(tmp); return { ok: false, message: `import FAILED — ${e.message}` }; }
 
   const protectedIds = liveConvIds();
@@ -1028,4 +1095,4 @@ function emptyTrash() {
   return { ok: failed === 0, count: entries.length, bytes, failed };
 }
 
-module.exports = { doExport, doImport, discover, findTranscriptFile, trashSession, listTrash, restoreSession, emptyTrash, transcriptMeta, human, currentProject, encodeProject, sniffLaunchCwd, remapCwd, underPath, copyRemappingCwd, tokenize, runTar, mergeLedgers, sessionBoards, stageBoard, importBoard, BOARD_PREFIX };
+module.exports = { doExport, doImport, discover, findTranscriptFile, trashSession, listTrash, restoreSession, emptyTrash, transcriptMeta, human, currentProject, encodeProject, sniffLaunchCwd, remapCwd, underPath, copyRemappingCwd, tokenize, runTar, extractArchive, isGzip, mergeLedgers, sessionBoards, stageBoard, importBoard, BOARD_PREFIX };
