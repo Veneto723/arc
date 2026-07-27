@@ -351,6 +351,36 @@ const LEGACY_W = 6;
 const legacyId = (pos) => `${LEGACY_ORIGIN}:${String(pos).padStart(LEGACY_W, '0')}`;
 const noteOrigin = (n) => String(n.id || `${LEGACY_ORIGIN}:`).split(':')[0];
 
+// ---- a note body is UNTRUSTED INPUT, sanitised where it is WRITTEN --------------------------------
+// The board's writers read the internet. `research` reads external repos by duty and then posts what
+// it found here, so "machine-local" is not the trust boundary it sounds like: text can travel from a
+// web page into a note body without a human ever looking at it. Delivery renders a body with
+// indentation and nothing else (arc-notes.js:1049), so anything the body contains is shown inside
+// arc's own framing — and a body is free to contain a line that looks exactly like arc's framing.
+//
+// Sanitising at WRITE time, not at render time, is deliberate: the ledger is append-only and read by
+// several surfaces (injection, `arc notes`, the feed, arc-scope), and a rule enforced at one renderer
+// is a rule the next renderer forgets. Fix the bytes once, at the only door in.
+//
+// What goes: C0/C1 control characters (a bare ESC/CR can rewrite a terminal line, and NUL truncates
+// a C string) and Unicode BIDI overrides (U+202A-202E, U+2066-2069), which can visually reorder text
+// so what a human reads is not what is stored. TAB and NEWLINE stay — they are ordinary formatting.
+// Nothing is REJECTED: a peer's report must never be lost because it quoted a hostile byte, so the
+// characters are dropped and the note still lands. (Prior art: ECC's hasUnsafeControlCharacters,
+// routed by research 2026-07-27 — arc strips where ECC refuses, because a dropped note is worse.)
+function sanitizeBody(text) {
+  let out = '';
+  for (const ch of String(text == null ? '' : text)) {
+    const c = ch.codePointAt(0);
+    if (c === 9 || c === 10) { out += ch; continue; }   // TAB / LF: ordinary formatting, kept
+    if (c <= 0x1F || (c >= 0x7F && c <= 0x9F)) continue;  // C0 controls, DEL, C1 controls
+    if (c >= 0x202A && c <= 0x202E) continue;             // bidi embeddings + overrides
+    if (c >= 0x2066 && c <= 0x2069) continue;             // bidi isolates
+    out += ch;
+  }
+  return out;
+}
+
 function appendNote(board, note) {
   ensureBoard(board);
   const rec = {
@@ -361,7 +391,7 @@ function appendNote(board, note) {
       : (Array.isArray(note.to) ? note.to.map(String) : String(note.to)),   // one role, or a specific subset (array)
     kind: normalizeKind(note.kind),
     priority: note.priority === 'high' ? 'high' : 'normal',
-    body: String(note.body || ''),
+    body: sanitizeBody(note.body),               // untrusted input — see sanitizeBody
     replyTo: resolveRef(board, note.replyTo),        // this note ANSWERS that note (a thread)
     supersedes: resolveRef(board, note.supersedes),  // this note RETRACTS/replaces that note
     refs: note.refs && typeof note.refs === 'object' ? note.refs : undefined, // {sha, files, tests}
@@ -1078,7 +1108,7 @@ function treeOf(pid) {
 module.exports = {
   PLAN_DIR, GITIGNORE_BODY,
   canonical, repoRoot, resolveBoard, ensureBoard,
-  notesPath, appendNote, allNotes, noteCount, latestSeq,
+  notesPath, appendNote, sanitizeBody, allNotes, noteCount, latestSeq,
   KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo, seenBy, requestStatus,
   readCursor, readCursorMap, readFloor, writeCursor, unreadFor, markRead, stampSeen, readSeen,
   boardOrigin, machineId, noteOrigin, noteKey, refKey, resolveRef, refSeq, legacyId,
