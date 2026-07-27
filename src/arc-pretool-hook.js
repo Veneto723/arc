@@ -107,9 +107,63 @@ function out(decision, reason, systemMessage) {
   process.stdout.write(JSON.stringify(payload));
 }
 
+// AN ARM HAS MORE THAN ONE SPELLING, and the gate only knew one of them. The check used to be
+// /^arc(\.cmd|\.exe)?\s+join\b/ — so it recognised `arc join x` and nothing else. But an agent
+// writes `node src/arc-runner.js join x` whenever `arc` is not on its PATH, and PowerShell sessions
+// write `& "$env:USERPROFILE\.local\bin\arc.cmd" join x`. Same action; unrecognised shape; waved
+// through unchecked. MEASURED on real transcripts (arc-comply): 240 arms in arc's own sessions and
+// 155 in whalephone were invisible to this gate, and 112 of those were genuinely broken — piped,
+// redirected or backgrounded. Each is a session that went silently deaf believing it was reachable,
+// which is the exact failure this gate exists to prevent. One of them was written by `code` itself.
+//
+// STILL ANCHORED AT THE START, and that is what keeps the fix safe. This gate DENIES, so a false
+// positive blocks real work — worse than the hole. The leading anchor is why a note or an echo that
+// merely QUOTES `arc join` is untouched: a mention never leads. A chained arm (`arc note …; arc
+// join …`) stays deliberately out of scope for the same reason as before — matching mid-command
+// would deny exactly the meta-notes this repo writes constantly, and the no-listener nag is its
+// backstop. Broadened by SPELLING, never by POSITION.
+//
+// arc-comply imports this so the harness measures the same population the gate polices; when they
+// were written twice they disagreed, and the divergence is what hid this defect in the first place.
+const ARM_LEAD_RX = new RegExp(
+  '^'
+  + '(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*'                      // ARC_SESSION=… env prefix
+  + '(?:&\\s*)?'                                                 // PowerShell call operator
+  + '(?:'
+  +   '(?:"[^"]*[\\\\/]arc(?:\\.cmd|\\.exe)?"'                   // "…\arc.cmd"
+  +     '|\'[^\']*[\\\\/]arc(?:\\.cmd|\\.exe)?\''                // '…/arc.cmd'
+  +     '|(?:\\S*[\\\\/])?arc(?:\\.cmd|\\.exe)?)'                // arc | …/arc.cmd
+  +   '\\s+join\\b'
+  + '|'
+  +   'node(?:\\.exe)?\\s+(?:-\\S+\\s+)*'                        // node [flags]
+  +   '(?:"[^"]*arc-runner\\.js"|\'[^\']*arc-runner\\.js\'|\\S*arc-runner\\.js)'
+  +   '\\s+join\\b'
+  + ')', 'i');
+
 function run(raw) {
   let hook = {};
-  try { hook = JSON.parse(raw || '{}'); } catch { return null; }
+  // FAIL CLOSED ON A PARTIAL PAYLOAD. This hook is a GATE — the alarm halt and the delegate stance
+  // gate are DENY rules — and stdin is read behind a 500ms watchdog, so a large payload (a long
+  // heredoc command is the realistic case) can be cut mid-JSON. The old `catch { return null }`
+  // then emitted no decision, and no decision means ALLOW: the one input shape that defeats every
+  // check below sailed through it. So a payload that ARRIVED but does not parse is refused instead.
+  //
+  // The test is deliberately "non-empty AND unparseable", NOT "the watchdog fired": complete JSON
+  // always parses, while the watchdog also fires for a payload that is whole but whose writer simply
+  // has not closed the pipe — denying on THAT would block every shell call in a slow environment,
+  // which is a far worse failure than the one being fixed. An EMPTY payload still defers, because
+  // that is "no hook input at all" (the hook run by hand, a probe), not a truncated one.
+  try { hook = JSON.parse(raw || '{}'); } catch {
+    if (String(raw || '').trim()) {
+      out('deny',
+        '[arc] the hook payload arrived INCOMPLETE, so arc could not check this command against the '
+        + 'board (the alarm halt and the delegate stance gate both read it). Refusing rather than '
+        + 'letting an unchecked command through — retry it; if it repeats, the command is likely too '
+        + 'large to reach the hook and should be moved into a script file.');
+      return 'deny-truncated-payload';
+    }
+    return null;
+  }
 
   const tool = String(hook.tool_name || '');
   if (!/^(Bash|PowerShell)$/i.test(tool)) return null;            // not a shell call — defer
@@ -139,7 +193,7 @@ function run(raw) {
   //   the char-class on raw cmd would DENY a legitimately bare arm ("arc join x\n") — the very
   //   false-success-in-reverse this guard exists to prevent (audit caught it). An INTERIOR newline
   //   (a real second command, "arc join x\nrm -rf y") survives trim and is still denied.
-  if (/^arc(?:\.cmd|\.exe)?\s+join\b/i.test(cmd.trim()) && /[;&|`$()<>\r\n]/.test(cmd.trim())) {
+  if (ARM_LEAD_RX.test(cmd.trim()) && /[;&|`$()<>\r\n]/.test(cmd.trim())) {
     out('deny',
       '[arc join] malformed arm — a decorated `arc join` never creates a wakeable listener.',
       'arc: this `arc join` carries a shell operator (& | > < ; or a redirect). The `&`/redirect makes\n'
@@ -309,7 +363,7 @@ function run(raw) {
   return 'ask';
 }
 
-module.exports = { run, RX_DELEGATE, RX_NOTE_REPLY, MAX_PEERS_AUTO, soleCommand };
+module.exports = { run, RX_DELEGATE, RX_NOTE_REPLY, MAX_PEERS_AUTO, soleCommand, ARM_LEAD_RX };
 
 if (require.main === module) {
   let raw = '';
