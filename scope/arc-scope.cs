@@ -556,8 +556,12 @@ namespace ArcScope {
       var liveR = new List<object>();
       foreach (var r in A(Get(repo, "roles"))) if (I(r, "pid") > 0) liveR.Add(r);
       if (liveR.Count > 0) {
-        detail.Children.Add(Section("NOW", liveR.Count + " live"));
-        foreach (var r in liveR) detail.Children.Add(NowRow(r));
+        // LIVE vs TOTAL, not just live: "3 live" alone cannot be read as a fraction of anything, so a
+        // board with 3 working and 5 departed chairs looked the same as one with 3 chairs total.
+        int chairs = A(Get(repo, "roster")).Count;
+        detail.Children.Add(Section("NOW", chairs > liveR.Count ? liveR.Count + " live of " + chairs + " chairs" : liveR.Count + " live"));
+        var more = Get(repo, "pendingMore");
+        foreach (var r in liveR) detail.Children.Add(NowRow(r, more != null ? I(more, S(r, "role")) : 0));
       }
 
       // NO "SESSIONS" list. The graph above already draws every session — live or closed — with its
@@ -614,7 +618,7 @@ namespace ArcScope {
 
     // One NOW row: state dot · role · what it is doing right now · how long since its last transcript write.
     // Stashes its live TextBlocks / dot in the now* registries so UpdateNow can move them each tick.
-    static UIElement NowRow(object r) {
+    static UIElement NowRow(object r, int owedHidden) {
       string role = S(r, "role"), state = S(r, "state"), doing = S(r, "doing"), lastTurn = S(r, "lastTurn");
       var stack = new StackPanel(); stack.Margin = new Thickness(2, 6, 2, 6);
       // line 1 — state dot · role (left) · how long since its last transcript write (right)
@@ -627,6 +631,14 @@ namespace ArcScope {
       var rl = new TextBlock(); rl.FontFamily = new FontFamily(MONO); rl.FontSize = 12; rl.FontWeight = FontWeights.SemiBold; rl.Foreground = Br("#CBD6E2");
       rl.Text = role; rl.VerticalAlignment = VerticalAlignment.Center;
       top.Children.Add(rl);
+      // WHAT THE FEED CAPPED. `pending` is capped per chair (PENDING_PER_ROLE), and the feed ships the
+      // remainder in `pendingMore` precisely "so capped never looks like none" — arc-scope was throwing
+      // that away, so a role owed 30 notes drew the same arrows as one owed 12. Say the hidden count.
+      if (owedHidden > 0) {
+        var ov = new TextBlock(); ov.FontFamily = new FontFamily(MONO); ov.FontSize = 10; ov.Foreground = Br(ALERT);
+        ov.Text = "  +" + owedHidden + " owed (capped)"; ov.VerticalAlignment = VerticalAlignment.Center;
+        top.Children.Add(ov);
+      }
       stack.Children.Add(top);
       // line 2 — the DOING on its own full-width line, WRAPPING so it is never cut off
       var dw = new TextBlock(); dw.FontFamily = new FontFamily(SANS); dw.FontSize = 12.5; dw.TextWrapping = TextWrapping.Wrap; dw.LineHeight = 16; dw.Margin = new Thickness(17, 3, 4, 0);
@@ -1757,9 +1769,17 @@ namespace ArcScope {
         rule.StrokeDashArray = new DoubleCollection(new double[] { 3, 4 });
         canvas.Children.Add(rule);
 
+        // NAME WHAT DID NOT FIT. The row is capped at one line, and the overflow used to just `break` —
+        // so the graph showed three cross-board peers when there were six and looked complete. That is
+        // the silent-truncation failure arc refuses elsewhere (NOTE FLOW says "60 of 359"); a caption
+        // that counts the dropped ones costs nothing and keeps the picture honest.
+        int outHidden = outside.Count - outPills.Count;
         var caption = new TextBlock();
-        caption.Text = "from another board"; caption.FontFamily = new FontFamily(MONO);
-        caption.FontSize = 9; caption.Foreground = Br(DIM);
+        caption.Text = outHidden > 0
+          ? "from another board  ·  " + outPills.Count + " of " + outside.Count + " shown, " + outHidden + " more in NOTE FLOW"
+          : "from another board";
+        caption.FontFamily = new FontFamily(MONO);
+        caption.FontSize = 9; caption.Foreground = Br(outHidden > 0 ? "#8595A6" : DIM);
         caption.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         Canvas.SetLeft(caption, 12); Canvas.SetTop(caption, outTop - 24);
         canvas.Children.Add(caption);
@@ -1834,7 +1854,11 @@ namespace ArcScope {
             <Button x:Name='MinBtn' Style='{StaticResource HdrBtn}' DockPanel.Dock='Right' Content='&#x2013;' FontSize='15' Margin='0,0,3,0'/>
             <TextBlock FontFamily='Segoe UI Variable Display, Segoe UI' FontSize='15' VerticalAlignment='Center'><Run Text='arc' FontWeight='SemiBold' Foreground='#E8EDF4'/><Run Text=' scope' Foreground='#E8EDF4'/></TextBlock>
           </DockPanel>
-          <TextBlock x:Name='Meta' FontFamily='Segoe UI' FontSize='11.5' Foreground='#9AA9BB' Margin='20,5,0,0' Text='connecting&#x2026;' TextTrimming='CharacterEllipsis'/></StackPanel>
+          <!-- Tabular figures: this line's counts (repos/sessions/waiting/unseen) change on every 1.5s
+               tick, and Segoe UI's PROPORTIONAL digits are different widths — so 1 -> 2 sessions shifted
+               everything after it sideways. NumeralAlignment=Tabular keeps the typeface and fixes the
+               digit advance, so the numbers tick in place. (arc-scope's other counts already use MONO.) -->
+          <TextBlock x:Name='Meta' FontFamily='Segoe UI' Typography.NumeralAlignment='Tabular' FontSize='11.5' Foreground='#9AA9BB' Margin='20,5,0,0' Text='connecting&#x2026;' TextTrimming='CharacterEllipsis'/></StackPanel>
         </Border>
         <ScrollViewer VerticalScrollBarVisibility='Auto' HorizontalScrollBarVisibility='Disabled' Padding='0'><StackPanel x:Name='Cards' Margin='12,11,12,14'/></ScrollViewer>
       </DockPanel>
