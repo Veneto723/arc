@@ -6,20 +6,6 @@ Parked work: worth doing, not urgent. Picked up when there is slack, not schedul
 
 ---
 
-## 1. Listener re-arm fires a false-positive "task complete" · **SMALL** · lever 1 BUILT 2026-07-27 · owner: the human (does it still happen?)
-
-**The gap (operator-observed, 2026-07-21):** a re-armed `arc join <role>` that DECLINES (a genuine listener is already alive — `arc-await.js`) exits 0, and the harness reports that as `Background command … completed (exit code 0)` — indistinguishable from a real note-wake. `arc join` returns 0 on FIVE outcomes (note landed, already-armed decline, superseded, orphaned, board-moved) and only the first delivered anything.
-
-**Root cause — found 2026-07-27, and it was NOT the probe disagreement this item assumed.** Both sites already call the *same* `waitingFor(session, {genuine:true})`, so there was no verdict to unify. The real defect was one line: `markWaiting` wrote the listener marker with a plain `fs.writeFileSync` — the **only** piece of arc state not written atomically. `writeFileSync` TRUNCATES before writing, so a reader in another process (the Stop hook's arming decision, the statusline badge) could catch the marker empty or half-written; `waitingFor`'s `JSON.parse` then throws into its `return null`, which reads as *"no listener armed"*. The hook nags while a listener is in fact live → the model complies → the fresh `arc join` reads the now-complete marker, finds a genuine listener, and declines. **Same bug class as the charter read in `arc-duty`** (a momentarily-unreadable file misread as ABSENT), fixed the same way.
-
-**Built (lever 1):** `markWaiting` now uses `arc-board`'s `atomicWriteJson` (temp + rename), so a reader sees the whole old marker or the whole new one, never a torn one. Regression-tested (rewrite stays valid JSON; no `.tmp` litter).
-
-**Still open — the residue, which is lever 2 territory:** even with the torn read gone, `arc join` still exits 0 on all five outcomes, and arc cannot change what the harness prints. If a redundant re-arm is *never launched* now, the ambiguity stops mattering; if it still fires, the remaining cause is discipline (arm ONCE — the nag is the signal, not a command).
-
-**Owner of the next move:** the human — run normally for a while and say whether the spurious "completed (exit 0)" re-arms have stopped. If they have, delete this item; if not, it is lever 2 (discipline) and not more code.
-
----
-
 ## Parked elsewhere — pointers, not entries
 
 These are live threads owned by other chairs or blocked on a call. They are **not** roadmap items; recorded here only so this file is not mistaken for the whole picture.

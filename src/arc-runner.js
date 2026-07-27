@@ -1814,6 +1814,15 @@ async function main() {
     process.stdout.write(String(r.message) + '\n');
     process.exit(r.ok ? 0 : 1);
   }
+  // `arc comply [repo] [--json]` — measure which of arc's WRITTEN rules actually held, read from the
+  // real transcripts a repo already produced. Terminal-only (no prompt form, no menu entry, like
+  // `arc status`): it is an operator measurement over finished work, not something a session does to
+  // itself mid-turn. Reads only; spawns nothing; costs no quota.
+  if (userArgs[0] === 'comply') {
+    const r = require('./arc-comply').run(userArgs.slice(1));
+    process.stdout.write(String(r.message) + '\n');
+    process.exit(r.ok ? 0 : 1);
+  }
   // NO `arc retire` TERMINAL FORM (operator's call). Retiring a role is destructive and is the
   // HUMAN's decision, so `/arc-retire` — the prompt shape they type, handled in arc-switch-hook at
   // zero tokens — is its ONLY form. A terminal twin would hand agents a shell path to it.
