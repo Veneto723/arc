@@ -39,10 +39,21 @@ const CACHE_DIR = path.join(os.homedir(), '.claude', 'cache');
 // the test: a session that crashed with a waiter running must not be deaf forever.
 const awaitFile = (session) => path.join(CACHE_DIR, `arc-await-${session}.json`);
 
+// ATOMIC, like every other piece of arc's state (arc-board's atomicWriteJson) — this was the one
+// marker still written in place, and that is ROADMAP item 3's root cause. A plain writeFileSync
+// TRUNCATES the file first, so a reader in ANOTHER process — the Stop hook's arming decision, the
+// statusline badge — can observe an EMPTY or half-written marker; waitingFor's JSON.parse then throws
+// straight into its `return null`, which reads as "no listener armed". That is the redundant re-arm:
+// the hook nags while a listener is in fact LIVE, the model complies, and the fresh `arc join` reads
+// the now-complete marker, finds a genuine listener and DECLINES — a task launched for nothing, which
+// the harness reports as "completed (exit 0)", indistinguishable from a real note-wake.
+// A rename is atomic, so a reader sees the OLD marker or the NEW one, never a torn one. Same bug
+// class as the charter read in arc-duty (a transient unreadable file misread as ABSENT), fixed the
+// same way: never let a momentary read failure be evidence that something does not exist.
 function markWaiting(session, role, pid) {
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(awaitFile(String(session)), JSON.stringify({ pid, role, at: Date.now() }));
+    R.atomicWriteJson(awaitFile(String(session)), { pid, role, at: Date.now() });
   } catch { /* a marker is an optimisation, never a requirement */ }
 }
 

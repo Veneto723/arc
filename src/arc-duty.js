@@ -103,6 +103,21 @@ function readDuty(board, role) {
   } catch { return null; }
 }
 
+// "ABSENT" and "I COULDN'T READ IT" are different facts, and only one of them may justify telling a
+// human to close a peer. readDuty collapses every failure into null, and the leak-nag read that null
+// as "charterless" — so a chartered peer whose charter merely could not be read got reported as a
+// temp worker to close. On arc's own OS that is not hypothetical: a concurrent write makes Windows
+// throw a SHARING VIOLATION (EBUSY/EPERM/EACCES) rather than return partial content, so a mature
+// standing peer REWRITING its own charter reads as charterless for exactly that instant. (The
+// stop-hook's own comment reasoned the other way — "a partial read is still truthy" — which holds on
+// POSIX and not here.) So: existence is asked with access(), which never opens the file and so cannot
+// trip the lock, and ONLY ENOENT counts as proof of absence. Every other error means DON'T KNOW, and
+// don't-know must never spend the human's trust on a destructive suggestion.
+function dutyMissing(board, role) {
+  try { fs.accessSync(dutyPath(board, role)); return false; }   // it exists — readable or not
+  catch (e) { return !!e && e.code === 'ENOENT'; }              // only ENOENT is genuinely absent
+}
+
 // Every role this repo has DECLARED, live or not. This is the half that survives a session
 // closing — and the half a fresh clone still has.
 function listDuties(board) {
@@ -170,4 +185,4 @@ function templateInstruction(role, indent) {
     + `${p}paths: <optional git globs that are yours; delete if you span the whole repo>\n`;
 }
 
-module.exports = { rolesDir, dutyPath, dutyRel, dutySummary, readDuty, listDuties, roster, template, templateInstruction, ROLES_REL };
+module.exports = { rolesDir, dutyPath, dutyRel, dutySummary, readDuty, dutyMissing, listDuties, roster, template, templateInstruction, ROLES_REL };

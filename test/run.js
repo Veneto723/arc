@@ -1837,6 +1837,29 @@ try {
   ok('...and clears its armed marker, so the next idle RE-ARMS on the new folder',
     !A9.isWaiting(MS));
 
+  // ROADMAP 3's root cause: the listener marker was the ONE piece of arc state written in place with
+  // writeFileSync, which TRUNCATES before writing. A reader in another process (the Stop hook's
+  // arming decision, the statusline badge) could catch it empty or half-written; waitingFor's
+  // JSON.parse throws into `return null`, which reads as "no listener armed" — so the hook nagged
+  // while a listener was live, the model complied, and the fresh `arc join` found the complete
+  // marker and DECLINED. That launched-for-nothing task is the false "completed (exit 0)".
+  // A rename is atomic: a reader sees the whole OLD marker or the whole NEW one, never a torn one.
+  {
+    const CACHE9 = path.join(os.homedir(), '.claude', 'cache');
+    const SESS9 = 'atomicmark-test';
+    A9.markWaiting(SESS9, 'alpha', process.pid);
+    const f9 = path.join(CACHE9, `arc-await-${SESS9}.json`);
+    const v1 = JSON.parse(fs.readFileSync(f9, 'utf8'));
+    A9.markWaiting(SESS9, 'beta', process.pid);                 // REWRITE over an existing marker
+    const v2 = JSON.parse(fs.readFileSync(f9, 'utf8'));
+    ok('the listener marker is REWRITTEN whole (role swaps cleanly, always valid JSON)',
+      v1.role === 'alpha' && v2.role === 'beta' && v2.pid === process.pid);
+    // rename-based writes must not litter: a leftover .tmp-<pid> would be swept as an unknown kind
+    const litter = fs.readdirSync(CACHE9).filter((x) => x.startsWith(`arc-await-${SESS9}.json.tmp`));
+    ok('...atomically, via rename — no .tmp litter left in the cache', litter.length === 0, litter.join(', '));
+    try { fs.unlinkSync(f9); } catch {}
+  }
+
   fs.rmSync(mrepo, { recursive: true, force: true });
   try { fs.rmSync(mb.planDir + '-moved', { recursive: true, force: true }); } catch {}
   try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${MS}.json`)); } catch {}
@@ -6613,6 +6636,27 @@ try {
   ok('once the charterless spawn EARNS a charter, the nag stops — it is now a teammate, not a leak',
     !fire({ hook_event_name: 'Stop', cwd: sboard }).decision
     || !/arc close helper/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+
+  // UNREADABLE IS NOT ABSENT. The nag used to key on `!readDuty`, which is null for BOTH "no charter"
+  // and "the charter could not be read" — and on Windows a peer rewriting its OWN charter makes the
+  // read throw a sharing violation, so a mature standing peer read as a leak for exactly that
+  // instant and the human was told to close it. Simulated by making the read fail while the file
+  // still EXISTS (a directory at the charter path: readFileSync throws EISDIR, access() succeeds) —
+  // the same shape as a locked file, without depending on OS locking in a hermetic test.
+  {
+    const D3 = require(path.join(SRC, 'arc-duty.js'));
+    const b3 = RM.resolveBoard(sboard);
+    const hp = path.join(sboard, '.arc', 'roles', 'helper.md');
+    fs.rmSync(hp, { force: true }); fs.mkdirSync(hp, { recursive: true });   // exists, but unreadable
+    ok('an UNREADABLE charter is not reported as absent (only ENOENT is proof of absence)',
+      D3.readDuty(b3, 'helper') === null && D3.dutyMissing(b3, 'helper') === false);
+    cycle();
+    ok('...so the leak-nag never tells the human to close a peer whose charter it merely could not read',
+      !/arc close helper/.test(fire({ hook_event_name: 'Stop', cwd: sboard }).reason || ''));
+    fs.rmSync(hp, { recursive: true, force: true });
+    ok('...while a genuinely MISSING charter still reads as missing (the nag keeps working)',
+      D3.dutyMissing(b3, 'helper') === true);
+  }
 
   fs.rmSync(sboard, { recursive: true, force: true });
 } catch (e) { ok('arc-stop-hook works', false, e.message + '\n' + (e.stack || '')); }

@@ -261,9 +261,16 @@ function run(raw) {
       // seconds BEFORE it writes its charter (the birth instruction says to write it on the first
       // turn). In that window it reads live + idle + charterless and would be wrongly nagged as a
       // leak — the same false positive the human caught, narrower. So a spawn younger than the grace
-      // is never nagged; after it, a still-charterless spawn is a genuine temp worker. (A charter
-      // being WRITTEN over an existing file is already safe — a partial read is still truthy.)
-      const leaks = idle.filter((b) => !D.readDuty(board, b.role) && (Date.now() - (b.at || 0)) > BIRTH_GRACE_MS);
+      // is never nagged; after it, a still-charterless spawn is a genuine temp worker.
+      //
+      // dutyMissing, NOT !readDuty: this line is about to tell a human to CLOSE something, and
+      // `!readDuty` was true for "no charter" AND for "the charter could not be read". The comment
+      // that used to sit here claimed a concurrent write was safe because "a partial read is still
+      // truthy" — true on POSIX, FALSE on Windows, where a peer rewriting its own charter makes the
+      // read THROW a sharing violation. So a chartered, standing peer read as a leak for exactly the
+      // instant it updated its charter. dutyMissing asks only ENOENT, and any other uncertainty
+      // keeps the peer off this list — a wrong destructive suggestion costs more than a missed nag.
+      const leaks = idle.filter((b) => D.dutyMissing(board, b.role) && (Date.now() - (b.at || 0)) > BIRTH_GRACE_MS);
       if (leaks.length) {
         const list = leaks.map((b) => `  arc close ${b.role}`).join('\n');
         out({
