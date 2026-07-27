@@ -209,7 +209,10 @@ function releaseConv(convId) {
 // itself capable of going red before it reports.
 // retirepending is keyed by BOARD+ROLE, not by session — so it is deliberately NOT on the companion
 // LIFE rule below; it expires in 2 minutes of its own accord and the day-old floor is its backstop.
-const SWEEP_RX = /^arc-(state|active|effort|turn|convlock|rmpending|delpending|retirepending|win|role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-.*\.json$/;
+// `compacting` is session-keyed, but it is NOT on the companion LIFE rule below on purpose: it is a
+// short-lived bracket cleared by PostCompact, and its own 15-min staleness window already stops it
+// masking a real failure. The day-old floor is the backstop for a crash mid-compaction.
+const SWEEP_RX = /^arc-(state|active|effort|turn|convlock|rmpending|delpending|retirepending|compacting|win|role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-.*\.json$/;
 // A TRIGGER is a blocked /arc- command's message to one specific session's poll loop (arc-<action>-<session>
 // .trigger). It is consumed on the next poll — unless that session dies first, and then it sits
 // there forever. One was found from a session dead for days. Session-keyed, so the same liveness

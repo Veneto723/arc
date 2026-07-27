@@ -163,6 +163,13 @@ function coreHookEntries(scriptsDir) {
     ['Stop', 'arc-notify.js', 'done'],
     ['StopFailure', 'arc-notify.js', 'fail'],
     ['Notification', 'arc-notify.js', 'wait'],
+    // COMPACTION IS NOT A FAILURE. StopFailure is documented not to fire for a compaction, and on
+    // this machine it does — a session that was merely compacting toasted "stopped on an error"
+    // twice, with no error in it, and resumed by itself. These two bracket the pause so arc-notify
+    // can tell them apart; they never toast. A NEW hook EVENT only reaches a session via install.ps1
+    // (a session snapshots its hook REGISTRATIONS at start), so this needs a deploy, not a copy.
+    ['PreCompact', 'arc-notify.js', 'compacting'],
+    ['PostCompact', 'arc-notify.js', 'compacted'],
     ['TaskCreated', 'arc-done.js', ''],
     ['TaskCompleted', 'arc-done.js', ''],
   ];

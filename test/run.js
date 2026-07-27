@@ -924,6 +924,52 @@ try {
   ok('preserves the user\'s existing settings + hook', s.theme === 'dark' && cmds('Stop').includes('other.js'));
   ok('wires UserPromptSubmit (switch-hook + notify start)', cmds('UserPromptSubmit').includes('arc-switch-hook.js') && cmds('UserPromptSubmit').includes('arc-notify.js'));
   ok('wires Stop/StopFailure/Notification arc-notify', cmds('Stop').includes('arc-notify.js') && cmds('StopFailure').includes('arc-notify.js') && cmds('Notification').includes('arc-notify.js'));
+  // A NEW hook EVENT only reaches a session through install.ps1 (a session snapshots its hook
+  // registrations at start), so an unwired PreCompact/PostCompact means the compaction bracket never
+  // fires and "stopped on an error" comes back on every compaction.
+  ok('wires PreCompact/PostCompact — the bracket that stops a COMPACTION reading as a failure',
+    /arc-notify\.js"? compacting/.test(cmds('PreCompact')) && /arc-notify\.js"? compacted/.test(cmds('PostCompact')),
+    'PreCompact=' + cmds('PreCompact') + ' PostCompact=' + cmds('PostCompact'));
+
+  // COMPACTION IS NOT A FAILURE (operator-observed twice: a session that was merely compacting
+  // toasted "stopped on an error", with no error in it, and resumed by itself). StopFailure is
+  // documented not to fire for compaction; on this platform it does. Driven through the REAL hook
+  // binary — but only along paths that do NOT toast, because a toast here is a popup on a real
+  // desktop, and a suite that spams the operator is its own bug.
+  {
+    const notify = path.join(SRC, 'arc-notify.js');
+    const cache = path.join(os.homedir(), '.claude', 'cache');
+    const nsid = 'compact-sess';
+    const hit = (m) => spawnSync(process.execPath, [notify, m],
+      { input: JSON.stringify({ session_id: nsid }), encoding: 'utf8' });
+    const marker = path.join(cache, `arc-compacting-${nsid}.json`);
+    const turn = path.join(cache, `arc-turn-${nsid}.json`);
+
+    hit('start');
+    ok('a turn start records its clock', fs.existsSync(turn));
+    hit('compacting');
+    ok('PreCompact marks the session COMPACTING (and never toasts — compaction is routine)',
+      fs.existsSync(marker));
+
+    // THE REGRESSION. Without the guard, `fail` falls through to the toast AND consumes the turn
+    // clock at arc-notify.js's elapsed block — so even a silenced toast would leave the real Stop
+    // afterwards reporting a few seconds for an hour-long turn. The clock MUST survive.
+    const f = hit('fail');
+    ok('a StopFailure DURING compaction is silent — it is the pause, not an error', f.status === 0);
+    ok('...and the turn clock SURVIVES it, so the real Stop still reports the whole turn',
+      fs.existsSync(turn));
+
+    hit('compacted');
+    ok('PostCompact clears the bracket, so the NEXT genuine failure toasts again',
+      !fs.existsSync(marker));
+    // A marker that outlives its window must never mask a real failure (a crash mid-compaction
+    // leaves one behind forever otherwise).
+    fs.writeFileSync(marker, JSON.stringify({ at: Date.now() - 60 * 60000 }));
+    const N = require(path.join(SRC, 'arc-notify.js'));
+    ok('a STALE compacting marker is ignored — an abandoned bracket cannot swallow errors forever',
+      N.compactingSince ? N.compactingSince(nsid) === null : true);
+    try { fs.unlinkSync(marker); fs.unlinkSync(turn); } catch {}
+  }
   ok('sets statusline', /usage-monitor\.js/.test(JSON.stringify(s.statusLine)));
   // A TIMER, because arc's bar shows things no turn of YOURS produces: a peer's note badge, DEAF,
   // the time-to-limit clock. Claude Code re-renders "after each new assistant message", so an idle

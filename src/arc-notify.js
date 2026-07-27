@@ -8,6 +8,8 @@
 //   Notification     -> `arc-notify.js wait`   (permission prompt / idle — the session
 //                        is WAITING for you mid-turn; Stop never fired, so without
 //                        this it looks "done but silent")
+//   PreCompact       -> `arc-notify.js compacting`  (a compaction is STARTING)
+//   PostCompact      -> `arc-notify.js compacted`   (…and has finished)
 // All receive the hook JSON on stdin ({ session_id, cwd, ... }). Always exit 0.
 //
 // The /rename name isn't in the hook input, but Claude Code writes it (plus the
@@ -26,6 +28,28 @@ const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 const MIN_MS = process.env.ARC_NOTIFY_MIN_MS != null ? parseInt(process.env.ARC_NOTIFY_MIN_MS, 10) || 0 : 30_000;
 
 function turnFile(sid) { return path.join(CACHE_DIR, `arc-turn-${sid}.json`); }
+
+// ---- COMPACTION IS NOT A FAILURE ---------------------------------------------------------------
+// Observed live (operator, twice): a session that was merely COMPACTING popped "stopped on an
+// error", with no error anywhere in that session — it resumed by itself the moment compaction
+// finished. StopFailure is documented not to fire for compaction; on this machine it does, and a
+// toast that cries error while nothing is wrong is worse than no toast, because it trains the
+// operator to ignore the one signal that means "go look".
+// So: PreCompact drops a marker, PostCompact clears it, and a 'fail' arriving while that marker is
+// fresh is treated as the compaction pause it is — silent, and the turn timer is LEFT RUNNING so the
+// real Stop afterwards still reports the whole turn (same reasoning as the background-work skip).
+// The window is a backstop only, for the PostCompact that never arrives (a crash mid-compaction):
+// after it, a genuine failure toasts again rather than being swallowed forever.
+const COMPACT_WINDOW_MS = 15 * 60_000;
+function compactFile(sid) { return path.join(CACHE_DIR, `arc-compacting-${sid}.json`); }
+function compactingSince(sid) {
+  if (!sid) return null;
+  try {
+    const at = JSON.parse(fs.readFileSync(compactFile(sid), 'utf8')).at;
+    if (!at || Date.now() - at > COMPACT_WINDOW_MS) return null;   // stale marker: do not mask a real failure
+    return at;
+  } catch { return null; }
+}
 
 // One-line decision trace per 'done' — answers "why didn't a toast fire?" after
 // the fact. Kept tiny: truncated whenever it grows past ~64KB.
@@ -188,6 +212,19 @@ function run(raw) {
     process.exit(0);
   }
 
+  // PreCompact / PostCompact — bracket the compaction pause so a StopFailure landing inside it is
+  // not read as an error (see COMPACT_WINDOW_MS). Never toast: compaction is routine, not an event.
+  if (mode === 'compacting') {
+    if (sid) { try { fs.mkdirSync(CACHE_DIR, { recursive: true }); fs.writeFileSync(compactFile(sid), JSON.stringify({ at: Date.now() })); } catch {} }
+    trace(`compacting sid=${sid.slice(0, 8)} — a 'fail' during this is the pause, not an error`);
+    process.exit(0);
+  }
+  if (mode === 'compacted') {
+    if (sid) { try { fs.unlinkSync(compactFile(sid)); } catch {} }
+    trace(`compacted sid=${sid.slice(0, 8)}`);
+    process.exit(0);
+  }
+
   // 'wait': the session stopped mid-turn to ask YOU something (permission prompt)
   // or has sat idle >=60s. Stop won't fire here, so toast immediately — but only
   // for real attention asks, not routine notices.
@@ -212,6 +249,18 @@ function run(raw) {
   if (mode === 'done' && turnLaunchedBackgroundWork(hook.transcript_path)) {
     trace(`skip-bg sid=${sid.slice(0, 8)} handed off to background work — no toast`);
     process.exit(0);
+  }
+
+  // A 'fail' that lands DURING a compaction is the compaction pause, not an error — stay silent and
+  // leave the turn timer running, so the truthful Stop afterwards still reports the whole turn.
+  // Checked BEFORE the timer is consumed below, which is the whole point: swallowing the toast but
+  // eating the start time would make the real completion report a few seconds instead of an hour.
+  if (mode === 'fail') {
+    const cAt = compactingSince(sid);
+    if (cAt != null) {
+      trace(`fail-skip sid=${sid.slice(0, 8)} COMPACTING for ${fmtDur(Date.now() - cAt)} — not an error, turn timer kept`);
+      process.exit(0);
+    }
   }
 
   // 'done' (normal Stop) or 'fail' (StopFailure — turn died on an error).
@@ -259,4 +308,4 @@ if (require.main === module) {
   setTimeout(() => run(''), 500).unref(); // safety net if stdin never closes
 }
 
-module.exports = { toast, turnLaunchedBackgroundWork };
+module.exports = { toast, turnLaunchedBackgroundWork, compactingSince };
