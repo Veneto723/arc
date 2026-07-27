@@ -1,12 +1,8 @@
 # arc
 
-<p align="center">
-  <a href="https://github.com/Veneto723/arc/blob/main/docs/arc-promo.mp4">
-    <img src="docs/arc-promo-poster.png" width="880" alt="arc — the Agent Runtime Coordinator · click to play the 34-second launch film">
-  </a>
-</p>
+https://github.com/user-attachments/assets/6d38310d-c2c1-4e86-937b-572666a16014
 
-<p align="center"><em>the Agent Runtime Coordinator — <a href="https://github.com/Veneto723/arc/blob/main/docs/arc-promo.mp4">▶ play the 34-second launch film</a> (sound on)</em></p>
+<p align="center"><em>the Agent Runtime Coordinator — the 34-second launch film (sound on). Not playing? <a href="https://github.com/Veneto723/arc/blob/main/docs/arc-promo.mp4">watch it here</a>.</em></p>
 
 **A Claude-first, native-stdio wrapper for [Claude Code](https://claude.com/claude-code). Windows.**
 Three things the built-in CLI can't do:
