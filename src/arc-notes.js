@@ -342,8 +342,28 @@ function requestRole(session, arg, cwd) {
   // peer deciding whether a job is yours) reads it, including long after you are gone.
   const D = require('./arc-duty');
   const mineDuty = D.readDuty(board, role);
+  // INLINE THE CHARTER — do not tell the agent to go and read it.
+  // This block used to end with "Read it; it is yours now" and a path. That asks for a round-trip to
+  // fetch text arc already had open (it printed the summary from it), and — measured on this repo —
+  // a REFERENCED file is opened only ~60% of the time. So ~4 in 10 sessions adopted a role whose
+  // charter they never read, which is the one document that says what the chair owns and refuses.
+  // It also contradicted arc's own rule, written in this very charter: anything auto-firing is inline
+  // by design, because an agent will not go and read a reference file it never knew it needed.
+  // BOUNDED, because this rides an injection that is clipped: a charter is normally 1-4 KB, but it is
+  // operator-written prose and nothing stops it growing. Past the cap, fall back to the pointer —
+  // a truncated charter would be worse than a link, since the half that got cut is the half that
+  // would have been obeyed. The path is printed either way so it can always be opened by hand.
+  const CHARTER_INLINE_MAX = 4000;
+  // Normalise CRLF first: the indent below is inserted after every \n, so on a CRLF charter the
+  // stray \r lands mid-line and the injected block renders with carriage-return artifacts.
+  const charterText = String((mineDuty && mineDuty.text) || '').replace(/\r\n?/g, '\n').trim();
+  const inlineCharter = charterText && charterText.length <= CHARTER_INLINE_MAX
+    ? `        ← this role's charter (${mineDuty.path}) — already declared; it is yours now. ADOPT it,\n`
+      + `          do not rewrite it. Reproduced in full here so you need not go and fetch it:\n\n`
+      + charterText.replace(/^/gm, '          ') + '\n\n'
+    : `        ← this role's charter, already declared: ${mineDuty && mineDuty.path}. Read it; it is yours now.\n`;
   const dutyLine = mineDuty
-    ? `  duty: ${mineDuty.summary || '(declared)'}\n        ← this role's charter, already declared: ${mineDuty.path}. Read it; it is yours now.\n`
+    ? `  duty: ${mineDuty.summary || '(declared)'}\n` + inlineCharter
     : `  duty: NOT DECLARED. You are the first "${role}" here — say what it owns, in ${D.dutyRel(role)}:\n`
       + D.templateInstruction(role, '        ')
       + `        (Peers read the owns: line to route work to you, and it outlives this session — it is\n`

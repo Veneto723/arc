@@ -1325,6 +1325,34 @@ try {
   ok('the field guide is injected into the role-claim context (peers see it when they join)',
     /field guide — lessons peers left here/.test(claim.message) && /ToFileTimeUtc/.test(claim.message), claim.message);
 
+  // ---- the charter arrives INLINE, not as a pointer -------------------------------------------
+  // It used to say "Read it; it is yours now" and give a path — a round-trip to fetch text arc had
+  // already opened, and one a referenced file only wins ~60% of the time. A charter nobody read is
+  // the one document that says what the chair owns and refuses, so 4 in 10 claims adopted a role
+  // blind. arc's own rule (in this very charter) says anything auto-firing is inline BY DESIGN.
+  {
+    const D2 = require(path.join(SRC, 'arc-duty.js'));
+    const NB = require(path.join(SRC, 'arc-notes.js'));
+    fs.mkdirSync(D2.rolesDir(board), { recursive: true });
+    const body = '# android\n\nowns: the phone app\nnot me: backend schemas\n\nA LINE ONLY THE FILE HAS.\n';
+    fs.writeFileSync(D2.dutyPath(board, 'android'), body);
+    const c2 = NB.requestRole(S, 'android', repo);
+    ok('a claimed role receives its charter IN FULL, inline — no "go read this file" round-trip',
+      /A LINE ONLY THE FILE HAS\./.test(c2.message) && !/Read it; it is yours now/.test(c2.message), c2.message.slice(0, 400));
+    ok('...and still names the path, so it can always be opened by hand',
+      /roles[\\/]android\.md/.test(c2.message));
+
+    // BOUNDED. This rides a clipped injection, and a charter is operator-written prose that nothing
+    // stops growing. Past the cap it must fall back to the POINTER — half a charter is worse than a
+    // link, because the half that got cut is the half that would have been obeyed.
+    fs.writeFileSync(D2.dutyPath(board, 'android'),
+      '# android\n\nowns: the phone app\n\n' + 'x'.repeat(5000) + '\nTAIL-OF-A-HUGE-CHARTER\n');
+    const c3 = NB.requestRole(S, 'android', repo);
+    ok('an oversized charter falls back to the pointer rather than shipping a TRUNCATED one',
+      !/TAIL-OF-A-HUGE-CHARTER/.test(c3.message) && /Read it; it is yours now/.test(c3.message));
+    fs.writeFileSync(D2.dutyPath(board, 'android'), body);   // restore for later assertions
+  }
+
   // export STAGES the guide (so it travels), and import UNION-MERGES it (append-only — neither machine
   // loses a lesson). stageBoard writes into ~/.claude/projects (the throwaway HOME), returns counts.
   const SY = require(path.join(SRC, 'arc-sync.js'));
