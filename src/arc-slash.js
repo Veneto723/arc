@@ -22,7 +22,7 @@
 //     CONVERSATION delete. They route to remove-account.
 //   - `notes` MUST precede `note` (a plain alternation would try `note` first and only
 //     backtrack; being explicit costs nothing and documents the intent).
-const VERBS = 'switch|restart|delegate|mode|stance|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|alarm|role|join|help|arc';
+const VERBS = 'switch|restart|delegate|mode|stance|add-account|add|remove-account|rm-account|remove|delete-account|del-account|rename|export|import|delete|peek|usage|trash|restore|notes|note|alarm|role|join|retire|help|arc';
 
 // STRIP-ONLY (retired 2026-07-18): the dead `arc:<verb>` prompt shape, with its old
 // tolerances (leading /!, whitespace). Its one consumer is stripConvArgs, which DELETES
@@ -99,6 +99,12 @@ function slashArgOk(verb, arg) {
   // attempt, not prose). Only an arg that cannot possibly be the argument — a
   // sentence after a one-token verb — is prose.
   if (v === 'role' || v === 'join') return tokens.length === 1 && ROLE_SHAPE.test(a);
+  // retire takes ONE role name, optionally followed by the confirm word. "please retire the old role"
+  // is prose and must reach the model, not dispatch a destructive verb on the word "please".
+  if (v === 'retire') {
+    return ROLE_SHAPE.test(tokens[0] || '')
+      && (tokens.length === 1 || (tokens.length === 2 && CONFIRM_ARG_RX.test(tokens[1])));
+  }
   if (v === 'mode' || v === 'stance' || v === 'switch') return tokens.length === 1;
   if (v === 'rename') return tokens.length <= 2;
   return true;
@@ -110,6 +116,7 @@ const MENU = [
   { verb: 'note',           hint: '<role|all> <text>',               fallback: 'run',      desc: 'Leave a sticky note for a peer; "all" broadcasts to the board' },
   { verb: 'alarm',          hint: '<msg> | --clear',                 fallback: 'run',      desc: 'Raise a board-wide fire alarm — every peer stops at its next tool call; --clear clears it' },
   { verb: 'peek',           hint: '',                                fallback: 'run',      desc: 'Show usage of every account and where a launch would land' },
+  { verb: 'retire',         hint: '<role> [confirm]',                fallback: 'sentinel', desc: 'Retire a FINISHED role — deletes its chair, cursor and charter (asks, then "confirm"; notes stay)' },
   { verb: 'switch',         hint: '[account]',                       fallback: 'sentinel', desc: 'Switch account, keeping this conversation (bare opens the picker)' },
   { verb: 'restart',        hint: '',                                fallback: 'sentinel', desc: 'Reload the arc wrapper and relaunch this conversation, same account' },
   { verb: 'mode',           hint: '[passive|balanced|active]',       fallback: 'sentinel', desc: 'Set agent initiative — passive, balanced, or active (bare opens dial)' },

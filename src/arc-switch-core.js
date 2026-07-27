@@ -1071,4 +1071,4 @@ function requestTrash(session, argStr) {
   return { ok: true, plain: true, message: lines.join('\n') };
 }
 
-module.exports = { scopedLimits, sevGlyph, requestSwitch, requestRestart, requestPicker, requestModePicker, requestAddAccount, requestRemoveAccount, requestRename, doRename, requestDelete, requestTrash, currentAccount, buildPeek, chooseLaunchAccount, accountHeadroom, oauthUsageSlice, refreshUsageNow, usageCacheFresh, readUsageCache, addApiAccountResolved, readAddKey, nextClaudexPort, gatewayTranslatesMessages, probeGatewayGptModels, CACHE_DIR };
+module.exports = { scopedLimits, sevGlyph, requestSwitch, requestRestart, requestPicker, requestModePicker, requestAddAccount, requestRemoveAccount, requestRename, doRename, requestDelete, requestTrash, currentAccount, buildPeek, chooseLaunchAccount, accountHeadroom, oauthUsageSlice, refreshUsageNow, usageCacheFresh, readUsageCache, addApiAccountResolved, readAddKey, nextClaudexPort, gatewayTranslatesMessages, probeGatewayGptModels, CACHE_DIR, CONFIRM_WORDS };

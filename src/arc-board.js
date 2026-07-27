@@ -919,6 +919,36 @@ function readBirth(board, role) {
 function clearBirth(board, role) {
   try { fs.unlinkSync(birthPath(board, role)); } catch {}
 }
+
+// ---- retire: the OTHER end of the role lifecycle ----------------------------------------------
+// `close` stops a peer but deliberately KEEPS everything that makes it revivable — the claim (which
+// holds the convId pointer), its cursor, seen stamps, birth record and charter. That is right for a
+// standing duty that is merely idle, and wrong for a role that is FINISHED: nothing ever left the
+// roster, so a done role kept a chair on the graph and a cursor on the ledger forever, and the only
+// way out was hand-deleting board files — the exact thing arc tells agents never to do.
+//
+// THE LEDGER IS NEVER TOUCHED. notes.jsonl is append-only history, and every other role's cursor is
+// a POSITION in it — deleting a retired role's lines silently shifts every other reader's `ord`
+// (measured on this board). What a role SAID stays said; what it OWNS is what goes.
+function roleArtifacts(board, role) {
+  const r = String(role).toLowerCase();
+  const out = [];
+  const add = (p, what) => { try { if (p && fs.existsSync(p)) out.push({ path: p, what }); } catch {} };
+  add(claimPath(board, r), 'the chair — and its convId, the revive pointer');
+  add(legacyClaimPath(board, r), 'legacy lease file');
+  add(cursorPath(board, r), 'read cursor — how far it had read');
+  add(seenPath(board, r), 'seen stamps');
+  add(birthPath(board, r), 'birth record — who spawned it');
+  try { add(require('./arc-duty').dutyPath(board, r), 'its charter — what the role OWNS'); } catch {}
+  return out;
+}
+function retireRole(board, role) {
+  const removed = [], failed = [];
+  for (const a of roleArtifacts(board, role)) {
+    try { fs.unlinkSync(a.path); removed.push(a); } catch (e) { failed.push({ path: a.path, err: e.message }); }
+  }
+  return { role: String(role).toLowerCase(), removed, failed };
+}
 // Every role THIS conversation spawned, live or not. Keyed by conv so it survives your own respawn.
 function spawnsOf(board, conv) {
   if (!conv) return [];
@@ -1056,4 +1086,5 @@ module.exports = {
   validConv,
   atomicWriteJson, withLock, vacantClaimForConv,
   recordBirth, readBirth, clearBirth, spawnsOf, closePeer, treeOf,
+  roleArtifacts, retireRole,
 };

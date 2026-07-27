@@ -2091,6 +2091,69 @@ try {
       bare2.ok === true && /nothing to revive/.test(bare2.message) && !/back AS ITSELF/.test(bare2.message));
   }
 
+  // ---- arc retire <role>: the OTHER end of the lifecycle -----------------------------------
+  // close KEEPS everything that makes a role revivable, which is right for an idle standing duty and
+  // wrong for a FINISHED one — nothing ever left the roster, so a done role held a chair on the graph
+  // and a cursor on the ledger forever, and the only way out was hand-deleting board files (the exact
+  // thing arc tells agents never to do). Retire deletes the role's OWN files and NOTHING else.
+  {
+    const rrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'retire-'));
+    fs.mkdirSync(path.join(rrepo, '.git'), { recursive: true });
+    const RB = RM7.resolveBoard(rrepo); RM7.ensureBoard(RB);
+    const DUT = require(path.join(SRC, 'arc-duty.js'));
+    // a role with the FULL set of artifacts: chair, cursor, seen stamps, birth record, charter
+    RM7.appendNote(RB, { from: 'code', to: 'oldhand', kind: 'request', body: 'a question for oldhand' });
+    RM7.claimRole(RB, 'oldhand', DEAD_PID, 'old-sess', 'old-conv');
+    RM7.markRead(RB, 'oldhand'); RM7.stampSeen(RB, 'oldhand', 'deadbeef');
+    RM7.recordBirth(RB, 'oldhand', 'dc');
+    fs.mkdirSync(DUT.rolesDir(RB), { recursive: true });
+    fs.writeFileSync(DUT.dutyPath(RB, 'oldhand'), '**Owns:** the old thing\n');
+    const before = RM7.roleArtifacts(RB, 'oldhand').map((a) => path.basename(a.path)).sort().join();
+    ok('a role owns five kinds of file — chair, cursor, seen, birth, charter',
+      before === 'born-oldhand.json,claim-oldhand.json,cursor-oldhand.json,oldhand.md,seen-oldhand.json');
+
+    // TWO STEPS. The bare form must DELETE NOTHING — it names the target and stops.
+    const prev = CI.requestRetire('', 'oldhand', rrepo);
+    ok('bare `/arc-retire` only REVIEWS — deletes nothing, arms a 2-min confirm',
+      prev.ok === true && prev.pending === true && /it deletes:/.test(prev.message) && /CONFIRM within 2 min/.test(prev.message)
+      && RM7.roleArtifacts(RB, 'oldhand').length === 5);
+    ok('...and the preview warns the peer cannot come back as itself once the chair is gone',
+      /birth a STRANGER/.test(prev.message) && /NOTES stay/.test(prev.message));
+
+    const notesBefore = RM7.allNotes(RB).length;
+    const done = CI.requestRetire('', 'oldhand confirm', rrepo);
+    ok('`confirm` retires the role: every one of its files is gone',
+      done.ok === true && done.removed.length === 5 && RM7.roleArtifacts(RB, 'oldhand').length === 0);
+    ok('...the chair is truly gone — no tombstone, so nothing can revive it as itself',
+      !RM7.vacantClaimForRole(RB, 'oldhand') && !fs.existsSync(DUT.dutyPath(RB, 'oldhand')));
+    // THE LEDGER IS HISTORY. Other roles' cursors are POSITIONS in it, so deleting a retired role's
+    // notes would shift every other reader's `ord` — measured on a live board, not theorised.
+    ok('...but the LEDGER is untouched: what a role said stays said (cursor `ord` must not shift)',
+      RM7.allNotes(RB).length === notesBefore);
+
+    // a role that owns nothing is not a role — say so instead of reporting a hollow success
+    const none = CI.requestRetire('', 'ghostrole confirm', rrepo);
+    ok('/arc-retire refuses a role that owns no files on this board', none.ok === false && /nothing to retire/.test(none.message));
+
+    // A LIVE peer is KILLED FIRST, then deleted: a live session whose claim vanished underneath it
+    // would keep running unreachable while the next claimant double-staffed the chair.
+    RM7.claimRole(RB, 'busy', process.pid, 'busy-sess', 'busy-conv');
+    CI.requestRetire('', 'busy', rrepo);                              // step 1: review + arm
+    let closedFirst = false;
+    const liveRes = CI.requestRetire('', 'busy confirm', rrepo, {
+      close: () => { closedFirst = RM7.roleArtifacts(RB, 'busy').length > 0; return { role: 'busy', killed: [{ pid: 1, what: 'runner' }], reclaimed: false }; },
+    });
+    ok('retiring a LIVE role kills the session BEFORE deleting its files (never orphan a running peer)',
+      liveRes.ok === true && closedFirst === true && RM7.roleArtifacts(RB, 'busy').length === 0);
+    // ...and it must NOT delete a peer that came back during the kill (the close-vs-revive race)
+    RM7.claimRole(RB, 'raced2', process.pid, 'r2-sess', 'r2-conv');
+    CI.requestRetire('', 'raced2', rrepo);                            // step 1: review + arm
+    const racedRet = CI.requestRetire('', 'raced2 confirm', rrepo, { close: () => ({ role: 'raced2', killed: [], reclaimed: true }) });
+    ok('...and ABORTS on a revive mid-retire — a live peer\'s files are never deleted underneath it',
+      racedRet.ok === false && /REVIVED/.test(racedRet.message) && RM7.roleArtifacts(RB, 'raced2').length > 0);
+    fs.rmSync(rrepo, { recursive: true, force: true });
+  }
+
   // ---- fresh-claim broadcast floor: a newborn skips the OLD BROADCAST backlog, keeps its directed notes
   // A brand-new role would otherwise inherit every `to: all` note ever posted — the dump on first claim.
   // The floor pre-reads that backlog for BROADCASTS ONLY; a note ADDRESSED to the role (a delegate
@@ -5621,6 +5684,17 @@ try {
   // model as an ordinary prompt.
   ok('/arc-delegate is intercepted and redirects (never reaches the model)',
     /in prose/i.test(ask('/arc-delegate codex "task"').reason || ''));
+
+  // /arc-retire is the verb's ONLY form — if the regex does not match it, the human's typed
+  // command reaches the model as prose and the destructive verb silently does not exist
+  // ("Unknown command: /arc-retire", live). It takes ONE role, optionally the confirm word; anything
+  // sentence-shaped is prose and must pass through rather than dispatch a delete on "please".
+  ok('/arc-retire <role> is intercepted (its only form — the human types this)',
+    !!ask('/arc-retire oldrole').decision);
+  ok('...and /arc-retire <role> confirm too (the confirming form must not read as prose)',
+    !!ask('/arc-retire oldrole confirm').decision);
+  ok('...but "/arc-retire please remove the old role" is PROSE — no delete on a sentence',
+    !ask('/arc-retire please remove the old role').decision);
 
   // The PARTITION is total and machine-checked: every verb in the alternation is a
   // menu entry, a declared alias, or a declared exclusion — nothing else. A verb added

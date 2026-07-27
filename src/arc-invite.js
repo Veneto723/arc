@@ -1059,4 +1059,92 @@ function requestClose(session, arg, cwd, opts) {
       : `  It never persisted a conversation, so there is nothing to revive — a new delegate starts fresh.`) };
 }
 
-module.exports = { staffRole, requestDelegate, requestClose, buildLaunch, psQuote, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, transcriptPath, lastTurnAt, freshnessBrief, spawnQuiet, spawnWindow, spawnProfile };
+// ---- /arc-retire <role> — the role is FINISHED, take it off the board --------------------------
+// PROMPT-FORM ONLY, ON PURPOSE (operator's call): retiring is a ROSTER decision a human makes, so
+// the shape they type is the verb's only form. There is deliberately NO terminal `arc retire` twin
+// an agent could reach through its shell. `close` is the reversible verb agents get; this is not.
+//
+// TWO STEPS, the SAME shape as every other destructive arc verb (`/arc-delete`, `/arc-remove-account`,
+// `/arc-trash empty`): the bare form reviews the impact and arms a 2-minute pending marker, and
+// `/arc-retire <role> confirm` performs it. One confirm vocabulary (arc-switch-core's CONFIRM_WORDS)
+// and one expiry, imported rather than re-spelled, so the verbs cannot drift apart.
+const CORE = require('./arc-switch-core');
+const RETIRE_CONFIRM_MS = 120_000;
+function pendingRetirePath(board, role) {
+  const tag = String(board.root).replace(/[^A-Za-z0-9]/g, '-').slice(-60);
+  return path.join(CORE.CACHE_DIR, `arc-retirepending-${tag}-${role}.json`);
+}
+function requestRetire(session, arg, cwd, opts) {
+  const o = opts || {};
+  // No ARC_SESSION requirement: a human may run this from any shell sitting in the repo.
+  const base = session ? N.resolveCwd(session, cwd) : (cwd || process.cwd());
+  const board = R.resolveBoard(base);
+  const words = String(arg || '').trim().split(/\s+/).filter(Boolean);
+  const yes = words.some((w) => CORE.CONFIRM_WORDS.has(w.toLowerCase()));
+  const role = String(words.find((w) => !w.startsWith('-') && !CORE.CONFIRM_WORDS.has(w.toLowerCase())) || '').toLowerCase();
+  if (!role) return { ok: false, message: 'usage: /arc-retire <role>   (then confirm) — removes a FINISHED role from this board for good.' };
+
+  const me = session ? N.getRole(session, board) : null;
+  if (role === me) {
+    return { ok: false, message:
+      `"${role}" is the role THIS session holds — retiring it would delete the chair out from under you.\n` +
+      `  Leave the role first (/exit, or hand it over), then retire it from another shell.` };
+  }
+
+  const artifacts = R.roleArtifacts(board, role);
+  if (!artifacts.length) {
+    return { ok: false, message:
+      `nothing to retire — "${role}" owns no files on this board (no chair, no cursor, no charter).\n` +
+      `  Roles here: ${(R.liveRoles(board).map((c) => c.role).join(', ') || 'none live')}. See \`arc notes all\` for the ledger.` };
+  }
+  const claim = R.roleClaim(board, role);            // genuine holder only — a recycled pid reads vacant
+  const live = claim && claim.pid ? claim.pid : 0;
+  const owed = R.openRequests(board, role).filter((n) => n.to === role);
+  const rel = (p) => String(p).replace(String(board.root), '').replace(/^[\\/]/, '').replace(/\\/g, '/');
+
+  if (!yes) {
+    // Step 1: review + arm. A failed marker write is NOT fatal — step 2 refuses on a missing marker,
+    // which is the safe direction (it can never silently authorise the delete).
+    try { fs.mkdirSync(CORE.CACHE_DIR, { recursive: true }); fs.writeFileSync(pendingRetirePath(board, role), JSON.stringify({ role, root: board.root, at: Date.now() })); } catch {}
+    return { ok: true, pending: true, message:
+      `RETIRE the role "${role}" on ${board.name}? This DELETES it — nothing is archived.\n` +
+      `  it deletes:\n` +
+      artifacts.map((a) => `    • ${rel(a.path).padEnd(32)} ${a.what}`).join('\n') + '\n' +
+      (live ? `  ⚠ "${role}" is LIVE (pid ${live}) — retiring KILLS that session first.\n` : '') +
+      (owed.length ? `  ⚠ it still owes ${owed.length} unanswered request(s) (#${owed.map((n) => n.seq).join(', #')}) — they become unanswerable.\n` : '') +
+      `  • its NOTES stay — the ledger is append-only history and is never rewritten\n` +
+      `  • \`arc delegate ${role} "<packet>"\` would then birth a STRANGER, not the peer you knew\n` +
+      `  CONFIRM within 2 min:  /arc-retire ${role} confirm     ·     or ignore this to cancel` };
+  }
+  // Step 2: the marker must exist, name THIS role on THIS board, and be fresh.
+  let pend = null;
+  try { pend = JSON.parse(fs.readFileSync(pendingRetirePath(board, role), 'utf8')); } catch {}
+  if (!pend || pend.role !== role || pend.root !== board.root || Date.now() - pend.at > RETIRE_CONFIRM_MS) {
+    return { ok: false, message: `no pending confirmation for "${role}" (or it expired) — run \`/arc-retire ${role}\` first to review what gets deleted.` };
+  }
+
+  // Kill the session BEFORE deleting its files: a live peer whose claim vanished underneath it would
+  // keep running unreachable, and the next claimant would double-staff the chair.
+  const killedMsg = [];
+  if (live) {
+    const c = (o.close || R.closePeer)(board, role, o);
+    if (c.reclaimed) {
+      // The marker is BURNED even here: the board changed under the confirm, so the review the human
+      // approved no longer describes reality. They re-review before any second attempt.
+      try { fs.unlinkSync(pendingRetirePath(board, role)); } catch {}
+      return { ok: false, message:
+        `↺ "${role}" was REVIVED while you were retiring it — a new session holds the chair now, so arc\n` +
+        `  stopped rather than delete a live peer's files. Run \`/arc-retire ${role}\` again to re-review.` };
+    }
+    killedMsg.push(c.killed && c.killed.length ? c.killed.map((k) => `${k.what} (${k.pid})`).join(', ') : 'nothing running');
+  }
+  try { fs.unlinkSync(pendingRetirePath(board, role)); } catch {}   // one confirm, one retire
+  const res = (o.retire || R.retireRole)(board, role);
+  return { ok: res.failed.length === 0, role, removed: res.removed, failed: res.failed, message:
+    `✓ retired "${role}" — ${res.removed.length} file(s) deleted` + (live ? `; killed ${killedMsg[0]}` : '') + `.\n` +
+    res.removed.map((a) => `    - ${rel(a.path)}`).join('\n') +
+    (res.failed.length ? `\n  ⚠ could NOT delete:\n` + res.failed.map((f) => `    - ${rel(f.path)}  (${f.err})`).join('\n') : '') +
+    `\n  Its notes remain in the ledger — history is never rewritten.` };
+}
+
+module.exports = { staffRole, requestDelegate, requestClose, requestRetire, buildLaunch, psQuote, launchShell, shellPrefix, birthEnv, INHERITED_IDENTITY, ensureTrusted, trustKey, hasWt, hasTranscript, transcriptPath, lastTurnAt, freshnessBrief, spawnQuiet, spawnWindow, spawnProfile };

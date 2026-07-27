@@ -207,7 +207,9 @@ function releaseConv(convId) {
 // status and purgepending were written and never listed. The test that was supposed to stop exactly
 // this could not fail (audit #236) — see the sweep-coverage guard in test/run.js, which now proves
 // itself capable of going red before it reports.
-const SWEEP_RX = /^arc-(state|active|effort|turn|convlock|rmpending|delpending|win|role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-.*\.json$/;
+// retirepending is keyed by BOARD+ROLE, not by session — so it is deliberately NOT on the companion
+// LIFE rule below; it expires in 2 minutes of its own accord and the day-old floor is its backstop.
+const SWEEP_RX = /^arc-(state|active|effort|turn|convlock|rmpending|delpending|retirepending|win|role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-.*\.json$/;
 // A TRIGGER is a blocked /arc- command's message to one specific session's poll loop (arc-<action>-<session>
 // .trigger). It is consumed on the next poll — unless that session dies first, and then it sits
 // there forever. One was found from a session dead for days. Session-keyed, so the same liveness
@@ -1809,6 +1811,9 @@ async function main() {
     process.stdout.write(String(r.message) + '\n');
     process.exit(r.ok ? 0 : 1);
   }
+  // NO `arc retire` TERMINAL FORM (operator's call). Retiring a role is destructive and is the
+  // HUMAN's decision, so `/arc-retire` — the prompt shape they type, handled in arc-switch-hook at
+  // zero tokens — is its ONLY form. A terminal twin would hand agents a shell path to it.
   if (userArgs[0] === 'role' || userArgs[0] === 'note' || userArgs[0] === 'notes') {
     const board = require('./arc-notes');
     const session = process.env.ARC_SESSION || '';

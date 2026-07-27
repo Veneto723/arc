@@ -301,6 +301,17 @@ function run(raw) {
     const r = core.requestTrash(session, action === 'restore' ? `restore ${arg || ''}`.trim() : (arg || ''));
     return r.plain ? block(r.message) : clBlock(r.message);
   }
+  if (action === 'retire') {
+    // `/arc-retire <role>` — the role is FINISHED: delete its chair, cursor, seen stamps, birth
+    // record and charter. Pure file ops, run here at zero tokens. Two steps by design: the bare
+    // form only PREVIEWS what would go, and nothing is deleted until `--yes`. The ledger is never
+    // rewritten — other roles' cursors are POSITIONS in it. This is the ONLY form of the verb: the
+    // prompt shape is what the HUMAN types, and there is deliberately no terminal twin an agent
+    // could reach through its shell.
+    const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
+    const r = require('./arc-invite').requestRetire(session, arg || '', cwd);
+    return clBlock(r.message);
+  }
   if (action === 'export' || action === 'import') {
     // Pure file ops — run synchronously in the hook (zero tokens, no session
     // disruption). Loaded lazily so a plain /arc-switch stays lightweight.
