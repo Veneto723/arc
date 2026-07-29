@@ -3,3 +3,15 @@
 # policy and Windows checkouts default to core.autocrlf=true, which would rewrite the
 # stubs to CRLF on a fresh clone and fail that drift guard on every machine. Pin them.
 skills/*/SKILL.md text eol=lf
+
+# A WORKFLOW SCRIPT IS DATA, NOT A FILE THE HARNESS COMPILES. It is handed to the Workflow tool,
+# whose permission layer REFUSES any script containing control characters — "script contains control
+# characters that would be hidden in the approval dialog". A CR (0x0D) is a control character, so a
+# Windows checkout of a workflow script (580 CRLFs in round.js) is rejected outright: `inquiry` could
+# not launch AT ALL on arc's only supported platform. Reproduced verbatim before pinning this.
+#
+# It hid well. Both the repo copy and the deployed copy are byte-identical and "scan clean", because
+# a scan that treats CR as ordinary line-ending noise — which every normal scan does — never counts
+# the 580 control characters it is looking for. Same class as the stubs above, one severity higher:
+# the stubs failed a test, this failed the feature.
+bundles/*/workflows/*.js text eol=lf
