@@ -212,7 +212,10 @@ function releaseConv(convId) {
 // `compacting` is session-keyed, but it is NOT on the companion LIFE rule below on purpose: it is a
 // short-lived bracket cleared by PostCompact, and its own 15-min staleness window already stops it
 // masking a real failure. The day-old floor is the backstop for a crash mid-compaction.
-const SWEEP_RX = /^arc-(state|active|effort|turn|convlock|rmpending|delpending|retirepending|compacting|win|role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-.*\.json$/;
+// stopblocks counts a session's CONSECUTIVE Stop-hook blocks, so arc stops one short of the
+// harness's own cap instead of emitting a block that gets discarded with its notes already spent
+// (arc-stop-hook). Session-keyed, so it rides the companion LIFE rule below rather than a clock.
+const SWEEP_RX = /^arc-(state|active|effort|turn|convlock|rmpending|delpending|retirepending|compacting|win|role|stance|armed|listen-offered|await|alarmack|status|purgepending|render|stopblocks)-.*\.json$/;
 // A TRIGGER is a blocked /arc- command's message to one specific session's poll loop (arc-<action>-<session>
 // .trigger). It is consumed on the next poll — unless that session dies first, and then it sits
 // there forever. One was found from a session dead for days. Session-keyed, so the same liveness
@@ -251,7 +254,7 @@ function sweepStaleStates() {
       // rest — age-sweeping arc-status-* would blank a working session's activity line mid-turn.
       // purgepending falls back to the literal key 'terminal' when there is no session; that is not
       // a session id, sessionPidOf returns null for it, and it correctly lands on the 7-day floor.
-      const comp = f.match(/^arc-(?:role|stance|armed|listen-offered|await|alarmack|status|purgepending|render)-(.+)\.json$/);
+      const comp = f.match(/^arc-(?:role|stance|armed|listen-offered|await|alarmack|status|purgepending|render|stopblocks)-(.+)\.json$/);
       if (comp) {
         // await carries its OWN pid (the listener process) — more precise than the session's.
         let pid = null;

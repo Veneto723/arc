@@ -422,7 +422,20 @@ function requestNote(session, arg, cwd, opts) {
     const bad = roles.find((r) => !VALID_ROLE.test(r));
     if (bad) return { ok: false, message: `"${bad}" is not a valid role in the recipient list (roles are lowercase; "all" broadcasts).` };
     to = roles.length === 1 ? roles[0] : roles;
-  } else to = m[1].toLowerCase();
+  } else {
+    // VALIDATED LIKE THE LIST, and it was not. The comma branch three lines up rejects a malformed
+    // role; this one took whatever was typed. So `arc note research: --kind request "…"` posted
+    // happily to the chair "research:" — a name VALID_ROLE forbids, so NOBODY CAN EVER CLAIM IT.
+    // The real peer never sees the ask, and with --kind request the note parks a permanently
+    // unanswerable debt in openRequests. The printed "⚠ is CLOSED" hint does not help: it is the
+    // same text a legitimately empty chair produces, so it reads as "they are away", not "that role
+    // cannot exist". One character of typo, silently unreachable, recoverable only if noticed.
+    to = m[1].toLowerCase();
+    if (!VALID_ROLE.test(to)) {
+      return { ok: false, message: `"${m[1]}" is not a valid role (roles are lowercase letters/digits/dash/underscore, starting with a letter; "all" broadcasts).\n`
+        + `  Nobody can claim that name, so the note would sit on a chair that can never be filled.` };
+    }
+  }
   // OPTIONAL structure. A bare `arc note all "build is broken"` must stay exactly as cheap as
   // it always was — these only matter when the note is a request, an answer, or a retraction.
   let rest = m[2];
@@ -508,13 +521,36 @@ function requestNote(session, arg, cwd, opts) {
   // Only on YOUR OWN board is "to === me" a self-note. Across boards, "arc/code" and
   // "whalephone/code" are two different sessions that merely share a role NAME — which is the
   // whole reason the sender is qualified.
-  if (!crossFrom && to) {
+  // A CONTRACT'S `to` IS ITS MEMBERSHIP, NOT JUST ITS DELIVERY LIST — so the author stays in it.
+  // Stripping yourself is right for an ordinary note (you never read your own), but on a contract
+  // the same list declares who is BOUND: `backend` posting `arc note android,backend --kind
+  // contract` stored `to: "android"` and the read said "bound: android" — the role owning half the
+  // seam missing from its own contract, and the documented widening fix stripped it again every
+  // time. Safe to keep, because delivery already excludes the author independently: unreadFor drops
+  // `n.from === role` before it ever looks at `to`. (Found by `audit`; reproduced before fixing.)
+  const selfBinding = kind === 'contract';
+  if (!crossFrom && to && !selfBinding) {
     if (Array.isArray(to)) {
       const others = to.filter((r) => r !== me);   // drop yourself; the note still reaches the rest of the list
       if (!others.length) return { ok: false, message: `the recipient list was only yourself — you never see your own notes.` };
       to = others.length === 1 ? others[0] : others;
     } else if (to === me) {
       return { ok: false, message: `you are "${me}" — a note to yourself would never be read (you never see your own notes).` };
+    }
+  }
+  // ...but a contract bound to NOBODY BUT YOU is not a contract: it binds one party, so there is no
+  // seam and nothing for anyone to build against. Refuse it here rather than storing a contract that
+  // can never be honoured — the self-binding rule above exists to KEEP you in a list with others.
+  if (selfBinding && !crossFrom) {
+    const list = Array.isArray(to) ? to : (to == null ? [] : [to]);
+    if (!list.length) {
+      return { ok: false, message: 'a contract needs the roles it BINDS — never a broadcast.\n'
+        + `  A broadcast is clipped to a preview, and a 400-character contract is a rumour.\n`
+        + `  arc note <roleA>,<roleB> --kind contract "<the seam, who owns it, the don'ts>"` };
+    }
+    if (list.every((r) => r === me)) {
+      return { ok: false, message: `a contract binds you to SOMEONE — "${me}" alone is not a seam.\n`
+        + `  Name the other role(s):  arc note ${me},<theirRole> --kind contract "<the seam>"` };
     }
   }
 
@@ -527,6 +563,27 @@ function requestNote(session, arg, cwd, opts) {
     note.supersedes ? `RETRACTS #${supersedes} — readers of it are now warned` : '',
     note.priority === 'high' ? 'priority: HIGH' : '',
   ].filter(Boolean).join(' · ');
+  // A CONTRACT POSTED AS A REPLY IS A CLAUSE — say so, because the alternative is silence.
+  // Replying to a contract with a contract folds into that thread, which is CORRECT for a clause
+  // and wrong for someone opening a second contract: theirs disappears from `arc notes --kind
+  // contract` entirely (verified). No automatic rule can separate the two — a clause is also a
+  // contract note replying to a contract, and its recipients differ from the opener's BY DESIGN
+  // (inferring membership from that is the bug testing already killed). So arc does not guess: it
+  // names what just happened at the point the mistake is made, which is the only place the author
+  // still remembers what they meant. (audit left this one unverified; I reproduced it.)
+  let clauseNote = '';
+  if (!crossFrom && note.kind === 'contract' && note.replyTo) {
+    try {
+      const all = R.allNotes(target);
+      const parentKey = R.refKey(note.replyTo);
+      const parent = all.find((n) => n.id === parentKey);
+      if (parent && (parent.kind || 'info') === 'contract') {
+        const rootSeq = R.refSeq(all, note.replyTo);
+        clauseNote = `\n  this is a CLAUSE of contract #${rootSeq}, not a new contract. To open a SEPARATE one,\n`
+          + `    post it with NO --reply-to:  arc note <roles> --kind contract "<the other seam>"`;
+      }
+    } catch { /* a hint must never break a post */ }
+  }
   // THE EMPTY CHAIR. Posting to a role nobody holds used to return a cheerful ✓ and nothing
   // else: the note went nowhere, and a `request` was worse — the sender armed a listener and
   // waited forever for an answer that could not come. Silent, and the exact class of failure
@@ -646,7 +703,7 @@ function requestNote(session, arg, cwd, opts) {
                + `    cannot reply to you here. Anything you need BACK goes through your human.\n` : '') +
     (extra ? `  ${extra}\n` : '') +
     `  "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"\n` +
-    (chair ? chair : `  they'll see it when they next take a turn.`) + digest };
+    (chair ? chair : `  they'll see it when they next take a turn.`) + clauseNote + digest };
 }
 
 const NOTE_USAGE =
@@ -736,18 +793,163 @@ function requestNotes(session, arg, cwd) {
   // Both work with no ARC_SESSION and no role, which is the point — they are for the person watching
   // sessions that are busy, and that person holds no chair.
   const headM = raw.match(/^--head(?:\s+|=)?(\d+)?$/i);
+  // THE CONTRACT READS. A contract is not a new file class — it is a THREAD of `contract` notes: one
+  // opener naming the seam, clauses replying to it, `--supersedes` retracting a clause in place. Both
+  // reads are cursor-free like --head/all, because their audience is (a) the human, who holds no
+  // chair and must never consume a live session's notes, and (b) a peer re-checking a clause it has
+  // already read — which a cursor-advancing read makes impossible.
+  //   arc notes --kind contract   WHICH contracts exist, one line each
+  //   arc notes --thread <seq>    ONE contract in full, retracted clauses struck
+  const kindM = raw.match(/^--kind(?:\s+|=)\s*([a-z]+)$/i);
+  const threadM = raw.match(/^--thread(?:\s+|=)\s*#?(\d+)$/i);
   const wantAll = raw.toLowerCase() === 'all';
-  const readOnly = wantAll || !!headM;
+  const readOnly = wantAll || !!headM || !!kindM || !!threadM;
 
   if (!session && !readOnly) {
     return { ok: false, message: 'NOT under the arc wrapper (launch with `arc`).\n'
       + 'To READ the board from an ordinary shell (nothing is marked read):\n'
-      + '  arc notes --head 5      the 5 most recent notes\n'
-      + '  arc notes all           the whole board' };
+      + '  arc notes --head 5          the 5 most recent notes\n'
+      + '  arc notes all               the whole board\n'
+      + '  arc notes --kind contract   the contracts on this board\n'
+      + '  arc notes --thread 12       one contract in full' };
   }
   // With no session there is no state file to resolve a cwd from — the shell's own cwd IS the answer.
   const board = R.resolveBoard(session ? resolveCwd(session, cwd) : (cwd || process.cwd()));
   const me = session ? getRole(session, board) : null;
+
+  // A thread's ROOT: follow replyTo up until a note replies to nothing. A contract is identified by
+  // its opener, so every clause resolves to the same id no matter how deep it was posted.
+  // A SUPERSEDES IS A THREAD EDGE TOO — and the two halves MUST agree on that.
+  // arc-board.js's kind inference walks `replyTo || supersedes`; this walked `replyTo` alone. So a
+  // clause retracted the DOCUMENTED way — `--supersedes <seq>` with no `--reply-to`, which is what
+  // the footer below, `arc help`, and the peers skill all teach — inherited `contract` on write and
+  // then became its OWN root on read: ejected from the contract it amends, and listed as a second
+  // contract. The authoritative read showed an agreement retracted with nothing replacing it.
+  // Caught by `audit` retracting its own SOUND verdict; reproduced here before fixing. The test that
+  // should have caught it asserted the CONTROL shape (both flags), which no documented invocation
+  // emits — a green assertion over a path the shipping surface cannot produce.
+  const recipients = (n) => (n.to == null ? [] : (Array.isArray(n.to) ? n.to.slice() : [String(n.to)]));
+  // THERE IS NO AUTOMATIC SEPARATOR BETWEEN "A CLAUSE" AND "A NEW CONTRACT", AND ARC STOPS
+  // PRETENDING THERE IS. A rule was built here and then falsified: `audit` ruled that a
+  // contract-reply naming a role OUTSIDE the parent's membership must be its own root, on the
+  // grounds that a clause only ever addresses a SUBSET. I implemented it — and audit withdrew the
+  // ruling with the shape that kills it, which I reproduced before reverting:
+  //     opener  code    -> android, backend    "the token seam"
+  //     clause  android -> backend, uiux       "uiux signs off on the token TTL"   (--reply-to)
+  // That is a GENUINE clause that WIDENS the party set, which is the normal way a third role gets
+  // pulled into a seam — and the subset rule ejected it into a contract of its own. The two shapes
+  // are byte-identical in structure and differ only in INTENT, which is not in the data; guessing
+  // either way corrupts one of them. So the fold stays (a clause SHOULD land in its parent thread)
+  // and the SILENCE is what gets removed instead — see the clause hint in requestNote, which names
+  // what just happened where the author still remembers what they meant.
+  const rootMemo = new Map();
+  const rootOf = (n, all, byId) => {
+    if (rootMemo.has(n.id)) return rootMemo.get(n.id);
+    rootMemo.set(n.id, n);                       // provisional: also breaks any reference cycle
+    const ref = n.replyTo || n.supersedes;       // supersedes is a thread edge too — see D1 above
+    if (!ref) return n;
+    const up = byId.get(R.refKey(ref)) || all.find((x) => String(x.seq) === String(ref));
+    if (!up || up.id === n.id) return n;
+    const upRoot = rootOf(up, all, byId);
+    rootMemo.set(n.id, upRoot);
+    return upRoot;
+  };
+
+  if (kindM || threadM) {
+    const all = R.allNotes(board);
+    const sup = R.supersededMap(board, all);
+    const byId = new Map(all.map((n) => [n.id, n]));
+    const head0 = `arc board "${board.name}"   (${board.root})`;
+
+    // ---- one contract, in full ----
+    if (threadM) {
+      const seq = parseInt(threadM[1], 10);
+      const opener = all.find((n) => n.seq === seq);
+      if (!opener) return { ok: false, message: `${head0}\n  no note #${seq} on this board.` };
+      const root = rootOf(opener, all, byId);
+      // DO NOT CALL A THING A CONTRACT BECAUSE SOMEONE ASKED FOR ONE. This read printed
+      // "CONTRACT #1 — 1 clause(s)" over a plain info note, because it never checked the root's
+      // kind — a header that manufactures authority for routine chatter, which is worse than
+      // refusing. Say what the thread actually is, and point at the read that fits it.
+      if ((root.kind || 'info') !== 'contract') {
+        return { ok: false, message: `${head0}\n  #${root.seq} is not a contract — it is a <${root.kind || 'info'}> from ${root.from}.\n`
+          + `  --thread reads CONTRACT threads. For any note's content:  arc notes --head 20` };
+      }
+      const clauses = all.filter((n) => n.id === root.id || rootOf(n, all, byId).id === root.id);
+      // MEMBERSHIP IS THE OPENER'S RECIPIENT LIST — and it changes only by SUPERSEDING the opener.
+      // The first version inferred it from the newest clause's recipients, and testing killed that
+      // immediately: an ordinary clause is addressed to the OTHER party, so a reply from uiux to
+      // android made the contract read "bound: android" and silently dropped uiux from its own
+      // contract. Membership must be DECLARED, never inferred from who someone happened to answer.
+      // So: to ADD or REMOVE a role, supersede the opener with a new one naming the new set. That
+      // makes a membership change deliberate, visible (the old opener reads RETRACTED wherever it
+      // appears), and dated — and it costs no new field, because --supersedes already does exactly
+      // this. Clause authorship is unaffected: anyone in the thread may still reply to anyone.
+      const live = clauses.filter((n) => !sup.get(n.id));
+      let memberSrc = root, prevSrc = null;
+      for (let hops = 0; hops < 64; hops++) {
+        const next = clauses.find((n) => n.supersedes && R.refKey(n.supersedes) === memberSrc.id);
+        if (!next) break;
+        prevSrc = memberSrc; memberSrc = next;
+      }
+      const members = recipients(memberSrc);
+      const gone = prevSrc ? recipients(prevSrc).filter((r) => !members.includes(r)) : [];
+      const rows = clauses.map((n) => {
+        const dead = sup.get(n.id);
+        return `  #${String(n.seq).padStart(3)}  ${n.from} → ${recipients(n).join(', ') || 'all'}` +
+          `${n.id === root.id ? '   ← opener' : ''}${n.priority === 'high' ? '  [!]' : ''}  ${ago(n.ts)} ago` +
+          (dead ? `\n        ⚠ RETRACTED by #${dead.seq} — not in force` : '') +
+          `\n        ${String(n.body).replace(/\n/g, '\n        ')}`;
+      });
+      return { ok: true, plain: true, message:
+        `${head0}\n  CONTRACT #${root.seq} — ${clauses.length} clause(s), ${clauses.length - live.length} retracted\n` +
+        `  bound: ${members.join(', ') || '(nobody named)'}` +
+        (gone.length ? `   ·   no longer bound: ${gone.join(', ')}` : '') + '\n\n' +
+        rows.join('\n\n') +
+        `\n\n  (a clause is retracted with:  arc note <roles> --kind contract --supersedes <seq> "…")` };
+    }
+
+    // ---- which contracts exist ----
+    const kind = R.normalizeKind(kindM[1]);
+    const hits = all.filter((n) => (n.kind || 'info') === kind);
+    if (!hits.length) {
+      return { ok: true, plain: true, message: `${head0}\n  no "${kind}" notes on this board yet.` +
+        (kind === 'contract' ? `\n  open one:  arc note <roleA>,<roleB> --kind contract "<the seam, and the don'ts>"` : '') };
+    }
+    // Group by thread root, so a contract is ONE row however many clauses it has. The roots are
+    // found from the kind-matching notes, but each group's CLAUSES are every note in that thread —
+    // a count taken from kind-matches alone under-reports any clause that predates the inheritance
+    // rule above (or was filed by hand), and a contract that lies about its own size is worse than
+    // one that is merely terse.
+    const groups = new Map();
+    for (const n of hits) {
+      const root = rootOf(n, all, byId);
+      if (!groups.has(root.id)) groups.set(root.id, { root, clauses: [] });
+    }
+    for (const n of all) {
+      const root = rootOf(n, all, byId);
+      if (groups.has(root.id)) groups.get(root.id).clauses.push(n);
+    }
+    const rows = [...groups.values()]
+      .sort((a, b) => b.root.seq - a.root.seq)
+      .map(({ root, clauses }) => {
+        const live = clauses.filter((n) => !sup.get(n.id));
+        let memberSrc = root;                       // same rule as the full read: DECLARED, not inferred
+        for (let hops = 0; hops < 64; hops++) {
+          const next = clauses.find((n) => n.supersedes && R.refKey(n.supersedes) === memberSrc.id);
+          if (!next) break;
+          memberSrc = next;
+        }
+        const members = recipients(memberSrc);
+        const dead = clauses.length - live.length;
+        return `  #${String(root.seq).padStart(3)}  ${peekBody(String(root.body)).slice(0, 60)}\n` +
+          `        bound: ${members.join(', ') || '(nobody named)'}   ·   ${clauses.length} clause(s)` +
+          (dead ? `, ${dead} retracted` : '') + `   ·   ${ago(root.ts)} ago`;
+      });
+    return { ok: true, plain: true, message:
+      `${head0}\n  ${groups.size} ${kind}(s)\n\n` + rows.join('\n\n') +
+      `\n\n  read one in full:  arc notes --thread <seq>` };
+  }
 
   if (headM) {
     const n = Math.max(1, Math.min(200, parseInt(headM[1] || '10', 10)));
@@ -1037,7 +1239,7 @@ function directBody(n, board, spills) {
     + `…\n      ⚠ FULL ${s.length}-char packet — this is your WORK, read ALL of it before acting:  ${file}`;
 }
 
-function injection(session, cwd) {
+function injection(session, cwd, opts) {
   try {
     if (!session || !fs.existsSync(roleFile(session))) return null;   // cheapest early-out
     const board = R.resolveBoard(resolveCwd(session, cwd));
@@ -1106,6 +1308,10 @@ function injection(session, cwd) {
     // Everything consumed was a suppressed (already-seen) alarm note: advance past it and inject
     // NOTHING — the peer already got this alarm via the flag-block, so a note delivery would be the
     // exact double-show the ack exists to prevent.
+    // Advances even under `defer`, and that is correct rather than an oversight: nothing is being
+    // handed to a caller here, so there is no block that could be discarded and nothing to lose by
+    // consuming it now. Deferring THIS one would leave the suppressed note permanently unread —
+    // re-examined every turn, delivered never, with the pending count stuck above zero.
     if (!shown.length) { R.writeCursor(board, role, newCursor); return null; }
 
     // Display: float what MATTERS to the top of THIS batch — high priority first, then by
@@ -1162,11 +1368,27 @@ function injection(session, cwd) {
       `to that peer on the board. ` +
       `\`arc notes all\` shows the whole board.)`;
 
-    R.writeCursor(board, role, newCursor);   // advance ONLY over what we delivered — lossless
+    // ADVANCE ONLY OVER WHAT WE DELIVERED — lossless. But "delivered" is the caller's word, not
+    // ours: advancing HERE consumes the batch the instant it is BUILT, and one caller cannot always
+    // deliver what it built. Claude Code discards a Stop block once 8 consecutive ones have fired
+    // (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`, default 8 — read out of the shipping binary, all three
+    // installed versions), and a cursor is a HIGH-WATER MARK, so a batch consumed for a discarded
+    // block never comes back and the stream looks perfectly continuous. Under `defer` the caller
+    // advances only after its block is actually out; if it dies in between, the notes are
+    // re-delivered — a duplicate is noise, a silent permanent gap is not. Callers whose output is
+    // never discarded (UserPromptSubmit) keep the immediate advance and get a no-op commit.
+    // `deferCommit`, not `deferred` — that name is already taken a few lines up for the notes held
+    // back to the NEXT batch, and the two mean opposite things.
+    const advance = () => R.writeCursor(board, role, newCursor);
+    const deferCommit = !!(opts && opts.defer);
+    if (!deferCommit) advance();
     // `consumed` = notes the cursor advanced over (shown + any suppressed alarm note), NOT the
     // displayed count — its consumer is `count > consumed` ("is the batch capped?"), which wants
     // consumed. A displayed count would under-report by a suppressed alarm and mis-answer that.
-    return { text, count: u.count, role, board: board.name, consumed: picked.length, spills };
+    return {
+      text, count: u.count, role, board: board.name, consumed: picked.length, spills,
+      commit: deferCommit ? advance : () => {},
+    };
   } catch { return null; }    // the board must NEVER wedge a prompt
 }
 

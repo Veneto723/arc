@@ -227,14 +227,27 @@ function readClaimFile(board, role) {
 // rewrite history, you append a correction) — but nothing linked the correction to what it
 // corrected, so a reader could act on a claim its own author had publicly retracted. Now they
 // are linked, and the retracted note is marked wherever it is read.
-const KINDS = ['info', 'request', 'result', 'correction', 'blocker', 'decision'];
+const KINDS = ['info', 'request', 'result', 'correction', 'blocker', 'contract'];
+// `decision` was this kind's first name, and notes carrying it EXIST on disk (whalephone posted 3).
+// The rename is not a free edit: normalizeKind degrades an unknown kind to `info`, so without this
+// alias those notes would silently drop from rank 2 to rank 5 — a clause that binds two roles
+// re-filed as routine news, with nothing to say why. A LEGACY SHIM, in the same spirit as the ones
+// the board/peer/role rename had to keep: read the old spelling, always write the new one.
+// Object.create(null), NOT a literal: a bare `{}` inherits Object.prototype, so a ledger line whose
+// kind is "__proto__" or "constructor" resolves through the prototype chain and the unguarded
+// truthiness test below returns an OBJECT (or a function) as the note's kind. Verified: with a
+// literal, normalizeKind('__proto__') returned an object, not a string. Reachable through `arc
+// import`, which merges lines from another machine verbatim — the same door seq/ord are already
+// hardened against. A null-prototype map has no inherited keys, so only real aliases resolve.
+const KIND_ALIASES = Object.assign(Object.create(null), { decision: 'contract' });
 const DEFAULT_KIND = 'info';
 // How loudly a kind wants to be read. Used to RANK the injection digest: a blocker or a
 // retraction must never sit below routine news.
-const KIND_RANK = { blocker: 0, correction: 1, decision: 2, request: 3, result: 4, info: 5 };
+const KIND_RANK = { blocker: 0, correction: 1, contract: 2, request: 3, result: 4, info: 5 };
 
 function normalizeKind(k) {
   const s = String(k || '').trim().toLowerCase();
+  if (KIND_ALIASES[s]) return KIND_ALIASES[s];   // an old spelling still on disk reads as its new name
   return KINDS.includes(s) ? s : DEFAULT_KIND;   // unknown kind degrades to info, never throws
 }
 const asSeq = (v) => { const n = parseInt(v, 10); return Number.isInteger(n) && n > 0 ? n : undefined; };
@@ -398,15 +411,68 @@ function appendNote(board, note) {
   };
   // A correction/result almost always names its target; if the caller gave one but no kind,
   // infer the obvious one rather than filing a retraction as routine news.
+  //
+  // A CONTRACT THREAD STAYS A CONTRACT THREAD. Answering a contract clause IS a clause, so it
+  // inherits `contract` rather than becoming a `result`. Caught on the shipping surface, not in a
+  // module test: replying the natural way — `arc note backend --reply-to 12 "I expose POST /x"`,
+  // with no --kind — filed the clause as a `result`, so it dropped out of the contract's own
+  // accounting and the read said "2 clauses" over a thread of three. Requiring every clause to
+  // restate --kind would be a rule enforced by memory, and memory is what measures ~93% here.
   if (!note.kind) {
-    if (rec.supersedes) rec.kind = 'correction';
+    const parentRef = rec.replyTo || rec.supersedes;
+    let parentKind = null;
+    if (parentRef) {
+      try {
+        const key = refKey(parentRef);
+        const p = allNotes(board).find((n) => n.id === key || refKey(n.id) === key);
+        parentKind = p ? (p.kind || DEFAULT_KIND) : null;
+      } catch { /* inference must never break a post */ }
+    }
+    if (parentKind === 'contract') rec.kind = 'contract';
+    else if (rec.supersedes) rec.kind = 'correction';
     else if (rec.replyTo) rec.kind = 'result';
   }
   // A blocker or a retraction is high-priority by nature — don't make callers remember.
   if (rec.kind === 'blocker' || rec.kind === 'correction') rec.priority = 'high';
+  // A CONTRACT CLAUSE THAT RETRACTS ANOTHER IS ALSO HIGH. Keeping the thread coherent (above) costs
+  // the auto-HIGH a `correction` would have carried — and a revised clause is precisely the note a
+  // peer must not miss, because it is already building against the version being withdrawn. So the
+  // urgency is restored explicitly: a contract note that supersedes something changes an agreement,
+  // and that outranks routine news whatever it is called.
+  if (rec.kind === 'contract' && rec.supersedes) rec.priority = 'high';
   for (const k of Object.keys(rec)) if (rec[k] === undefined) delete rec[k];
+  // HEAL A TORN TAIL FIRST, or this append destroys someone else's note rather than its own.
+  // O_APPEND is atomic between CONCURRENT WRITERS; it says nothing about a process that DIES
+  // mid-write. That leaves a fragment with no trailing newline — and the ledger already expects
+  // one (allNotes carries an explicit "skip a torn line"). What it did not do was heal it: the next
+  // note was glued onto the fragment, the two became ONE unparseable line, and the skip then
+  // discarded BOTH. The note lost that way is the HEALTHY one, belonging to a caller who was told
+  // the post succeeded. Cost of the bug: one good note, silently, permanently. Cost of the fix:
+  // reading one byte.
+  //
+  // STILL EXACTLY ONE appendFileSync — the newline rides the same call as the record, because two
+  // appends would surrender the cross-process atomicity this line is built on and trade a
+  // crash-window for a race that happens far more often.
+  //
+  // The read-then-append IS itself racy (two writers can both see a torn tail and both prepend),
+  // and that is deliberately fine: the worst outcome is a blank line between two records, which
+  // allNotes discards at `if (!line.trim()) return`. A harmless empty line is the correct thing to
+  // lose a race to.
+  const notes = notesPath(board);
+  let heal = '';
+  try {
+    const size = fs.statSync(notes).size;
+    if (size > 0) {
+      const fd = fs.openSync(notes, 'r');
+      try {
+        const last = Buffer.alloc(1);
+        fs.readSync(fd, last, 0, 1, size - 1);
+        if (last[0] !== 0x0A) heal = '\n';
+      } finally { fs.closeSync(fd); }
+    }
+  } catch { /* unreadable/absent — append plain; a missing heal is the old behaviour, never worse */ }
   // Single-line O_APPEND: atomic between processes on one filesystem.
-  fs.appendFileSync(notesPath(board), JSON.stringify(rec) + '\n');
+  fs.appendFileSync(notes, heal + JSON.stringify(rec) + '\n');
   return rec;
 }
 
@@ -515,6 +581,12 @@ function allNotes(board) {
     if (!line.trim()) return;
     let n; try { n = JSON.parse(line); } catch { return; }        // skip a torn line
     if (!n.id) n.id = legacyId(++legacy);                         // frozen prefix -> stable synthetic id
+    // A RENAMED KIND IS NORMALISED ON READ, not rewritten on disk. The ledger is append-only, so the
+    // old spelling stays in the bytes forever — but every consumer must see the new one, because they
+    // key off it: arc-notes.js ranks with `KIND_RANK[n.kind] ?? 5`, so an un-normalised `decision`
+    // scores 5 (routine news) instead of 2, and a clause binding two roles would sort below chatter.
+    // Normalising here fixes ranking, filtering and display in one place, and rewrites nothing.
+    if (n.kind && KIND_ALIASES[String(n.kind).toLowerCase()]) n.kind = KIND_ALIASES[String(n.kind).toLowerCase()];
     const org = noteOrigin(n);
     // ORD: this note's index among ITS OWN origin's notes, counted at READ time. The same trick the
     // positional design already relies on, narrowed to the one scope where it still holds: a
@@ -1110,6 +1182,13 @@ module.exports = {
   canonical, repoRoot, resolveBoard, ensureBoard,
   notesPath, appendNote, sanitizeBody, allNotes, noteCount, latestSeq,
   KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo, seenBy, requestStatus,
+  // EXPORTED because a caller outside this file was answering "is this note directed at <role>?"
+  // with `n.to === role` and getting it wrong for both an array `to` and a broadcast. There is one
+  // right answer to that question and it lives here; anyone who needs it should be able to reach it
+  // rather than re-derive it. NOTE it deliberately does NOT cover a broadcast (`to == null`) —
+  // "addressed to everyone" is a different question, and callers that mean it say `n.to == null ||
+  // toHas(n.to, role)`, exactly as openRequests does above.
+  toHas,
   readCursor, readCursorMap, readFloor, writeCursor, unreadFor, markRead, stampSeen, readSeen,
   boardOrigin, machineId, noteOrigin, noteKey, refKey, resolveRef, refSeq, legacyId,
   isAlive, isHolder, procStarts, roleClaim, readClaimFile, claimRole, releaseRole, liveRoles, vacantClaimForRole,

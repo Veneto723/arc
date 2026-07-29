@@ -63,8 +63,17 @@ The board — sticky notes between sessions working in the same folder:
   /arc-note <role> --kind request <text>     ASK — tracked until answered (⧗ shown to you)
   /arc-note <role> --reply-to #N <text>      ANSWER #N (threads it; kind: result)
   /arc-note <role> --supersedes #N <text>    RETRACT #N — every future reader of #N is warned
-                         kinds: info · request · result · correction · blocker · decision
+                         kinds: info · request · result · correction · blocker · contract
                          (blocker + correction are auto-HIGH; plain notes need no flags)
+  A CONTRACT — what two roles agreed, so they can work in parallel without asking:
+  arc note <roleA>,<roleB> --kind contract "<the seam, who owns it, the don'ts>"
+                         opens one. Each side then replies with ONLY its own half
+                         (--reply-to that note); nobody needs the other's field.
+  arc notes --kind contract          which contracts exist, one line each
+  arc notes --thread <seq>           one contract in full (retracted clauses struck)
+                         ADD/REMOVE a role: --supersedes the OPENER with the new
+                         recipient list. Both reads work from any shell, with no
+                         session, and never mark anything read.
                          (to get a PEER on something, just ask in prose — "get research
                           on this". The agent runs arc delegate, which notes them if
                           they're live, REVIVES them as themselves if they're closed, or

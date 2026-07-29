@@ -230,6 +230,17 @@ function seedCreds(accId, srcPath) {
 // won't rename an open dir) — arc-runner renames only after killing claude. Returns
 // true if a dir was moved, false if there was nothing to move.
 function renameProfile(oldId, newId) {
+  // BOTH IDS, and both for the same reason: each is about to become a path. A bad NEW id moves the
+  // profile — plaintext .credentials.json included — out of the hardened tree. A bad OLD id is if
+  // anything worse: `renameProfile('../../../something', 'x')` would move an arbitrary directory
+  // the user never named INTO arc-profiles. The caller's own validation is not enough, because the
+  // caller that had none is exactly how this was reached (terminal `arc rename` -> doRename).
+  for (const [label, id] of [['old', oldId], ['new', newId]]) {
+    if (!C.validAccountId(id)) {
+      throw new Error(`invalid ${label} account name "${id}" — letters/digits/dash/underscore, starting with a letter. `
+        + '(An account id becomes a directory path, so ".." or a separator is refused outright.)');
+    }
+  }
   const oldDir = profileDir(oldId), newDir = profileDir(newId);
   if (!fs.existsSync(oldDir)) return false;
   // A case-ONLY change (work → Work) is legal even though a case-insensitive

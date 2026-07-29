@@ -34,6 +34,22 @@ const SCRIPTS_DIR = path.join(CLAUDE_DIR, 'scripts');
 
 const DEFAULT_THRESHOLDS = { warnSessionPct: 85, warnWeekPct: 90, switchSessionPct: 92, switchWeekPct: 95 };
 
+// AN ACCOUNT ID BECOMES A PATH, so validating it is a security check and not a tidiness one.
+// `profileDir(id)` is `path.join(PROFILES_DIR, id)`, and path.join RESOLVES `..` — so an id of
+// "../../evil" names a directory outside the profiles tree entirely. That tree holds the plaintext
+// .credentials.json which secureDir hardens (setowner / reset / inheritance:r); a profile moved out
+// of it is a live OAuth token sitting somewhere the hardening never runs, and a later
+// secureDir(profileDir(id)) would point those icacls calls at an arbitrary path.
+//
+// THE RULE LIVES HERE, ONCE, because it was living in exactly one of the two paths that needed it.
+// The shape was inline in requestRename (the /arc-rename prompt form) and absent from doRename,
+// which is what the TERMINAL `arc rename` calls directly — so the gate covered the form a human
+// rarely uses and missed the one they type. Same shape as the gate-spelling drift in
+// arc-pretool-hook: a rule with two copies has one copy, and a rule on one of two paths is not a
+// rule. Everything that turns an id into a path now asks this function.
+const ACCOUNT_ID_RX = /^[a-z][a-z0-9_-]*$/i;
+function validAccountId(id) { return ACCOUNT_ID_RX.test(String(id == null ? '' : id)); }
+
 function expandHome(p) {
   if (!p) return p;
   return p.replace(/^~(?=$|[\\/])/, os.homedir());
@@ -340,4 +356,5 @@ module.exports = {
   loadConfig, findAccount, nextAccount, resolveApiKey, claudeBin, accountEnv, expandHome,
   dpapiEncrypt, dpapiDecrypt, storeApiKey, envKeyAllowed,
   secureDir, secureDirArgs, secureFile, secureFileArgs,
+  ACCOUNT_ID_RX, validAccountId,
 };

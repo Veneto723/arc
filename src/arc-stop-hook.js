@@ -49,7 +49,60 @@
 // Claude Code independently caps consecutive Stop blocks at 8, which is the backstop.
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const { CACHE_DIR } = require('./arc-switch-core');
+
 const BIRTH_GRACE_MS = 120000;   // a spawn younger than this is not yet nagged as charterless — it is still writing its charter
+
+// NEVER EMIT A BLOCK THAT CANNOT BE HONOURED. Claude Code counts CONSECUTIVE Stop blocks and, past
+// the cap, throws the next one away and ends the turn regardless:
+//     let Kt=kue(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP,8);
+//     if(Kt>0&&yo>Kt) return …`blocked the turn from ending ${yo} consecutive times — overriding…`
+// (verbatim from the shipping binary; identical in 2.1.217/218/220). Line 49 used to call that "the
+// backstop" — it is not a backstop, it is a TRAPDOOR, because everything the discarded block was
+// carrying has ALREADY been spent by the time it is thrown away: the read cursor advanced over the
+// batch, `markRequestsArmed` burned the request, `markOffered` closed the offer cycle. A cursor is a
+// high-water mark and those markers are one-shot, so none of it comes back. The batch vanishes with
+// the stream looking continuous, and a spent offer marker means wasOffered() suppresses every future
+// listener offer — the role-holder idles permanently deaf, which is the exact self-locking deafness
+// cea48f7 closed, re-entered through the cap.
+//
+// So arc keeps its OWN count and stops one short of the trapdoor. At the ceiling this hook returns
+// null BEFORE it reads a note or writes a marker: the turn simply ends, everything stays unread, and
+// the next turn start (UserPromptSubmit) or the next stop delivers it. Losing a turn boundary is
+// cheap; losing a peer's answer is not.
+//
+// WHAT THIS CANNOT SEE, stated rather than assumed: the harness counts blocks from EVERY hook, arc
+// counts only its own. Another blocking Stop hook inflates the real count above ours and the
+// trapdoor still opens. arc cannot observe another hook's decision, so this narrows the window it is
+// responsible for rather than closing one it does not own.
+// READ FROM THE SAME KNOB THE HARNESS READS, rather than hardcoding its default. The cap is
+// `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` and a human can lower it; an arc that always assumed 8 would
+// sail straight through a cap of 3 and re-open the trapdoor for anyone who touched the setting.
+// The harness's own guard is `if (cap > 0 && count > cap)`, so a cap of 0 or less disables
+// discarding altogether — mirrored here as "no self-cap", because a ceiling arc invents on its own
+// would silence deliveries the harness was perfectly willing to carry.
+const BLOCK_CAP = (() => {
+  const n = parseInt(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP, 10);
+  if (!Number.isFinite(n)) return 8;          // unset or unparseable — the harness's own default
+  return n > 0 ? n : Infinity;                // cap<=0 disables the harness's discard entirely
+})();
+const budgetFile = (s) => path.join(CACHE_DIR, `arc-stopblocks-${String(s).replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+// `stop_hook_active` is the chain signal: false means this turn end was NOT caused by a hook block,
+// so the consecutive run starts over. Reading it wrong in the safe direction (treating a chain as
+// fresh) would re-open the trapdoor, so an unreadable/absent flag counts as FRESH only because the
+// harness itself resets on the same condition — the two agree by construction.
+function blocksThisChain(session, chained) {
+  if (!chained) return 0;
+  try { return JSON.parse(fs.readFileSync(budgetFile(session), 'utf8')).n || 0; } catch { return 0; }
+}
+function recordBlock(session, n) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(budgetFile(session), JSON.stringify({ n, at: Date.now() }));
+  } catch { /* best effort — a counter must never wedge a turn */ }
+}
 
 function out(value) { process.stdout.write(JSON.stringify(value)); }
 
@@ -74,6 +127,14 @@ function run(raw) {
   //     multi-agent case). Turn-start HEAD is a lower bound the peer definitely saw, so the brief
   //     over-reports (safe noise) instead of under-reporting (silent zombie). See notes.stampSeenHead.
 
+  // 0c. THE BLOCK BUDGET, checked before anything below can spend state. Every branch past this
+  //     point consumes something one-shot the moment it decides to speak — the read cursor, a
+  //     request marker, the offer marker — so the ceiling has to be tested HERE, not at each `out`.
+  //     Returning null costs one turn boundary and keeps every note and marker intact.
+  const chained = !!hook.stop_hook_active;
+  const emitted = blocksThisChain(session, chained);
+  if (emitted >= BLOCK_CAP) return null;
+
   // 1. Anything on the board for me? Hand it over instead of going idle.
   //
   // THIS CASE MAY CHAIN, and must. A batch is capped at INJECT_MAX, so a peer that answers at
@@ -90,7 +151,7 @@ function run(raw) {
   // of 8 consecutive Stop blocks is the backstop, not the mechanism. The OFFERS below (arm a
   // listener) have no such property — they are advice, not a queue that drains — so they keep the
   // stop_hook_active guard and can never nag mid-continuation.
-  const inj = require('./arc-notes').injection(session, cwd);
+  const inj = require('./arc-notes').injection(session, cwd, { defer: true });
   if (inj) {
     const more = inj.count > inj.consumed;   // a capped batch — the rest arrives on the next stop
     // FOLD THE ARM-NUDGE INTO THE DELIVERY (measured fix, 2026-07-18). A role-holder that is not
@@ -140,6 +201,13 @@ function run(raw) {
         + (more ? ' More is still unread; arc will hand you the next batch when this turn ends.' : '')
         + `)${armTail}`,
     });
+    // CONSUME ONLY NOW, and in this order on purpose. The batch is spent AFTER the block is on
+    // stdout, so a crash between the two re-delivers it instead of eating it — a duplicate note is
+    // noise the reader can see, a swallowed one is a silent permanent gap. Same reasoning for the
+    // counter: over-counting costs at most one deferred delivery, under-counting re-opens the
+    // trapdoor at 0c.
+    inj.commit();
+    recordBlock(session, emitted + 1);
     return 'notes';
   }
 
@@ -162,7 +230,12 @@ function run(raw) {
   const N = require('./arc-notes');
   const open = N.unarmedRequests(session, cwd);
   if (open.notes.length) {
-    N.markRequestsArmed(session, open.notes.map((n) => n.seq));
+    // SPENT AFTER THE DECISION, NEVER BEFORE IT. This used to burn the per-request marker up here,
+    // which meant every path out of this branch — including one that never says a word — consumed
+    // the one thing that makes the offer repeatable. Both surviving paths still mark, so the
+    // "offered once per request" bound is unchanged; what changed is that a path which does NOT
+    // reach either of them can no longer silently eat the request.
+    const markAsked = () => N.markRequestsArmed(session, open.notes.map((n) => n.seq));
     // A live listener already guarantees the wake — the reply will exit it and re-invoke us.
     // Telling the agent to arm what is armed is exactly the nag this hook promises not to be.
     // isWaitingAs(open.role), NOT isWaiting: the reply lands addressed to open.role, so a listener
@@ -171,7 +244,7 @@ function run(raw) {
     // that is actually owed the answer — the silent-drop this case exists to prevent. (Adversarial
     // deafness-hunt, 2026-07-18: this was the ONE re-arm site left role-blind after case 1/case 3
     // were converted — two independent verifiers convicted it.)
-    if (require('./arc-await').isWaitingAs(session, open.role, { genuine: true })) return null;
+    if (require('./arc-await').isWaitingAs(session, open.role, { genuine: true })) { markAsked(); return null; }
     const asked = open.notes.map((n) => `#${n.seq} → ${n.to || 'everyone'}${n.toLive === false ? ' [EMPTY CHAIR]' : ''}: "${String(n.body).replace(/\s+/g, ' ').slice(0, 60)}"`).join('\n  ');
     // A request whose target is GONE cannot be answered — and the peer may have closed AFTER the
     // ask, so nothing warned at post time. Telling this agent to arm a listener would be telling
@@ -187,7 +260,6 @@ function run(raw) {
     // gives. So mark the offer here too, or case 3 would fire the identical prompt on the NEXT turn:
     // a double-nag for one action. markRequestsArmed above bounds THIS case per request; markOffered
     // bounds case 3. Both clear on a real arm (isWaiting) or a fresh delivery (case 1).
-    require('./arc-await').markOffered(session);
     out({
       decision: 'block',
       reason: `[arc] ${open.notes.length} request(s) you asked a peer are STILL UNANSWERED:\n  ${asked}\n${deadLine}\n`
@@ -200,6 +272,12 @@ function run(raw) {
         + `It exits the moment they reply, and that exit re-invokes YOU with it. If the answer `
         + `isn't worth waiting on, just say so and stop — you won't be asked about these again.`,
     });
+    // Both markers spent only now that the block is out. A crash here re-offers (one extra nag,
+    // visible, self-correcting); spending them first and dying would suppress the offer forever —
+    // wasOffered() latches, and a latched offer is a role-holder that idles deaf with no signal.
+    markAsked();
+    require('./arc-await').markOffered(session);
+    recordBlock(session, emitted + 1);
     return 'request';
   }
 
@@ -245,8 +323,23 @@ function run(raw) {
     if (mine.length) {
       const live = R.liveRoles(board);
       // Idle = live, and owes me nothing. Anything still holding an unanswered request is working.
-      const idle = mine.filter((b) => live.some((l) => l.role === b.role)
-        && !R.openRequests(board, b.role).some((n) => n.to === b.role));
+      //
+      // `n.to === b.role` WAS THE TEST HERE, and strict equality answers "is this directed at that
+      // peer?" wrongly for both shapes that carry more than one recipient: an array `to` (posted by
+      // `arc delegate a,b "packet"` and `arc note a,b --kind request`, both shipped features) and a
+      // broadcast, where `to` is null. Either way the recipient came back "owes nothing" and got
+      // listed as an idle leak — and this nag's prescription is `arc close`, which is on the
+      // un-prompted allowlist BECAUSE this nag prescribes it, and which SIGKILLs the runner, its
+      // children and the parent shell without checking what it owes. So the misclassification ends
+      // with an agent killing, unprompted, the peer it just asked. Uses arc-board's own toHas now,
+      // instead of a fourth spelling of a question that already has one answer.
+      //
+      // A BROADCAST COUNTS AS OWED, which is the conservative reading rather than the obvious one:
+      // a broadcast request closes on ANY single reply, so a given peer does not strictly owe it.
+      // But the cost of the two mistakes is not symmetric — a missed nag is an idle process, a
+      // wrong one is a killed peer — so anything still addressed to it keeps it off this list.
+      const owes = (b) => R.openRequests(board, b.role).some((n) => n.to == null || R.toHas(n.to, b.role));
+      const idle = mine.filter((b) => live.some((l) => l.role === b.role) && !owes(b));
       // A CHARTERED role — one with an .arc/roles/<role>.md FILE on disk — is a STANDING DUTY, and the
       // nag must NEVER push you to close it. That was the bug the human caught: it listed a chartered
       // `research` as something to reap, and closing a standing peer is not free — reviving it pays
@@ -286,6 +379,7 @@ function run(raw) {
             + `brings it back knowing everything it learned. Chartered standing peers are NOT listed here — `
             + `they are teammates waiting for work, and leaving them live between assignments is correct.`,
         });
+        recordBlock(session, emitted + 1);
         return 'spawns';
       }
     }
@@ -315,7 +409,21 @@ function run(raw) {
   // one, so a role-blind check would leave a role-changed session silently deaf (the misfile shape).
   if (A.isWaitingAs(session, open.role, { genuine: true })) { A.clearOffered(session); return null; }  // listening AS THIS ROLE: quiet, re-offer next cycle
   if (A.wasOffered(session)) return null;            // already asked this cycle — never nag
-  A.markOffered(session);
+  // S6 (audit) LIVES HERE AND IS DELIBERATELY NOT FIXED — the redundant block is the cheaper defect.
+  // The complaint is real: case 1 folds the arm nudge into a delivery it was making anyway, then
+  // calls clearOffered to re-open the cycle, so this standalone offer can fire right behind it
+  // carrying the SAME instruction in a block of its own.
+  // Suppressing it chain-scoped was TRIED and reverted: it re-created the deaf-after-delivery hole
+  // that fired live twice in one day (2026-07-18). clearOffered is called both by case 1 AND when a
+  // wake CONSUMES the listener, and from inside this hook those two are indistinguishable — so any
+  // "already nudged this chain" flag also silences the genuinely-deaf session the offer exists for.
+  // The suite pins that case ("a FRESH cycle gets the listener offer even mid-continuation") and it
+  // went red on the attempt, which is the whole reason that test is there.
+  // Severity also fell once the block budget landed: audit's argument for fixing S6 was that a
+  // wasted slot made the discard reachable at 8 batches instead of 9, and there is no discard now —
+  // a spent slot costs one DEFERRED delivery, not an eaten note. So the trade is a redundant nag
+  // (over-deliver, visible, self-correcting) against silent deafness (suppress, permanent). Taking
+  // the nag is not laziness; it is the direction this hook is supposed to fail in.
   out({
     decision: 'block',
     reason: `[arc] You hold the role "${open.role}" on this board, so a peer can address you at any time — `
@@ -325,6 +433,11 @@ function run(raw) {
       + `It blocks (costing nothing) until a note lands, then EXITS — and that exit re-invokes you with it. `
       + `Do this, then finish your turn normally; you won't be asked again while it's listening.`,
   });
+  // Latched only after the offer is actually out — wasOffered() above is what makes this
+  // once-per-cycle, so spending it on an offer that never shipped is precisely how a role-holder
+  // ends up deaf with the marker claiming it was already asked.
+  A.markOffered(session);
+  recordBlock(session, emitted + 1);
   return 'listen';
 }
 

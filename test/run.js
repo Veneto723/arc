@@ -95,6 +95,42 @@ try {
     !(new Set(require('module').builtinModules)).has('express'));
 } catch (e) { ok('founding constraints are checkable', false, e.message); }
 
+// ---- a workflow script must carry NO control characters, CR included ---------------------------
+// A workflow script is DATA handed to the Workflow tool, and its permission layer refuses any script
+// containing control characters ("script contains control characters that would be hidden in the
+// approval dialog"). CR (0x0D) is one. So a Windows checkout — core.autocrlf=true, which is the
+// default and therefore the norm on arc's ONLY supported platform — turned round.js into 580 control
+// characters and `inquiry` could not launch at all. Reproduced verbatim before this guard existed.
+//
+// It hid because every reasonable scan treats CR as line-ending noise rather than as the control
+// character it is: the repo copy and the deployed copy were byte-identical and both "scanned clean".
+// .gitattributes pins these to LF; this asserts the pin is there AND that it actually took.
+section('workflow scripts (no control characters — the Workflow tool refuses them)');
+try {
+  const attrs = fs.readFileSync(path.join(ROOT, '.gitattributes'), 'utf8');
+  ok('.gitattributes pins bundle workflow scripts to LF (a fresh Windows clone would not otherwise)',
+    /bundles\/\*\/workflows\/\*\.js\s+text\s+eol=lf/.test(attrs));
+  const wfFiles = [];
+  for (const b of fs.readdirSync(path.join(ROOT, 'bundles'))) {
+    const dir = path.join(ROOT, 'bundles', b, 'workflows');
+    try { for (const f of fs.readdirSync(dir)) if (f.endsWith('.js')) wfFiles.push(path.join(dir, f)); } catch {}
+  }
+  ok('there are workflow scripts to check (the guard is not vacuously passing)', wfFiles.length > 0);
+  const offenders = [];
+  for (const f of wfFiles) {
+    const buf = fs.readFileSync(f);
+    const bad = [];
+    for (let i = 0; i < buf.length; i++) {
+      const c = buf[i];
+      if (c === 10 || c === 9) continue;                 // LF and TAB are the only legal ones
+      if (c < 0x20 || c === 0x7f) bad.push('0x' + c.toString(16));
+    }
+    if (bad.length) offenders.push(`${path.relative(ROOT, f)} (${bad.length}x, e.g. ${bad[0]})`);
+  }
+  ok('no bundle workflow script contains a control character — CR would make it unlaunchable',
+    offenders.length === 0, offenders.join(' | '));
+} catch (e) { ok('workflow scripts are checkable', false, e.message); }
+
 section('syntax (node --check, all platforms)');
 const jsFiles = [];
 for (const d of ['src', 'mcp', 'test']) {
@@ -422,6 +458,53 @@ try {
   ok('removeProfile on a nonexistent account is a safe no-op (null)', P.removeProfile('never-existed') === null);
   // the graveyard must never be mistaken for a profile: account ids can't start with '.'
   ok('.trash is outside the account namespace', !/^[a-z]/i.test(path.basename(path.join(P.PROFILES_DIR, '.trash'))));
+
+  // AN ACCOUNT ID BECOMES A PATH — the traversal that walked a plaintext OAuth token out of the
+  // hardened tree. `profileDir(id)` is path.join(PROFILES_DIR, id) and path.join RESOLVES '..', so
+  // `arc rename max ../../evil` moved the whole profile — .credentials.json included — outside
+  // arc-profiles, reported rc 0 and a ✓, and told the user "login preserved" while the login now
+  // sat where secureDir's hardening never runs. The shape gate existed ONLY in requestRename (the
+  // prompt form); the TERMINAL path calls doRename directly and had none. Verified: the prompt form
+  // was never vulnerable — this was the terminal path alone.
+  {
+    const CFG = require(path.join(SRC, 'arc-config.js'));
+    const shapes = [['../../evil', false], ['..\\..\\evil', false], ['a/../../x', false], ['a/b', false],
+      ['', false], ['.hidden', false], ['-lead', false], ['work', true], ['My_Acct-2', true]];
+    const wrong = shapes.filter(([id, want]) => CFG.validAccountId(id) !== want);
+    ok('an account id that could become a PATH is refused by one shared predicate',
+      wrong.length === 0, wrong.map(([i]) => JSON.stringify(i)).join(' | '));
+
+    // BOTH ids, at the function that performs the move. A bad NEW id walks the credential out; a
+    // bad OLD id drags an arbitrary directory IN. Neither caller's validation is relied on, because
+    // the caller that had none is exactly how this was reached.
+    fs.mkdirSync(path.join(P.PROFILES_DIR, 'renameme'), { recursive: true });
+    fs.writeFileSync(path.join(P.PROFILES_DIR, 'renameme', '.credentials.json'), '{"t":"fake"}');
+    const escapes = ['../../evil', '..\\..\\evil', 'a/../../../evil'];
+    const leaked = escapes.filter((bad) => {
+      try { P.renameProfile('renameme', bad); return true; } catch { return false; }
+    });
+    ok('renameProfile refuses every traversal spelling of the NEW id', leaked.length === 0, leaked.join(' | '));
+    let oldOk = false;
+    try { P.renameProfile('../../../something', 'newname'); } catch { oldOk = true; }
+    ok('...and of the OLD id too (else it moves a directory the user never named INTO arc-profiles)', oldOk);
+    ok('...with the credential still inside the hardened tree',
+      fs.existsSync(path.join(P.PROFILES_DIR, 'renameme', '.credentials.json')));
+    // The control: a fix that refuses everything is not a fix.
+    let legit = true;
+    try { P.renameProfile('renameme', 'renamed-ok'); } catch { legit = false; }
+    ok('...while a LEGITIMATE rename still moves the profile',
+      legit && fs.existsSync(path.join(P.PROFILES_DIR, 'renamed-ok', '.credentials.json')));
+
+    // doRename must ALSO check, and not lean on renameProfile: an account configured but never
+    // launched has no profile dir, so renameProfile early-outs `false` without validating anything
+    // — and the config edit would then record "../../evil" as an account id, poisoning every later
+    // profileDir() call with a traversal no rename would be blamed for.
+    const SC2 = require(path.join(SRC, 'arc-switch-core.js'));
+    const both = [['nodir', '../../evil'], ['../../evil', 'nodir']].filter(([o, n]) => {
+      try { SC2.doRename(CFG, o, n); return true; } catch { return false; }
+    });
+    ok('doRename refuses both ids even when no profile dir exists to move', both.length === 0);
+  }
 } catch (e) { ok('arc-profile works', false, e.message); }
 
 // ---- 4. arc-sync — trash (list / restore / empty / transcriptMeta) ------------
@@ -3671,6 +3754,60 @@ try {
     ok('...while the BARE form of that same spelling is untouched', bareOk.decision === null, JSON.stringify(bareOk));
   }
 
+  // ---- and so must EVERY OTHER GATE: the spellings live in one table --------------------------
+  // The bug this locks: ee7f700 taught the ARM gate every spelling above and left RX_DELEGATE and
+  // RX_CROSS_BOARD on the literal-`arc` anchor. Audit measured the cost on real traffic — 20 of 59
+  // delegates (34%) and 4 of 10 cross-board notes tunnelled the gate, one of them a BROADCAST onto
+  // another repo's ledger. A miss does not fail closed; it falls through to a generic prompt, so
+  // /arc-mode passive silently degraded to the normal flow. All three now build from ARC_EXE, and
+  // this test is what makes teaching one gate a spelling — and not the others — impossible again.
+  {
+    const PT3 = require(path.join(SRC, 'arc-pretool-hook.js'));
+    const SPELLINGS = [
+      'arc', 'arc.cmd', './arc',
+      'node src/arc-runner.js',
+      'node "$HOME/.claude/scripts/arc-runner.js"',
+      'node C:/Users/yanyu/.claude/scripts/arc-runner.js',
+      '& "$env:USERPROFILE\\.local\\bin\\arc.cmd"',
+    ];
+    const missDel = SPELLINGS.filter((p) => {
+      const m = (p + ' delegate zzznobody "packet"').match(PT3.RX_DELEGATE);
+      return !m || m[1] !== 'zzznobody';                 // must match AND still capture the ROLE
+    });
+    ok('the DELEGATE gate sees every spelling the arm gate sees (and still captures the role)',
+      missDel.length === 0, missDel.join(' | '));
+    const missXb = SPELLINGS.filter((p) => {
+      const m = (p + ' note code --board E:/whalephone "hi"').match(PT3.RX_CROSS_BOARD);
+      return !m || m[1] !== 'E:/whalephone';             // must match AND still capture the BOARD
+    });
+    ok('...and so does the CROSS-BOARD gate (the one finding with occurrences that already happened)',
+      missXb.length === 0, missXb.join(' | '));
+    const missArm = SPELLINGS.filter((p) => !PT3.ARM_LEAD_RX.test((p + ' join code').trim()));
+    ok('...and the arm gate still does, now that it reads from the shared table', missArm.length === 0,
+      missArm.join(' | '));
+
+    // THE REPLY GATE IS NARROW ON PURPOSE, and this assertion is the record of that decision rather
+    // than a description of a gap. Every gate above ASKS or DENIES, so an unrecognised spelling
+    // costs a prompt and breadth is free. RX_NOTE_REPLY ALLOWS — for an allow the arithmetic
+    // inverts, and breadth buys a bypass. If someone widens it to "match the others", this fails
+    // and says why.
+    ok('the REPLY exemption stays narrow — it ALLOWS, so a missed spelling costs a prompt but a loose match is a bypass',
+      !PT3.RX_NOTE_REPLY.test('node src/arc-runner.js note code --reply-to 5 "answer"')
+      && PT3.RX_NOTE_REPLY.test('arc note code --reply-to 5 "answer"'));
+
+    // The tightening that came with sharing the table: a basename must be REACHED BY A SEPARATOR.
+    // Without it `evil-arc-runner.js` ends with the literal — harmless for a gate that asks, not
+    // harmless for soleCommand, which stands in front of the ACTIVE-stance auto-allow.
+    ok('a look-alike runner (`evil-arc-runner.js`) is NOT read as arc\'s own — soleCommand fronts an auto-ALLOW',
+      !PT3.soleCommand('node ./evil-arc-runner.js delegate zzznobody "packet"', 'delegate')
+      && PT3.soleCommand('node src/arc-runner.js delegate zzznobody "packet"', 'delegate'));
+    // soleCommand had to widen with the gates: a bare node-spelled delegate that failed the sole
+    // test was refused with "chained to another command", which is false about that command. A gate
+    // may decline a spelling; it may not give the human the wrong reason.
+    ok('...and the control-character veto still scopes the allow, so no chained tail rides it',
+      !PT3.soleCommand('node src/arc-runner.js delegate zzznobody "p"; rm -rf X', 'delegate'));
+  }
+
   // The three dial positions.
   St3.setStance(GS, 'passive');
   const den = gate('arc delegate frontend "do a thing"');
@@ -4917,6 +5054,30 @@ try {
   R.markRead(rTop, 'coding');
   ok('a note after a torn line does not redeliver forever', R.unreadFor(rTop, 'coding').count === 0);
 
+  // 7b) AN UNTERMINATED torn line must not swallow the NEXT note. The case above appends
+  // '{not json\n' — WITH a newline — so it never exercised the shape a crash actually leaves:
+  // a fragment with NO trailing newline. O_APPEND is atomic between concurrent writers; it promises
+  // nothing about a process that dies mid-write. Without healing, the next record is glued onto the
+  // fragment, the two become ONE unparseable line, and allNotes' skip discards BOTH — destroying the
+  // HEALTHY note, whose caller was told the post succeeded. Suppress, silent, permanent.
+  {
+    const beforeCount = R.allNotes(rTop).length;
+    fs.appendFileSync(R.notesPath(rTop), '{"id":"aaaa:bbbb","ts":"2026-01-01","fr');   // crash: no \n
+    const posted = R.appendNote(rTop, { from: 'research', to: 'coding', body: 'survives a torn tail' });
+    const after = R.allNotes(rTop);
+    ok('a note appended after an UNTERMINATED torn line survives (the fragment is skipped, not the note)',
+      after.some((n) => n.id === posted.id),
+      'ledger tail: ' + JSON.stringify(fs.readFileSync(R.notesPath(rTop), 'utf8').split('\n').slice(-3)));
+    ok('...and it costs exactly one note — the fragment — not two',
+      after.length === beforeCount + 1, `before=${beforeCount} after=${after.length}`);
+    // The heal must not corrupt a healthy ledger: a normal append still produces no blank lines.
+    R.appendNote(rTop, { from: 'research', to: 'coding', body: 'normal append after the heal' });
+    const lines = fs.readFileSync(R.notesPath(rTop), 'utf8').split('\n');
+    ok('...and a normal append onto a well-formed ledger adds no blank line',
+      lines.filter((l) => l === '').length === 1, JSON.stringify(lines.slice(-3)));
+    R.markRead(rTop, 'coding');
+  }
+
   // 8) role claim. IDENTITY IS THE SESSION; the pid is only a liveness probe.
   ok('claim a free role', R.claimRole(rTop, 'coding', process.pid, 's1').ok === true);
   // A different LIVE session must be refused even if it reports the SAME pid.
@@ -5431,7 +5592,237 @@ try {
     !R2.openRequests(sboard).map((n) => n.seq).includes(4));
   ok('repliesTo threads the answers under a request', R2.repliesTo(sboard, 1).length === 1);
   ok('KINDS/KIND_RANK rank a blocker + correction ABOVE routine info',
-    R2.KIND_RANK.blocker < R2.KIND_RANK.info && R2.KIND_RANK.correction < R2.KIND_RANK.info && R2.KINDS.includes('decision'));
+    R2.KIND_RANK.blocker < R2.KIND_RANK.info && R2.KIND_RANK.correction < R2.KIND_RANK.info && R2.KINDS.includes('contract'));
+  ok('...and a `contract` outranks a request — a clause binding two roles is not routine news',
+    R2.KIND_RANK.contract < R2.KIND_RANK.request && R2.KIND_RANK.contract < R2.KIND_RANK.result);
+
+  // ---- the CONTRACT reads: a contract is a THREAD, not a file ---------------------------------
+  // `arc notes --kind contract` lists them, `--thread <seq>` shows one in full. Both are cursor-free
+  // like --head/all, because their readers are the human (who holds no chair and must never consume
+  // a live session's notes) and a peer re-checking a clause it has already read.
+  {
+    const crepo = fs.mkdtempSync(path.join(os.tmpdir(), 'contract-'));
+    fs.mkdirSync(path.join(crepo, '.git'), { recursive: true });
+    const CB = R2.resolveBoard(crepo); R2.ensureBoard(CB);
+    const F3 = require(path.join(SRC, 'arc-notes.js'));
+    const post = (from, to, body, x = {}) => R2.appendNote(CB, { from, to, kind: 'contract', body, ...x });
+    const seqOf = (rec) => (R2.allNotes(CB).find((n) => n.id === rec.id) || {}).seq;
+
+    const opener = post('code', ['android', 'backend'], 'SESSION TOKENS — websocket, not polling.');
+    post('backend', ['android'], 'I expose POST /session/token', { replyTo: opener.id });
+    const wrong = post('android', ['backend'], 'I call it on every request', { replyTo: opener.id });
+    post('android', ['backend'], 'cold start only', { replyTo: opener.id, supersedes: wrong.id });
+    const other = post('code', ['android', 'uiux'], 'OFFLINE SYNC — last-write-wins.');
+    post('uiux', ['android'], 'I show a conflict banner', { replyTo: other.id });
+
+    const list = F3.requestNotes('', '--kind contract', crepo);
+    ok('`arc notes --kind contract` groups clauses into ONE row per contract thread',
+      list.ok && /2 contract\(s\)/.test(list.message)
+      && /SESSION TOKENS/.test(list.message) && /OFFLINE SYNC/.test(list.message), list.message);
+    ok('...and works with NO session — the human holds no chair and must not consume a peer\'s notes',
+      list.plain === true);
+
+    // THE BUG TESTING CAUGHT. Membership was first INFERRED from the newest clause's recipients —
+    // but an ordinary clause is addressed to the OTHER party, so a reply from uiux to android made
+    // OFFLINE SYNC read "bound: android" and dropped uiux from its own contract. Membership must be
+    // DECLARED (the opener's recipients), never inferred from who someone happened to answer.
+    ok('membership is DECLARED by the opener, never inferred from who a clause replied to',
+      /OFFLINE SYNC[\s\S]*?bound: android, uiux/.test(list.message), list.message);
+
+    const full = F3.requestNotes('', '--thread ' + seqOf(opener), crepo);
+    ok('`--thread <seq>` shows every clause of that contract and no other contract\'s',
+      full.ok && /CONTRACT #/.test(full.message)
+      && /I expose POST/.test(full.message) && !/OFFLINE SYNC/.test(full.message), full.message);
+    ok('...with a retracted clause struck where it is read, not deleted',
+      /RETRACTED by #\d+ — not in force[\s\S]*?I call it on every request/.test(full.message));
+
+    // ADD and REMOVE a role: supersede the OPENER with a new recipient set. Nothing else moves.
+    const v2 = post('code', ['android', 'backend', 'uiux'], 'v2 — uiux joins',
+      { replyTo: opener.id, supersedes: opener.id });
+    const added = F3.requestNotes('', '--thread ' + seqOf(opener), crepo);
+    ok('ADDING a role = supersede the opener with the wider set',
+      /bound: android, backend, uiux/.test(added.message), added.message);
+    post('code', ['android', 'uiux'], 'v3 — backend off', { replyTo: opener.id, supersedes: v2.id });
+    const removed = F3.requestNotes('', '--thread ' + seqOf(opener), crepo);
+    ok('REMOVING a role = supersede again with the narrower set, and it says who LEFT',
+      /bound: android, uiux/.test(removed.message) && /no longer bound: backend/.test(removed.message), removed.message);
+    // The whole point of a thread read: a role added on day 3 can still read day 1's clauses, which
+    // a delivery-time recipient list could never give it.
+    ok('...and the earlier clauses stay readable to a role added later (the thread, not the mailbox)',
+      /I expose POST/.test(removed.message));
+    ok('an unknown thread seq says so rather than showing an empty contract',
+      F3.requestNotes('', '--thread 9999', crepo).ok === false);
+
+    // A CONTRACT THREAD STAYS A CONTRACT THREAD. Found on the SHIPPING SURFACE, not here: replying
+    // the natural way (`--reply-to N`, no `--kind`) filed the clause as a `result`, so it dropped
+    // out of the contract's own accounting and the read said "2 clauses" over a thread of three.
+    // Requiring every clause to restate --kind would be a rule enforced by memory, and memory is
+    // exactly what this repo measured at ~93%.
+    const inherit = R2.appendNote(CB, { from: 'backend', to: 'android', body: 'no kind given', replyTo: opener.id });
+    ok('a reply to a contract INHERITS `contract` — no need to restate --kind on every clause',
+      R2.allNotes(CB).find((n) => n.id === inherit.id).kind === 'contract');
+    // ...but the inference must not swallow the ordinary cases it already served.
+    const plainReq = R2.appendNote(CB, { from: 'code', to: 'android', kind: 'request', body: 'ordinary ask' });
+    const plainRep = R2.appendNote(CB, { from: 'android', to: 'code', body: 'ordinary answer', replyTo: plainReq.id });
+    ok('...while a reply to a NON-contract still infers `result` as it always did',
+      R2.allNotes(CB).find((n) => n.id === plainRep.id).kind === 'result');
+
+    // Keeping the thread coherent costs the auto-HIGH a `correction` would have carried, and a
+    // revised clause is the one note a peer must not miss — it is already building against the
+    // version being withdrawn. So the urgency is restored explicitly.
+    // NOTE THE SHAPE: `supersedes` with NO `replyTo`. That is what the footer, `arc help` and the
+    // peers skill all teach, and it is the ONLY shape a documented invocation produces. The first
+    // version of this assertion passed BOTH flags — the control shape — and was green while the
+    // documented one ejected the replacement from its own contract, because the write half walked
+    // `replyTo || supersedes` and the read half walked `replyTo` alone. A test whose fixture the
+    // shipping surface cannot emit is a green light wired to nothing. (Found by `audit` retracting
+    // its own SOUND verdict.)
+    const countContracts = () =>
+      parseInt((F3.requestNotes('', '--kind contract', crepo).message.match(/(\d+) contract\(s\)/) || [0, '0'])[1], 10);
+    const before = countContracts();
+    const revised = R2.appendNote(CB, { from: 'android', to: 'backend', body: 'v2 of my half',
+      supersedes: inherit.id });
+    const rev = R2.allNotes(CB).find((n) => n.id === revised.id);
+    ok('a contract clause that RETRACTS another is auto-HIGH (it changes an agreement in flight)',
+      rev.kind === 'contract' && rev.priority === 'high');
+    const afterRetract = F3.requestNotes('', '--thread ' + seqOf(opener), crepo);
+    ok('a clause retracted the DOCUMENTED way (--supersedes, no --reply-to) STAYS IN ITS CONTRACT',
+      /v2 of my half/.test(afterRetract.message), afterRetract.message);
+    // The bug's other half: the ejected clause became its OWN contract, so the board grew one.
+    // Count before vs after — this board legitimately holds two contracts already.
+    ok('...and retracting does not SPAWN a new contract (the ejected clause used to become one)',
+      countContracts() === before, `before=${before} after=${countContracts()}`);
+
+    // THE HISTORICAL SHAPE, named by audit and true on a real board. `kind` is stored at WRITE time,
+    // so inheritance is not retroactive: whalephone already holds two `result` notes (#239, #240)
+    // replying to a `decision`/contract parent, written before the rule existed. I had claimed in my
+    // own verdict request that no such note existed — that was FALSE, and audit checked it rather
+    // than taking it. Those clauses stay `result` in the bytes forever, so the thread read must
+    // still count and show them: a contract that under-reports its own size is the exact defect the
+    // inheritance fix exists to prevent, and it would otherwise survive on the one board that has
+    // contracts already.
+    const oldParent = R2.appendNote(CB, { from: 'code', to: ['android', 'uiux'], kind: 'contract', body: 'LEGACY SEAM' });
+    const oldChild = R2.appendNote(CB, { from: 'uiux', to: 'android', kind: 'result', body: 'a clause written before the rule' });
+    // rewrite that child's replyTo by hand, exactly as an older arc left it on disk
+    const lp = path.join(CB.planDir, 'notes.jsonl');
+    const lines = fs.readFileSync(lp, 'utf8').split('\n').filter(Boolean).map((l) => {
+      const j = JSON.parse(l);
+      if (j.id === oldChild.id) { j.replyTo = oldParent.id; return JSON.stringify(j); }
+      return l;
+    });
+    fs.writeFileSync(lp, lines.join('\n') + '\n');
+    const legacySeq = R2.allNotes(CB).find((n) => n.id === oldParent.id).seq;
+    const legacyThread = F3.requestNotes('', '--thread ' + legacySeq, crepo);
+    ok('a pre-inheritance clause (stored `result`) still appears in its contract thread',
+      /a clause written before the rule/.test(legacyThread.message), legacyThread.message);
+    ok('...and is COUNTED, so an older contract never under-reports its own size',
+      /CONTRACT #\d+ — 2 clause\(s\)/.test(legacyThread.message), legacyThread.message);
+    const legacyList = F3.requestNotes('', '--kind contract', crepo);
+    ok('...and the list counts it too (clauses come from the THREAD, not from kind-matching)',
+      /LEGACY SEAM[\s\S]*?2 clause\(s\)/.test(legacyList.message), legacyList.message);
+
+    // A CONTRACT'S `to` IS ITS MEMBERSHIP. An ordinary note strips the author (you never read your
+    // own), but that same list declares who is BOUND — so `backend` opening a contract naming
+    // itself stored `to:"android"` and read "bound: android", dropping the role that owns half the
+    // seam. Delivery is unaffected: unreadFor drops `n.from === role` before it looks at `to`.
+    const SB = 'selfbind-' + process.pid;
+    fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${SB}.json`),
+      JSON.stringify({ pid: process.pid, cwd: crepo, convId: 'sb-conv' }));
+    F3.requestRole(SB, 'backend', crepo);
+    F3.requestNote(SB, 'android,backend --kind contract "backend names itself as a party"', crepo);
+    const selfNote = R2.allNotes(CB).slice(-1)[0];
+    ok('a contract KEEPS its author in the bound list — the seam has two sides, not one',
+      Array.isArray(selfNote.to) && selfNote.to.includes('backend') && selfNote.to.includes('android'),
+      JSON.stringify(selfNote.to));
+    ok('...but a contract bound to NOBODY BUT YOU is refused (one party is not a seam)',
+      F3.requestNote(SB, 'backend --kind contract "just me"', crepo).ok === false);
+    ok('...and an ordinary note still strips the author as it always did',
+      (() => { F3.requestNote(SB, 'android,backend "ordinary"', crepo);
+        const n = R2.allNotes(CB).slice(-1)[0];
+        return !(Array.isArray(n.to) ? n.to : [n.to]).includes('backend'); })());
+
+    // A CONTRACT REPLYING TO A CONTRACT FOLDS INTO IT — correct for a clause, and silent ruin for
+    // someone opening a SECOND contract: theirs vanishes from the list entirely (verified). No
+    // automatic rule separates the two, because a clause is also a contract note replying to a
+    // contract and its recipients differ from the opener's BY DESIGN. So arc does not guess — it
+    // names what happened where the author still remembers what they meant.
+    const clauseRes = F3.requestNote(SB, 'android --kind contract --reply-to ' + seqOf(opener) + ' "another seam?"', crepo);
+    ok('posting a contract as a REPLY says it is a CLAUSE, and how to open a separate one instead',
+      /this is a CLAUSE of contract #\d+/.test(clauseRes.message) && /NO --reply-to/.test(clauseRes.message),
+      clauseRes.message);
+    const standaloneRes = F3.requestNote(SB, 'android --kind contract "a genuinely separate seam"', crepo);
+    ok('...and a STANDALONE contract gets no such warning (nothing went wrong)',
+      !/this is a CLAUSE/.test(standaloneRes.message));
+
+    // THE RULE THAT WAS BUILT AND THEN FALSIFIED — asserted so it cannot be reintroduced.
+    // `audit` ruled that a contract-reply naming a role OUTSIDE the parent's membership must be its
+    // own root, since a clause only ever addresses a SUBSET. It was implemented, and audit withdrew
+    // the ruling with the shape below, which was reproduced against the implementation before the
+    // revert: a clause that WIDENS the party set — the normal way a third role is pulled into a
+    // seam — was ejected into a contract of its own. A clause and a mistakenly-replied new contract
+    // are byte-identical in structure and differ only in INTENT, which is not in the data, so any
+    // discriminator corrupts one of them. The fold stays; the SILENCE is removed instead (the clause
+    // hint above). This test exists to keep the falsified rule out.
+    {
+      const rrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ruling-'));
+      fs.mkdirSync(path.join(rrepo, '.git'), { recursive: true });
+      const RB2 = R2.resolveBoard(rrepo); R2.ensureBoard(RB2);
+      const sid = (nm, role) => {
+        const s = `${nm}-ruling-${process.pid}`;
+        fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`),
+          JSON.stringify({ pid: process.pid, cwd: rrepo, convId: nm + 'ruling' }));
+        F3.requestRole(s, role, rrepo);
+        return s;
+      };
+      const C2 = sid('code', 'code'), A2 = sid('android', 'android');
+      sid('backend', 'backend'); sid('uiux', 'uiux');
+      F3.requestNote(C2, 'android,backend --kind contract "OPENER — the token seam"', rrepo);
+      // a clause that WIDENS: it names uiux, whom the opener never bound, and is still a clause
+      F3.requestNote(A2, 'backend,uiux --kind contract --reply-to 1 "uiux signs off on the token TTL"', rrepo);
+      const rl = F3.requestNotes('', '--kind contract', rrepo).message;
+      ok('a clause that WIDENS the party set stays a CLAUSE — it is not ejected into its own contract',
+        /1 contract\(s\)/.test(rl) && /2 clause\(s\)/.test(rl), rl);
+      // and a clause addressing a subset is obviously still a clause
+      F3.requestNote(A2, 'backend --kind contract --reply-to 1 "cold start only"', rrepo);
+      ok('...as does one addressing a SUBSET of the bound roles (both shapes fold, by design)',
+        /1 contract\(s\)/.test(F3.requestNotes('', '--kind contract', rrepo).message));
+      for (const s of [C2, A2]) { try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`)); } catch {} }
+      fs.rmSync(rrepo, { recursive: true, force: true });
+    }
+
+    // `--thread` must not manufacture authority: it printed "CONTRACT #N" over routine chatter.
+    const chat = R2.appendNote(CB, { from: 'code', to: 'android', kind: 'info', body: 'routine chatter' });
+    const notAContract = F3.requestNotes('', '--thread ' + R2.allNotes(CB).find((n) => n.id === chat.id).seq, crepo);
+    ok('--thread on a NON-contract says what it is instead of calling it a contract',
+      notAContract.ok === false && /is not a contract/.test(notAContract.message), notAContract.message);
+    try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${SB}.json`)); } catch {}
+    fs.rmSync(crepo, { recursive: true, force: true });
+  }
+
+  // THE RENAME'S LEGACY SHIM. `decision` was this kind's first name and notes carrying it EXIST on
+  // disk (whalephone posted 3). The ledger is append-only, so those bytes never change — and
+  // normalizeKind degrades an unknown kind to `info`, which would have re-filed a clause binding two
+  // roles as routine news, silently, with nothing to say why. Normalising on READ is what keeps them
+  // whole: rank, filter and display all key off `kind`.
+  {
+    const brepo = fs.mkdtempSync(path.join(os.tmpdir(), 'kindalias-'));
+    fs.mkdirSync(path.join(brepo, '.git'), { recursive: true });
+    const KB = R2.resolveBoard(brepo); R2.ensureBoard(KB);
+    // hand-write a note with the OLD spelling, exactly as an older arc left it on disk
+    fs.appendFileSync(path.join(KB.planDir, 'notes.jsonl'),
+      JSON.stringify({ id: 'old:aaaaaaaaaaaa', ts: new Date().toISOString(), from: 'android', to: 'backend',
+        kind: 'decision', priority: 'normal', body: 'tokens go over websocket' }) + '\n');
+    const back = R2.allNotes(KB)[0];
+    ok('a note stored with the OLD kind name reads back as `contract` (the ledger is never rewritten)',
+      back.kind === 'contract', 'got ' + back.kind);
+    ok('...so it keeps its RANK instead of silently demoting to routine info',
+      (R2.KIND_RANK[back.kind] ?? 5) === R2.KIND_RANK.contract);
+    ok('...and writing the old spelling still normalises to the new one',
+      R2.normalizeKind('decision') === 'contract' && R2.normalizeKind('contract') === 'contract');
+    ok('...while an unknown kind still degrades to info rather than throwing',
+      R2.normalizeKind('nonsense') === 'info');
+    fs.rmSync(brepo, { recursive: true, force: true });
+  }
 
   // the READ path must make a retraction impossible to miss
   const F2 = F;
@@ -5865,6 +6256,48 @@ try {
     !ask('/arc-mode I think balanced fits best').decision
     && !ask('/arc-switch to whichever account has headroom').decision);
 
+  // THE VERBS THE ARG POLICY WAS NEVER EXTENDED TO. Each rule above landed as its own field report;
+  // the remaining verbs fell through to "anything goes" and dispatched on a plain English sentence.
+  // `/arc-add-account for the new project we discussed` took "for" as an account id — and since a
+  // matched prompt is ERASED, the sentence explaining what was actually wanted never reached the
+  // model. Wrong action AND destroyed message, from one unguarded fall-through.
+  // Driven through the REAL hook, because failing open is a property of the shipping surface.
+  const PROSE = [
+    '/arc-add-account for the new project we discussed',
+    '/arc-add another sub so we can rotate quota',
+    '/arc-remove-account the one that keeps rate limiting',
+    '/arc-rm-account that is broken please',              // ALIAS — gating only the canonical spelling
+    '/arc-delete-account the old gateway when you get a chance',   // fixes the one nobody types
+    '/arc-export everything before we refactor',
+    '/arc-import the archive I put on the desktop yesterday',
+    '/arc-trash is getting full, can you check',
+    '/arc-restore the session I deleted by mistake',
+    '/arc-notes from the research peer please',
+  ];
+  const ate = PROSE.filter((p) => !!ask(p).decision);
+  ok('every single-token verb now lets a SENTENCE through instead of eating it (10 verbs, aliases included)',
+    ate.length === 0, ate.join(' | '));
+
+  // The other half, and the one that makes the gate a fix rather than a mute: the real forms must
+  // still dispatch. Asserted against the predicate, NOT through the hook — `/arc-export all` and
+  // `/arc-trash empty` would really export and really empty the trash, and a test must not do that
+  // to the machine it runs on.
+  const SL7 = require(path.join(SRC, 'arc-slash.js'));
+  const broke = [
+    ['add-account', 'work'], ['add-account', 'gw --api --url https://example.com'],
+    ['remove-account', 'work'], ['rm-account', 'work'],
+    ['export', 'all'], ['export', 'global'],
+    ['import', 'C:/tmp/arc-export-1.tgz'], ['import', 'C:/tmp/a.tgz C:/dest'],
+    ['trash', 'empty'], ['trash', 'restore abc123'], ['restore', 'abc123'],
+    ['notes', 'all'], ['rename', 'newname'], ['rename', 'old new'],
+  ].filter(([v, a]) => !SL7.slashArgOk(v, a));
+  ok('...while every legitimate one-token and flag-carrying form still dispatches',
+    broke.length === 0, broke.map(([v, a]) => `/arc-${v} ${a}`).join(' | '));
+  // The three whose argument IS free text must stay open, or the gate eats the message it saves.
+  ok('...and note/alarm keep taking prose — gating a free-text verb would BE the bug',
+    SL7.slashArgOk('alarm', 'the build is broken, everyone stop')
+    && SL7.slashArgOk('note', 'research the tar flake is a known bug'));
+
   // /arc-alarm: the human's tab can raise a board-wide fire alarm at zero tokens (dispatch + EFFECT,
   // on a dedicated board so it can't couple to the shared TMP one). A message dispatches and raises;
   // --clear takes it down. This drives the REAL hook, not a copied regex.
@@ -6269,6 +6702,29 @@ try {
     (() => { const r = F.requestNote(MS('c'), 'a,c "drop me"', mroot); const dn = RM.allNotes(mb).find((x) => x.body === 'drop me'); return r.ok && dn.to === 'a'; })());
   ok('a malformed role in the list is refused (never posted to a garbage chair)',
     F.requestNote(MS('c'), 'a,BAD! "x"', mroot).ok === false);
+  // ...AND THE SINGLE-RECIPIENT BRANCH TOO, which is the one that had no check. The list branch
+  // above rejected a malformed role; the single branch took whatever was typed, so `arc note
+  // research: --kind request "…"` posted to the chair "research:" — a name VALID_ROLE forbids, so
+  // nobody can ever claim it. The real peer never saw the ask and, being a request, it parked a
+  // permanently unanswerable debt in openRequests. The "⚠ is CLOSED" hint could not save it: that
+  // is the same text an empty-but-legal chair produces, so it reads "they are away", not "that
+  // role cannot exist". Two branches of one decision, one of them unguarded.
+  {
+    // Genuinely unclaimable NAMES only. Two cases that look malformed but are not, kept out
+    // deliberately after they failed here: `A "x"` lowercases to the valid role "a" (input is
+    // case-tolerant by design), and `has space` parses as role "has" with body "space" — a legal
+    // post, not a bad recipient. Both were MY errors, and they are the reason this list is explicit.
+    const badOnes = ['a: "x"', 'BAD! "x"', '1leading "x"', 'x/y "x"', 'a.b "x"']
+      .filter((a) => F.requestNote(MS('c'), a, mroot).ok !== false);
+    ok('a malformed SINGLE recipient is refused too (an unclaimable chair swallows the note silently)',
+      badOnes.length === 0, badOnes.join(' | '));
+    const before = RM.allNotes(mb).length;
+    F.requestNote(MS('c'), 'a: --kind request "will you ever answer me"', mroot);
+    ok('...so nothing lands on the unclaimable chair, and no unanswerable debt is parked',
+      RM.allNotes(mb).length === before && RM.openRequests(mb, 'a:').length === 0);
+    // The control: a fix that refuses everything is not a fix.
+    ok('...while a legitimate single recipient still posts', F.requestNote(MS('c'), 'a "still fine"', mroot).ok === true);
+  }
   ok('single role still stores a STRING and broadcast still stores NULL (no regression)',
     (() => { F.requestNote(MS('c'), 'a "solo"', mroot); F.requestNote(MS('c'), 'all "everyone"', mroot);
       const s = RM.allNotes(mb).find((x) => x.body === 'solo'); const bc = RM.allNotes(mb).find((x) => x.body === 'everyone');
@@ -6844,6 +7300,46 @@ try {
     !/"auditx"/.test(nag.reason) && !/arc close auditx/.test(nag.reason));
   ok('...and the nag no longer claims an idle listener "burns quota" (it is blocked on a poll)',
     !/burns its own quota/.test(nag.reason));
+
+  // A PEER THAT OWES A MULTI-RECIPIENT ANSWER IS NOT IDLE. The idle test read `n.to === b.role`
+  // — strict equality, so an ARRAY `to` and a BROADCAST both fell through and the recipient was
+  // classified as owing nothing. That misclassification has a destructive tail: `arc close` is on
+  // the un-prompted allowlist BECAUSE this nag prescribes it, and closePeer SIGKILLs the runner,
+  // its children and the parent shell with no owed-request check. An agent doing as it was told
+  // kills, unprompted, the peer it just asked. Both trigger shapes are shipped features:
+  // `arc delegate a,b "packet"` and `arc note a,b --kind request` each post one array-`to` request.
+  // No nag assertion had ever posted an open request at all, which is why nothing caught it.
+  {
+    // THE REQUEST MUST COME FROM SOMEONE ELSE, or this test proves nothing. A request posted BY
+    // `code` is caught by case 2 ("requests you asked a peer are STILL UNANSWERED") and a broadcast
+    // is caught by case 1 (it is addressed to everyone, `code` included) — either way the hook
+    // returns long before the spawns nag, and the assertion passes against a reason belonging to a
+    // different branch entirely. Written that way first, it passed on the UNFIXED code; that is the
+    // same false-success audit warned about, so the setup below is deliberate: posted by `auditx`,
+    // and `code`'s cursor moved past it so nothing is left to deliver.
+    const cases = [
+      { label: 'an ARRAY `to` (what `arc delegate a,b` posts)', to: ['helper', 'auditx'] },
+      { label: 'a BROADCAST request (to = null)', to: null },
+    ];
+    for (const c of cases) {
+      const q = RM.appendNote(board, { from: 'auditx', to: c.to, kind: 'request', body: 'question owed by helper' });
+      RM.markRead(board, 'code');        // nothing left for case 1 to hand over
+      cycle();
+      const withOwed = fire({ hook_event_name: 'Stop', cwd: sboard });
+      ok(`a spawn owing ${c.label} is NOT listed as an idle leak — the nag's tail is \`arc close\``,
+        !/arc close helper/.test(withOwed.reason || ''), (withOwed.reason || '(no block)').slice(0, 240));
+      // Retract rather than reply: a multi-recipient request stays open until EVERY live recipient
+      // answers, so one reply would leave it open and bleed into the next case.
+      RM.appendNote(board, { from: 'auditx', to: c.to, kind: 'correction', supersedes: q.id, body: 'withdrawn' });
+      RM.markRead(board, 'code');
+      cycle();
+    }
+    // The nag must still FIRE when nothing is owed — otherwise the fix above is indistinguishable
+    // from simply breaking the nag, and "no leak reported" would look like success.
+    const stillNags = fire({ hook_event_name: 'Stop', cwd: sboard });
+    ok('...while a spawn that genuinely owes nothing IS still listed (the fix must not mute the nag)',
+      /arc close helper/.test(stillNags.reason || ''), (stillNags.reason || '(no block)').slice(0, 240));
+  }
   // give the leak a charter -> it becomes a standing duty -> the nag goes silent (nothing to leak)
   cycle();
   fs.writeFileSync(path.join(sboard, '.arc', 'roles', 'helper.md'), '# helper\n\nowns: odd jobs\n');
@@ -6870,6 +7366,101 @@ try {
     fs.rmSync(hp, { recursive: true, force: true });
     ok('...while a genuinely MISSING charter still reads as missing (the nag keeps working)',
       D3.dutyMissing(b3, 'helper') === true);
+  }
+
+  // ---- the block budget: never emit a block the harness will throw away ------------------------
+  // Claude Code counts CONSECUTIVE Stop blocks and discards the one past its cap:
+  //     let Kt=kue(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP,8);
+  //     if(Kt>0&&yo>Kt) return …`blocked the turn from ending ${yo} consecutive times — overriding…`
+  // (verbatim from the shipping binary, identical across 2.1.217/218/220). The hook used to treat
+  // that as a harmless backstop. It is not: everything the discarded block carried has ALREADY been
+  // spent — the read cursor advanced over the batch, the offer marker latched. A cursor is a
+  // high-water mark and wasOffered() latches, so the batch is gone with the stream looking
+  // continuous, and the role-holder idles permanently deaf. Threshold measured on this repo's real
+  // ledger: the eat begins around 17 unread notes at p50 body length.
+  {
+    const A4 = require(path.join(SRC, 'arc-await.js'));
+    cycle();
+    // Enough notes that delivery must chain well past the cap.
+    for (let i = 0; i < 40; i++) {
+      RM.appendNote(board, { from: 'research', to: 'code', body: `budget probe #${i} — ${'x'.repeat(2000)}`, priority: 'normal' });
+    }
+    const beforeUnread = RM.unreadFor(board, 'code').count;
+    // stop_hook_active:false is the chain RESET — the harness restarts its count on the same
+    // condition, so the two agree by construction rather than by hope.
+    let blocks = 0;
+    let r = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: false });
+    while (r.decision === 'block' && blocks < 40) {
+      blocks++;
+      r = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true });
+    }
+    ok('the hook stops at 8 consecutive blocks — one short of the discard, never past it',
+      blocks === 8, 'emitted ' + blocks + ' blocks');
+    ok('...and the 9th is DECLINED rather than emitted-and-eaten', !r.decision, JSON.stringify(r));
+    // The whole point: the batch that would have ridden the discarded block is still on the board.
+    const afterUnread = RM.unreadFor(board, 'code').count;
+    ok('...with the undelivered notes still UNREAD — the ceiling costs a turn boundary, not a note',
+      afterUnread > 0 && afterUnread < beforeUnread,
+      `before=${beforeUnread} after=${afterUnread}`);
+    // A fresh turn end is a fresh chain: the budget must refill or the session goes quiet forever.
+    const fresh = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: false });
+    ok('...and a NON-chained stop refills the budget (the ceiling is per-chain, not per-session)',
+      fresh.decision === 'block', JSON.stringify(fresh));
+    // THE GUARD'S OWN GUARD, and it doubles as the fix for a knob arc used to ignore. The cap is
+    // `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`; a hardcoded 8 would sail straight through a human's lower
+    // setting and re-open the trapdoor. Lowering it here proves the ceiling above is real — an
+    // unbudgeted hook blocks the same number of times whatever this says — AND that arc tracks the
+    // harness rather than a number it remembers.
+    RM.markRead(board, 'code');
+    for (let i = 0; i < 20; i++) {
+      RM.appendNote(board, { from: 'research', to: 'code', body: `low-cap probe #${i} — ${'y'.repeat(2000)}`, priority: 'normal' });
+    }
+    cycle();
+    let low = 0;
+    let s = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: false }, { CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '3' });
+    while (s.decision === 'block' && low < 20) {
+      low++;
+      s = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }, { CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '3' });
+    }
+    ok('a LOWERED cap is honoured — arc reads the harness\'s own knob instead of assuming 8',
+      low === 3, 'emitted ' + low + ' blocks under a cap of 3');
+    ok('...which also proves the ceiling test above can fail (an unbudgeted hook ignores both numbers)',
+      low !== blocks);
+
+    RM.markRead(board, 'code');
+    cycle();
+
+    // S5's half: a marker must never be spent by a block that was declined. At the ceiling the hook
+    // returns before it reads a note or writes a marker, so the offer stays available.
+    A4.clearOffered(SESSION);
+    let n = 0;
+    let q = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: false });
+    while (q.decision === 'block' && n < 20) { n++; q = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }); }
+    ok('a DECLINED block never latches the offer marker (a spent-but-undelivered offer is silent deafness)',
+      A4.wasOffered(SESSION) === true || n > 0, 'blocks=' + n);
+  }
+
+  // The deferred commit itself: injection() must not consume the batch until the caller says so.
+  {
+    const b5 = RM.resolveBoard(sboard);
+    RM.markRead(b5, 'code');
+    RM.appendNote(b5, { from: 'research', to: 'code', body: 'deferred-commit probe', priority: 'normal' });
+    const N5 = require(path.join(SRC, 'arc-notes.js'));
+    const before = RM.unreadFor(b5, 'code').count;
+    const inj = N5.injection(SESSION, sboard, { defer: true });
+    ok('(setup) injection built a batch to defer', !!inj && before > 0);
+    ok('under `defer` the cursor has NOT moved — a crash before the block ships re-delivers, never eats',
+      RM.unreadFor(b5, 'code').count === before);
+    inj.commit();
+    ok('...and commit() is what actually consumes it', RM.unreadFor(b5, 'code').count < before);
+    // The other caller (UserPromptSubmit) is never discarded, so it keeps the immediate advance.
+    RM.appendNote(b5, { from: 'research', to: 'code', body: 'immediate-commit probe', priority: 'normal' });
+    const pre = RM.unreadFor(b5, 'code').count;
+    const inj2 = N5.injection(SESSION, sboard);
+    ok('without `defer` the cursor advances immediately, as the prompt hook relies on',
+      !!inj2 && RM.unreadFor(b5, 'code').count < pre);
+    inj2.commit();   // a no-op, and must stay safe to call
+    ok('...and its commit() is a safe no-op', RM.unreadFor(b5, 'code').count < pre);
   }
 
   fs.rmSync(sboard, { recursive: true, force: true });

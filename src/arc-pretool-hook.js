@@ -51,16 +51,48 @@
 // at runtime, pipe it to a shell, and no regex sees it). It exists to make the dial mean something
 // for an agent that is trying to cooperate — which is every agent here — not to contain one that
 // is trying not to.
+// ONE SPELLING TABLE, EVERY GATE — and it is here because splitting it cost real coverage. An arc
+// verb has more than one spelling: an agent writes `node src/arc-runner.js <verb>` whenever `arc`
+// is not on its PATH, and PowerShell writes `& "$env:USERPROFILE\.local\bin\arc.cmd" <verb>`.
+// ee7f700 taught the ARM gate all of them and left THESE gates on the literal-`arc` anchor, and
+// audit measured what the split was worth: of 59 real delegate invocations the gate saw 39 and
+// MISSED 20 (34%), and of 10 cross-board notes it missed 4 — one of them a BROADCAST onto another
+// repo's ledger, which had already happened rather than merely could. A missed delegate does not
+// fail closed: it falls through to a generic "run this command?" prompt, so /arc-mode passive —
+// the one stance documented as an enforced refusal — quietly degraded to the normal flow.
+//
+// So the spellings live HERE, once. Every gate below is BUILT from this string, which is the same
+// anti-drift move already made between this gate and arc-comply: teaching arc a new spelling now
+// reaches every gate in the same instant, and there is no second copy to forget.
+//
+// The runner basename must be REACHED BY A SEPARATOR (`(?:\S*[\\/])?arc-runner\.js`). Without it
+// `evil-arc-runner.js` ends with the literal and would be read as arc's own runner — harmless for
+// a gate that only ASKS, not harmless for `soleCommand`, which sits in front of an auto-ALLOW.
+const ARC_EXE = '(?:'
+  + '(?:"[^"]*[\\\\/]arc(?:\\.cmd|\\.exe)?"'                     // "…\arc.cmd"
+  +   '|\'[^\']*[\\\\/]arc(?:\\.cmd|\\.exe)?\''                  // '…/arc.cmd'
+  +   '|(?:\\S*[\\\\/])?arc(?:\\.cmd|\\.exe)?)'                  // arc | ./arc | …\arc.cmd
+  + '|'
+  +   'node(?:\\.exe)?\\s+(?:-\\S+\\s+)*'                        // node [flags]
+  +   '(?:"[^"]*[\\\\/]arc-runner\\.js"'
+  +     '|\'[^\']*[\\\\/]arc-runner\\.js\''
+  +     '|(?:\\S*[\\\\/])?arc-runner\\.js)'
+  + ')';
+// WHERE a command may start: at the string start, after a shell separator, or after PowerShell's
+// call operator (`& "…\arc.cmd"` — the only way a quoted path is invoked at all). POSITION is
+// unchanged from the original; only the SPELLING widened. Every group is non-capturing, so the
+// capture indices below still belong to the gates that read them.
+const LEAD = '(?:^|[\\s;&|(`])(?:&\\s*)?';
 // `arc delegate <role> …` — capture the ROLE, because whether this costs anything DEPENDS on it:
 // delegating to a LIVE peer is just a note (free, reversible, never gated), while delegating to a
 // closed or unknown one spawns a session. One verb, two costs, and the gate must tell them apart
 // or it would prompt on every note (noise) or on none (a session spawned unasked).
-const RX_DELEGATE = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+delegate\s+([a-z][a-z0-9_-]*)/i;
+const RX_DELEGATE = new RegExp(LEAD + ARC_EXE + '\\s+delegate\\s+([a-z][a-z0-9_-]*)', 'i');
 // A note carrying --board leaves THIS repo and lands on another one's ledger. That is the only
 // way anything crosses the filesystem isolation a board is built on, so it is the only arc command
 // that asks in EVERY stance — including active. The dial governs how much an agent may do on ITS
 // OWN board; it was never a mandate to speak on someone else's.
-const RX_CROSS_BOARD = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+note\s+[^\n]*--board[=\s]+(\S+)/i;
+const RX_CROSS_BOARD = new RegExp(LEAD + ARC_EXE + '\\s+note\\s+[^\\n]*--board[=\\s]+(\\S+)', 'i');
 // A REPLY IS NOT INITIATIVE. The stance dial governs what an agent STARTS; answering a note that
 // already reached you is the second half of an exchange the board exists to carry — and without
 // this, the permission prompt sits INSIDE the auto-feed loop (a peer's reply arrives at turn end,
@@ -74,6 +106,15 @@ const RX_CROSS_BOARD = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+note\s+[^\n]*--boar
 //   - it was written by the role being replied to (a reply goes back to its asker),
 //   - and it is not our own note.
 // A cross-board reply still asks: RX_CROSS_BOARD is checked FIRST and returns before this.
+//
+// DELIBERATELY LEFT ON THE NARROW `arc` ANCHOR — this is the one gate that must NOT be widened
+// with the others, and the reason is the FAIL DIRECTION, not oversight. Every other gate here
+// ASKS or DENIES, so a spelling it fails to recognise costs a prompt and a wider table is strictly
+// safer. This one ALLOWS. For an allow the arithmetic inverts: a missed spelling costs a prompt
+// (harmless), while a loose match is a bypass — the exemption would bless a whole command on the
+// strength of a pattern instead of a proof. Audit's S1/S2 named the two gates with holes and did
+// not name this one, for exactly this reason. If a node-spelled reply ever needs the exemption,
+// widening the SPELLING is not enough on its own — re-derive the proof first.
 const RX_NOTE_REPLY = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+note\s+([a-z][a-z0-9_-]*)\s+[^\n]*--reply-to[=\s]+#?(\d+)/i;
 
 // AN AUTO-ALLOW MUST SCOPE TO EXACTLY THE EXEMPTED COMMAND — the one predicate both auto-allows
@@ -88,8 +129,14 @@ const RX_NOTE_REPLY = /(?:^|[\s;&|(`])arc(?:\.cmd|\.exe)?\s+note\s+([a-z][a-z0-9
 //     two shells is exactly the analysis a fail-closed gate must not attempt.
 // A decorated command fails the test and falls back to the normal permission prompt: fail-closed
 // costs a prompt, never a bypass.
+// Built from the SAME spelling table as the gates it scopes. It has to be: with the delegate gate
+// widened and this left narrow, an ACTIVE-stance `node src/arc-runner.js delegate x "packet"` would
+// fail the sole test and be refused with "the delegate is chained to another command" — a message
+// that is simply FALSE about that command. A gate may decline to recognise a spelling; it may not
+// tell the human the wrong reason. The control-character veto below is untouched and does the
+// actual scoping work, so widening the anchor cannot let a chained tail ride an allow.
 function soleCommand(cmd, verb) {
-  const anchored = new RegExp('^arc(?:\\.cmd|\\.exe)?\\s+' + verb + '\\b', 'i');
+  const anchored = new RegExp('^' + ARC_EXE + '\\s+' + verb + '\\b', 'i');
   return anchored.test(String(cmd || '').trim()) && !/[;&|`$()<>\r\n]/.test(String(cmd || ''));
 }
 
@@ -125,20 +172,16 @@ function out(decision, reason, systemMessage) {
 //
 // arc-comply imports this so the harness measures the same population the gate polices; when they
 // were written twice they disagreed, and the divergence is what hid this defect in the first place.
+// Now built from ARC_EXE like every other gate, rather than carrying its own copy of the spellings
+// — that private copy is precisely what let the other three fall behind it. Behaviour is unchanged
+// but for one tightening it inherits: the runner basename must be reached by a separator, so
+// `evil-arc-runner.js` no longer reads as arc's own runner.
 const ARM_LEAD_RX = new RegExp(
   '^'
   + '(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*'                      // ARC_SESSION=… env prefix
   + '(?:&\\s*)?'                                                 // PowerShell call operator
-  + '(?:'
-  +   '(?:"[^"]*[\\\\/]arc(?:\\.cmd|\\.exe)?"'                   // "…\arc.cmd"
-  +     '|\'[^\']*[\\\\/]arc(?:\\.cmd|\\.exe)?\''                // '…/arc.cmd'
-  +     '|(?:\\S*[\\\\/])?arc(?:\\.cmd|\\.exe)?)'                // arc | …/arc.cmd
-  +   '\\s+join\\b'
-  + '|'
-  +   'node(?:\\.exe)?\\s+(?:-\\S+\\s+)*'                        // node [flags]
-  +   '(?:"[^"]*arc-runner\\.js"|\'[^\']*arc-runner\\.js\'|\\S*arc-runner\\.js)'
-  +   '\\s+join\\b'
-  + ')', 'i');
+  + ARC_EXE
+  + '\\s+join\\b', 'i');
 
 function run(raw) {
   let hook = {};
@@ -363,7 +406,9 @@ function run(raw) {
   return 'ask';
 }
 
-module.exports = { run, RX_DELEGATE, RX_NOTE_REPLY, MAX_PEERS_AUTO, soleCommand, ARM_LEAD_RX };
+module.exports = {
+  run, RX_DELEGATE, RX_CROSS_BOARD, RX_NOTE_REPLY, MAX_PEERS_AUTO, soleCommand, ARM_LEAD_RX, ARC_EXE,
+};
 
 if (require.main === module) {
   let raw = '';

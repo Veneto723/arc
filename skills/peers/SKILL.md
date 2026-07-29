@@ -188,7 +188,66 @@ arc note android --supersedes 13 "CORRECTION — I was wrong: they CAN coexist, 
 arc note all --kind blocker "staging DB is down — don't trust integration tests"
 ```
 
-Kinds: `info` · `request` · `result` · `correction` · `blocker` · `decision`.
+Kinds: `info` · `request` · `result` · `correction` · `blocker` · `contract`.
+
+## A CONTRACT — so two roles can work in parallel without asking each other
+
+A **charter** is about a ROLE and is forever. A **contract** is about a FEATURE, is dated, and is
+retractable. Open one the moment you mint something another role must consume — a wire format, an
+endpoint, a file both of you touch. The point is not ceremony: it is that the other side can then
+build against a frozen answer instead of waiting for you, or guessing and being wrong.
+
+```bash
+# the seam, who owns it, and the don'ts — addressed to exactly the roles it binds, never `all`
+arc note android,backend --kind contract "SESSION TOKENS — websocket, not polling.
+backend owns the wire format. Never: store the raw token on disk."     # -> #12
+
+# each side then declares ONLY ITS OWN half. You do not need to understand their field.
+arc note backend --reply-to 12 "I expose POST /session/token -> {token, expiresAt}"
+arc note android --reply-to 12 "I call it on cold start only; I need expiresAt in epoch ms"
+```
+
+A reply to a contract **stays** a contract — you do not have to restate `--kind`.
+
+**Write the SEAM, never the PLAN.** "backend owns the wire format" survives any amount of
+rewriting behind it; "backend does X this week" is stale by Thursday and makes the contract grow
+without end. If a detail is yours alone to change, it does not belong here.
+
+**You may revise only YOUR OWN clause** (`--supersedes`), and that is what stops a contract from
+looping forever: if you think *their* side is wrong you cannot edit it — you say so, and a
+disagreement neither side can settle goes to the human. Retracting a clause is auto-HIGH: someone is
+already building against the version you are withdrawing.
+
+**Add or remove a role** by superseding the OPENER with the new recipient list. Membership is
+declared there and nowhere else, so it never drifts from who happened to be cc'd on a reply.
+
+**Reading it** — both work from any shell, with no session, and mark nothing read:
+
+```bash
+arc notes --kind contract      # which contracts exist
+arc notes --thread 12          # one contract in full; retracted clauses struck through
+```
+
+Never `arc note all --kind contract`: a broadcast is clipped to a preview, and a 400-character
+contract is a rumour. Address it to the roles it binds and it arrives whole.
+
+**A KNOWN LIMIT, stated rather than hidden.** A contract posted with `--reply-to` **folds into that
+thread** — always. That is right for a clause, including one that pulls in a new role (`android`
+replying to `backend,uiux` is a genuine clause of the same seam). But it means a contract you meant
+as a *separate* seam, opened by replying, is absorbed too: it will not appear in
+`arc notes --kind contract`, and the role it binds may never find it.
+
+arc does **not** guess between those. They are identical in structure and differ only in intent,
+which is not in the data — a rule keyed on "names a role outside the parent's parties" was built,
+tested, and **falsified** by exactly the widening clause above. So instead the post tells you:
+
+```
+this is a CLAUSE of contract #12, not a new contract. To open a SEPARATE one,
+  post it with NO --reply-to:  arc note <roles> --kind contract "<the other seam>"
+```
+
+**Open a new seam with no `--reply-to`.** If you see that line and meant a new contract, re-post it
+standalone — the stray clause is harmless where it landed.
 
 **`--supersedes` is the important one.** The ledger is append-only *by design* — you never edit
 or delete a note, because a peer may already have acted on it. So when you get something

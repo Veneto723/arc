@@ -804,6 +804,17 @@ function renameAccountInConfig(C, oldId, newId) {
 // a config/profile split can't happen: if the config edit then fails, move it back.
 // Returns { backup }. Throws on failure (nothing left half-done).
 function doRename(C, oldId, newId) {
+  // CHECKED HERE TOO, not only in renameProfile, because renameProfile can legitimately return
+  // FALSE without validating anything: an account configured but never launched has no profile dir,
+  // so the `!fs.existsSync(oldDir)` early-out fires first. The config edit below would then happily
+  // record "../../evil" as an account id — poisoning every later profileDir() call with a traversal
+  // that no rename would ever be blamed for. A gate that only guards the filesystem leaves the name
+  // that ADDRESSES the filesystem unguarded.
+  for (const [label, id] of [['old', oldId], ['new', newId]]) {
+    if (!C.validAccountId(id)) {
+      throw new Error(`invalid ${label} account name "${id}" — letters/digits/dash/underscore, starting with a letter.`);
+    }
+  }
   const P = require('./arc-profile');
   const moved = P.renameProfile(oldId, newId); // login folder old → new (may be false if none yet)
   let backup;
@@ -829,7 +840,9 @@ function requestRename(session, argStr) {
   const oldId = tokens.length >= 2 ? tokens[0] : current;
   const newId = tokens.length >= 2 ? tokens[1] : tokens[0];
 
-  if (!/^[a-z][a-z0-9_-]*$/i.test(newId)) return { ok: false, message: `invalid new name "${newId}" — use letters/digits/dash/underscore, starting with a letter.` };
+  // The same predicate the two functions below enforce — spelled once, in arc-config, so this
+  // friendly refusal and the hard throw can never disagree about what a legal id is.
+  if (!C.validAccountId(newId)) return { ok: false, message: `invalid new name "${newId}" — use letters/digits/dash/underscore, starting with a letter.` };
   const acc = C.findAccount(cfg, oldId);
   if (!acc) return { ok: false, message: `no account "${oldId}". Configured: ${cfg.accounts.map((a) => a.id).join(', ')}.` };
   if (oldId === newId) return { ok: false, message: `"${oldId}" is already its name — nothing to rename.` };
