@@ -950,11 +950,32 @@ function requestRemoveAccount(session, argStr) {
 function pendingDelPath(session) { return path.join(CACHE_DIR, `arc-delpending-${session}.json`); }
 
 // The conversation id THIS arc session is on.
+//
+// TWO RECORDS ANSWER THIS AND THEY DISAGREE once the conversation id changes underneath arc — a
+// COMPACTION that starts a new one, or a /arc-switch relaunch:
+//   arc-state-<s>.json   the runner's LAUNCH-TIME record. Authoritative for "what did arc launch",
+//                        and it goes stale the moment claude moves to a different conversation.
+//   arc-active-<s>.json  the statusline's LIVE bridge of CLAUDE_CODE_SESSION_ID, rewritten on every
+//                        render. Authoritative for "what conversation am I in RIGHT NOW".
+// This read arc-state FIRST, so a stale launch id beat the live one and /arc-delete answered
+// "nothing to delete — this conversation has no saved messages yet" while sitting in a conversation
+// with tens of megabytes in it. Observed live rather than reasoned: session 9292-15588 held a stale
+// ed3bac1f (no transcript on disk) ahead of a live 13553cbe (transcript present), and that is
+// precisely the refusal the operator reported for stale android sessions that could not be deleted.
+//
+// So: ask the LIVE bridge first, and then prefer whichever candidate actually HAS a transcript — a
+// stale id can never win over a real one, whichever file it came from. If neither has one, still
+// return a candidate, because a genuinely fresh empty session SHOULD get the honest "nothing to
+// delete" answer rather than a confusing "no conversation id yet".
 function sessionConvId(session) {
-  for (const p of [path.join(CACHE_DIR, `arc-state-${session}.json`), path.join(CACHE_DIR, `arc-active-${session}.json`)]) {
-    try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); if (j.convId) return j.convId; } catch {}
+  const seen = [];
+  for (const p of [path.join(CACHE_DIR, `arc-active-${session}.json`), path.join(CACHE_DIR, `arc-state-${session}.json`)]) {
+    try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); if (j.convId && !seen.includes(j.convId)) seen.push(j.convId); } catch {}
   }
-  return null;
+  for (const id of seen) {
+    try { if (require('./arc-sync').findTranscriptFile(id)) return id; } catch {}
+  }
+  return seen[0] || null;
 }
 
 // Two-step deletion of the CURRENT conversation. Step 1 (bare `/arc-delete`) shows

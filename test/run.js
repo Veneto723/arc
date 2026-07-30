@@ -984,7 +984,49 @@ try {
   ok('requestTrash list renders', tr && typeof tr.message === 'string');
   const del = core.requestDelete('', '');
   ok('requestDelete refuses outside a session', del.ok === false);
-} catch (e) { ok('arc-switch-core works', false, e.message); }
+
+  // ---- a STALE launch id must not beat the LIVE conversation ---------------------------------
+  // Two records answer "which conversation am I in": arc-state (the runner's launch-time record) and
+  // arc-active (the statusline's live bridge of CLAUDE_CODE_SESSION_ID). They diverge the moment the
+  // id changes underneath arc — a COMPACTION that starts a new one, or a /arc-switch relaunch.
+  // Reading arc-state first meant a stale id won, findTranscriptFile came back empty, and
+  // /arc-delete answered "nothing to delete — this conversation has no saved messages yet" while
+  // sitting in a conversation with tens of megabytes in it. Seen live, not reasoned: session
+  // 9292-15588 held a stale ed3bac1f (no transcript) ahead of a live 13553cbe (transcript present).
+  {
+    const dsess = 'stalconv-' + process.pid;
+    const projDir = path.join(CLAUDE, 'projects', 'E--stalconv');
+    fs.mkdirSync(projDir, { recursive: true });
+    const liveConv = 'aaaa1111-2222-3333-4444-555555555555';
+    const staleConv = 'bbbb9999-8888-7777-6666-555555555555';   // deliberately NO transcript on disk
+    fs.writeFileSync(path.join(projDir, liveConv + '.jsonl'), '{"type":"user","message":{"role":"user","content":"real work"}}\n');
+    writeJSON(path.join(CLAUDE, 'cache', `arc-state-${dsess}.json`), { pid: process.pid, convId: staleConv });
+    writeJSON(path.join(CLAUDE, 'cache', `arc-active-${dsess}.json`), { convId: liveConv });
+
+    const rs = core.requestDelete(dsess, '');
+    ok('/arc-delete targets the LIVE conversation, not a stale launch-time id',
+      rs.ok === true && rs.pending === true && rs.message.includes(liveConv.slice(0, 8)),
+      JSON.stringify(rs).slice(0, 220));
+    ok('...so it no longer claims "no saved messages yet" about a conversation that plainly has some',
+      !/no saved messages yet/.test(rs.message || ''));
+
+    // THE HALF THAT MUST STILL WORK: a genuinely fresh, empty session has no transcript anywhere and
+    // SHOULD get the honest refusal. Without this, "prefer whatever has a transcript" could be
+    // satisfied by a version that never refuses at all.
+    const esess = 'emptyconv-' + process.pid;
+    writeJSON(path.join(CLAUDE, 'cache', `arc-state-${esess}.json`), { pid: process.pid, convId: staleConv });
+    const e2 = core.requestDelete(esess, '');
+    ok('...while a truly empty session still gets the honest "nothing to delete"',
+      e2.ok === false && /no saved messages yet/.test(e2.message || ''), JSON.stringify(e2).slice(0, 200));
+
+    for (const s of [dsess, esess]) {
+      for (const k of ['arc-state', 'arc-active', 'arc-delpending']) {
+        fs.rmSync(path.join(CLAUDE, 'cache', `${k}-${s}.json`), { force: true });
+      }
+    }
+    fs.rmSync(projDir, { recursive: true, force: true });
+  }
+} catch (e) { ok('arc-switch-core works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- 6. gw-usage — tolerant summarize ---------------------------------------
 section('gw-usage');
@@ -1156,7 +1198,53 @@ try {
   const rbad = spawnSync(process.execPath, [wire, scriptsDir], { encoding: 'utf8' });
   ok('refuses malformed settings.json (non-zero exit)', rbad.status !== 0);
   ok('leaves the malformed file untouched (no silent clobber)', fs.readFileSync(path.join(CLAUDE, 'settings.json'), 'utf8') === bad);
-} catch (e) { ok('arc-wire-settings works', false, e.message); }
+
+  // ---- the write must be ATOMIC, and its fallback must be LOUD ------------------------------
+  // settings.json is read constantly by every live session — the statusline on its refresh interval,
+  // the hook layer around each prompt and tool call. A plain writeFileSync opens with O_TRUNC, so the
+  // file is briefly EMPTY and a reader landing there gets nothing: measured at 289 zero-byte reads in
+  // 49,176 while a writer looped. That is the "status bar vanished after an update, came back on its
+  // own" report. Write-then-rename closes it — rename is atomic on NTFS.
+  {
+    const atomicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsatomic-'));
+    const target = path.join(atomicDir, 'settings.json');
+    fs.writeFileSync(target, JSON.stringify({ a: 1 }, null, 2) + '\n');
+    W.writeSettings(target, { a: 2 }, null);
+    ok('writeSettings leaves valid JSON and no temp file behind',
+      JSON.parse(fs.readFileSync(target, 'utf8')).a === 2
+      && fs.readdirSync(atomicDir).filter((f) => f.endsWith('.tmp')).length === 0);
+
+    // THE FALLBACK IS STILL A TRUNCATING WRITE, and it IS reachable: Windows refuses to rename onto a
+    // file another process holds OPEN (EPERM), so past the retry budget the code falls back. That is
+    // deliberate — a deploy that silently left settings.json unwired is worse than a window — but it
+    // must not be SILENT, because an invisible degradation that reproduces the original bug is the
+    // worst version of it. Drive the exhaustion with a real held handle instead of reading the branch.
+    const holder = path.join(atomicDir, 'holder.js');
+    fs.writeFileSync(holder,
+      `const fs=require('fs');const fd=fs.openSync(${JSON.stringify(target)},'r+');`
+      + `setTimeout(()=>{try{fs.closeSync(fd)}catch{};process.exit(0)},4000);`);
+    const held = require('child_process').spawn(process.execPath, [holder], { stdio: 'ignore' });
+    let out = { status: null, stderr: '' };
+    try {
+      out = spawnSync(process.execPath, ['-e',
+        `require(${JSON.stringify(wire.replace(/\\/g, '/'))}).writeSettings(${JSON.stringify(target)}, { a: 3 }, null);`,
+      ], { encoding: 'utf8', timeout: 30000 });
+    } finally { try { held.kill(); } catch {} }
+    // Assert the IMPLICATION (exhausted => warned), never the precondition: on a machine where the
+    // rename wins anyway the warning correctly does not fire, and asserting it did would flake.
+    const warned = /WARNING: could not atomically replace/.test(out.stderr || '');
+    const exhausted = /after 40 attempts/.test(out.stderr || '');
+    ok('...and IF the retries are exhausted the fallback SAYS SO on stderr (never a silent regression)',
+      warned === exhausted, JSON.stringify((out.stderr || '').slice(0, 160)));
+    ok('...while the deploy still completes and the file is valid either way',
+      out.status === 0 && JSON.parse(fs.readFileSync(target, 'utf8')).a === 3, 'exit=' + out.status);
+    // MUTATION GUARD. The check above is satisfied when BOTH are absent, so on a machine that never
+    // exhausts it would pass with the warning deleted from the source entirely. Pin the message.
+    ok('...and the warning exists in the shipping source, so deleting it cannot pass silently',
+      /WARNING: could not atomically replace/.test(fs.readFileSync(wire, 'utf8')));
+    fs.rmSync(atomicDir, { recursive: true, force: true });
+  }
+} catch (e) { ok('arc-wire-settings works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- arc-done (derive "done" from git, not from the agent's word) ---------------
 section('arc-done (git-derived completion)');
@@ -5835,6 +5923,41 @@ try {
   ok('the readout shows the kind and the thread link',
     /<correction>/.test(readOut) && /↩ re #1/.test(readOut));
 
+  // ---- the two edges of a retraction must BOTH carry identity -------------------------------
+  // Reading the TARGET told you who retracted it and what to do. Reading the RETRACTION gave you a
+  // bare `#N` — no author, no text. That is backwards: on the target edge the reader already HAS the
+  // note in front of them, while on this edge they may never have received it. Measured on real
+  // traffic, 4 of 25 retractions are addressed WIDER than the note they strike (arc #184->#144,
+  // #185->#141, #188->#183; whalephone #515->#514), so a reader outside the target's audience got a
+  // correction to something they can never see and cannot look up.
+  {
+    const droot = path.join(base2, 'schema');
+    const dboard2 = R2.resolveBoard(droot);
+    // Long unwrapped filler, the real shape of these bodies — but distinctive, so the assertions
+    // below cannot pass on the padding instead of the opening.
+    const victim = R2.appendNote(dboard2, { from: 'research', to: 'android',
+      body: 'THE TOKEN TTL IS 900s and the refresh path retries twice before giving up. ' + 'FILLER'.repeat(400) });
+    R2.appendNote(dboard2, { from: 'research', to: 'android', kind: 'correction',
+      supersedes: victim.id, body: 'CORRECTION — the TTL is 300s, not 900s.' });
+    const out2 = F2.requestNotes('reader', '', droot).message;
+    // NOTE the spelling: the unread/board views render `⤺ retracts #N`, the delivery injection
+    // renders `⤺ this RETRACTS #N`. Three sites, three spellings — which is why the fix is one
+    // shared helper appended to each, not three edits.
+    ok('the RETRACTION names the target\'s author and quotes its opening (not just a bare number)',
+      /⤺ retracts #\d+ \(from research\): "THE TOKEN TTL IS 900s/.test(out2), out2.slice(-300));
+    // CHAR-capped, never line-capped: real target first-lines run p50 151, p90 1582, MAX 2260 chars,
+    // because these bodies are unwrapped prose — one "line" would eat half the injection budget.
+    const quoted = (out2.match(/⤺ retracts #\d+ \(from research\): "([^"]*)"/) || [])[1] || '';
+    ok('...and that quote is CHAR-capped, so one long opening cannot eat the budget',
+      quoted.length > 0 && quoted.length <= 130, 'quote was ' + quoted.length + ' chars');
+    // A withdrawn note is not work: it must be clipped, not delivered at its full working size.
+    const victimRow = (out2.split('\n').filter((l) => l.includes('THE TOKEN TTL IS 900s')) || [])[0] || '';
+    ok('...and the SUPERSEDED note itself is clipped, not delivered whole (its replacement needs the room)',
+      victimRow.length < 600 && victimRow.length > 0, 'row was ' + victimRow.length + ' chars');
+    ok('...while the RETRACTED banner still names who struck it and forbids acting',
+      /RETRACTED by #\d+ \(research\) — do NOT act on this/.test(out2));
+  }
+
   // flags parse through the real requestNote, and a dangling reference is refused
   const F3 = F2.requestNote('reader', 'research --kind request "check the thing"', path.join(base2, 'schema'));
   ok('arc note --kind request is accepted and reported back', F3.ok && /kind: request/.test(F3.message));
@@ -6286,6 +6409,15 @@ try {
   const broke = [
     ['add-account', 'work'], ['add-account', 'gw --api --url https://example.com'],
     ['remove-account', 'work'], ['rm-account', 'work'],
+    // THE CONFIRMING FORM IS A SECOND LEGAL SHAPE, and leaving it out of this list is what shipped
+    // a broken destructive verb in v1.6.0: gating these to exactly one token made
+    // `/arc-remove-account gpt confirm` read as prose, so the gate blocked step one and then ATE
+    // step two — the removal could never complete, and the human got their own sentence handed to
+    // the model instead. A two-step verb needs BOTH steps in the legitimate-forms list; testing
+    // only the first proves the gate opens, never that it closes.
+    ['remove-account', 'gpt confirm'], ['remove', 'gpt confirm'], ['rm-account', 'gpt confirm'],
+    ['del-account', 'gpt confirm'], ['delete-account', 'gpt confirm'],
+    ['retire', 'oldrole confirm'], ['delete', 'confirm'],
     ['export', 'all'], ['export', 'global'],
     ['import', 'C:/tmp/arc-export-1.tgz'], ['import', 'C:/tmp/a.tgz C:/dest'],
     ['trash', 'empty'], ['trash', 'restore abc123'], ['restore', 'abc123'],
@@ -6297,6 +6429,57 @@ try {
   ok('...and note/alarm keep taking prose — gating a free-text verb would BE the bug',
     SL7.slashArgOk('alarm', 'the build is broken, everyone stop')
     && SL7.slashArgOk('note', 'research the tar flake is a known bug'));
+
+  // A VERB'S SHAPES LIVE IN THREE PLACES, and the first version of this gate consulted ONE.
+  // The MENU hint for `notes` is "[all]" — while arc-help.js:72-73 advertises `--kind contract` and
+  // `--thread <seq>`, and the suite itself drives `export <proj> --out <file>` and
+  // `import <a> --dest <d>`. Gating on token COUNT ate every one of them.
+  // WHY THIS LIST IS DRAWN FROM THE OTHER TWO SITES: the gate was built from the hints, so an
+  // enumeration built from the hints checks a rule against its own source and reports clean
+  // forever. It did — 0 problems — while eight documented forms were being eaten. A scan that
+  // cannot fail is not a scan.
+  const flagForms = [
+    ['notes', '--head 5'], ['notes', '--kind contract'], ['notes', '--thread 12'],
+    ['notes', 'all --head 5'],
+    ['export', 'E:/proj --out C:/tmp/a.tgz'], ['export', '--out C:/tmp/a.tgz'],
+    ['import', 'a.tgz --dest E:/whaletech'], ['import', '"a.tgz" --dest "E:/whaletech"'],
+    ['add-account', 'gw --api --url https://x.example'],
+  ].filter(([v, a]) => !SL7.slashArgOk(v, a));
+  ok('a flag-carrying form documented in arc-help.js or driven by this suite still dispatches',
+    flagForms.length === 0, flagForms.map(([v, a]) => `/arc-${v} ${a}`).join(' | '));
+  // The half that keeps it a gate: allowing flags must not re-open prose. A sentence has more BARE
+  // words than the verb has slots, which is what separates it from `<arg> --flag <value>`.
+  //
+  // THESE CASES MUST CARRY A FLAG, and the plain sentences that used to live here did not. That was
+  // the same asymmetry one level up: the legitimate-forms list got rewritten from the right sites
+  // and the leak list stayed pointed at the PREVIOUS failure mode. Mutation-tested to prove it —
+  // delete argShape's second loop (so anything after a flag rides through as a flag value) and:
+  //     six plain sentences   -> still all refused   (BLIND to the regression)
+  //     the ten below         -> all ten leak        (they catch it)
+  // A leak test whose cases were already refused by the rule you replaced proves the OLD rule works.
+  // The failure these guard is specific to the shape rule: once a flag appears, does the rest of the
+  // sentence ride through? It cannot — a bare word whose predecessor is not a flag returns false, so
+  // prose can borrow exactly one slot (the flag's value) and no more.
+  const flagLeaks = [
+    ['notes', '--head 5 please summarise everything for me'],
+    ['notes', '--kind contract and then tell the research peer we are done'],
+    ['notes', '--kind i think we should refactor the whole board'],
+    ['notes', 'all --head 5 then delete the old ones for me'],
+    ['export', 'all --out C:/x.tgz then send it over to code when it finishes'],
+    ['export', '--out everything we did today somewhere safe please'],
+    ['import', 'a.tgz --dest E:/x and then remove the archive afterwards'],
+    ['import', '--dest the board from the other machine please'],
+    ['notes', '--thread 12 and summarise what code decided about the gate'],
+    ['restore', '--all of the sessions we lost yesterday please'],
+    // and the plain sentences too — cheap, and they pin the positional half of the rule
+    ['notes', 'from the research peer please'], ['export', 'everything before we refactor'],
+    ['import', 'the archive I put on the desktop yesterday'],
+    ['trash', 'is getting full, can you check'],
+    ['remove-account', 'the one that keeps rate limiting'],
+    ['add-account', 'for the new project we discussed'],
+  ].filter(([v, a]) => SL7.slashArgOk(v, a));
+  ok('...while a sentence still has more bare words than the verb has slots, and is refused',
+    flagLeaks.length === 0, flagLeaks.map(([v, a]) => `/arc-${v} ${a}`).join(' | '));
 
   // /arc-alarm: the human's tab can raise a board-wide fire alarm at zero tokens (dispatch + EFFECT,
   // on a dedicated board so it can't couple to the shared TMP one). A message dispatches and raises;
@@ -7438,6 +7621,45 @@ try {
     while (q.decision === 'block' && n < 20) { n++; q = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: true }); }
     ok('a DECLINED block never latches the offer marker (a spent-but-undelivered offer is silent deafness)',
       A4.wasOffered(SESSION) === true || n > 0, 'blocks=' + n);
+  }
+
+  // ---- a THROWING commit() must not skip the block counter -------------------------------------
+  // commit() advances the read cursor through atomicWriteJson -> renameSync, which Windows refuses
+  // (EPERM) when another process holds the cursor file open. Unguarded, that throw skipped
+  // recordBlock entirely: the block is ALREADY on stdout, so the note is delivered, the cursor does
+  // not advance, and the budget UNDER-counts — the chain can then run past the harness cap into the
+  // trapdoor the budget exists to prevent, and the caller's catch made it invisible. Under-counting
+  // is the direction the code comment itself names as the worse one.
+  // Forced here by making the cursor path a DIRECTORY, so the rename fails for real rather than
+  // being mocked. A note IS delivered and the counter MUST still advance.
+  {
+    const A5 = require(path.join(SRC, 'arc-await.js'));
+    const cachedir = path.join(CLAUDE, 'cache');
+    const budgetFile = path.join(cachedir, `arc-stopblocks-${String(SESSION).replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+    try { fs.unlinkSync(budgetFile); } catch {}
+    RM.markRead(board, 'code');
+    RM.appendNote(board, { from: 'research', to: 'code', body: 'delivered even though the cursor cannot move', priority: 'normal' });
+    const cursorFile = path.join(sboard, '.arc', 'peer', 'cursor-code.json');
+    try { fs.unlinkSync(cursorFile); } catch {}
+    fs.mkdirSync(cursorFile, { recursive: true });      // rename onto a directory fails
+    A5.clearWaiting(SESSION); A5.clearOffered(SESSION);
+    const blocked = fire({ hook_event_name: 'Stop', cwd: sboard, stop_hook_active: false });
+    // NOT asserting a specific body: replacing the cursor with a directory also makes it unreadable,
+    // so readCursor falls back to 0 and the batch is the OLDEST unread rather than the note just
+    // posted. That is the same fault under test seen from the read side, and pinning a body here
+    // would be asserting on the fixture instead of on the behaviour.
+    ok('a note is still DELIVERED when the cursor write cannot succeed',
+      blocked.decision === 'block' && /unread note/.test(blocked.reason || ''),
+      JSON.stringify(blocked).slice(0, 200));
+    let counted = 0;
+    try { counted = JSON.parse(fs.readFileSync(budgetFile, 'utf8')).n || 0; } catch {}
+    ok('...and the block budget still COUNTS it — an unguarded throw here re-opens the discard trapdoor',
+      counted === 1, 'counter=' + counted);
+    // Clean up: restore a real cursor file so later assertions are not fighting a directory.
+    try { fs.rmSync(cursorFile, { recursive: true, force: true }); } catch {}
+    RM.markRead(board, 'code');
+    try { fs.unlinkSync(budgetFile); } catch {}
+    cycle();
   }
 
   // The deferred commit itself: injection() must not consume the batch until the caller says so.

@@ -147,8 +147,19 @@ function syncSettings(dir) {
     // cannot ship silently; this branch exists only so a live mismatch degrades
     // to "that key stops syncing" instead of "that key eats the profile's value".
   }
+  // ATOMIC, because THIS is the write that takes a running session's statusline away. Two sessions
+  // on the SAME ACCOUNT share one profile directory, and this file is that account's settings.json —
+  // read continuously by every session on it. ensureProfile calls this on EVERY LAUNCH, so opening a
+  // second terminal on an account rewrote the settings file the first session was still reading; a
+  // plain writeFileSync truncates to zero bytes first, and the session that reads in that window
+  // loses its status bar while the newly-launched one keeps it. Reported exactly that way, and it is
+  // a far more frequent trigger than the deploy-time write in arc-wire-settings: a deploy is
+  // occasional, opening a terminal is constant.
+  // Same helper as the root file, deliberately — a rule with two copies has one copy.
   try {
-    if (JSON.stringify(next) !== JSON.stringify(cur)) fs.writeFileSync(dst, JSON.stringify(next, null, 2));
+    if (JSON.stringify(next) !== JSON.stringify(cur)) {
+      require('./arc-wire-settings').atomicWriteFile(dst, JSON.stringify(next, null, 2));
+    }
   } catch {}
 }
 

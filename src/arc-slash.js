@@ -90,19 +90,54 @@ const ROLE_SHAPE = /^[a-z][a-z0-9_-]{0,23}$/i;
 // Verbs taking ONE token (an account, an export selector, a trashed-conversation id) and verbs
 // taking at most TWO (an archive and a destination, an old and a new name). Aliases are spelled out
 // because slashArgOk is handed the verb the human TYPED — see the note in the body.
-const ONE_TOKEN_VERBS = new Set([
-  'notes', 'export', 'restore',
+// A VERB'S ARGUMENT IS: up to N POSITIONAL tokens, then FLAGS AND THEIR VALUES. Prose is what has
+// more bare words than the verb has slots. Counting tokens instead — which is what shipped in
+// v1.6.0 — cannot express that, so every flag-carrying form was read as a sentence and eaten:
+// `arc notes --kind contract`, `--thread <seq>`, `--head N`, `arc export <proj> --out <file>`,
+// `arc import <a> --dest <d>`. All are documented in arc-help.js or driven by the suite; two of
+// them are the ONLY read commands of the contract feature.
+//
+// THIS IS WHY THE FIRST SCAN CAME BACK CLEAN AND WAS WORTHLESS. I enumerated the legal forms from
+// the MENU hints — but the gate was BUILT from the MENU hints, so I was checking a rule against its
+// own source and it reported 0 problems forever. A verb's shapes live in THREE places: the menu
+// hint, the help text, and the handler. The hint for `notes` is "[all]"; the help text three files
+// away advertises three flags it never mentions. Audit found these by reading the OTHER two sites.
+function argShape(tokens, maxPositional, confirmTail) {
+  let i = 0, pos = 0;
+  while (i < tokens.length && !tokens[i].startsWith('-')) {
+    // A trailing confirm word is a second legal SHAPE, not a positional (see CONFIRM_TAIL_VERBS).
+    if (confirmTail && pos >= 1 && i === tokens.length - 1 && CONFIRM_ARG_RX.test(tokens[i])) { i++; break; }
+    if (++pos > maxPositional) return false;              // more bare words than slots -> prose
+    i++;
+  }
+  for (; i < tokens.length; i++) {
+    if (tokens[i].startsWith('-')) continue;              // a flag
+    if (tokens[i - 1].startsWith('-')) continue;          // that flag's value
+    return false;                                          // a bare word after the flags began
+  }
+  return true;
+}
+// ONE positional, plus flags. `add-account` joins them: `[id] [--api --url <gateway>]` is exactly
+// this shape, so it no longer needs a branch of its own.
+const POS1_VERBS = new Set(['notes', 'export', 'restore', 'add-account', 'add']);
+// `<id> [confirm]` — a DESTRUCTIVE verb with a two-step confirmation, so the confirming form is a
+// SECOND legal shape and not prose. Counting these as one-token (which is what shipped in v1.6.0)
+// makes `/arc-remove-account gpt confirm` read as a sentence, so the confirmation falls open to the
+// model and the removal can never complete: the gate blocks step one and then eats step two. The
+// verb whose style this copies — `retire`, below — was written with exactly this shape, which is
+// what makes the omission galling rather than subtle.
+const CONFIRM_TAIL_VERBS = new Set([
   'remove-account', 'remove', 'rm-account', 'del-account', 'delete-account',
 ]);
-const TWO_TOKEN_VERBS = new Set(['import', 'trash', 'rename']);
-const ADD_ACCOUNT_VERBS = new Set(['add-account', 'add']);
+// TWO positionals, plus flags: `<archive> [dest]`, `restore <id>`, `[old] <new>`.
+const POS2_VERBS = new Set(['import', 'trash', 'rename']);
 function slashArgOk(verb, arg) {
   const v = String(verb || '').toLowerCase();
   const a = String(arg || '').trim();
   if (!a) return true;
   if (NO_ARG.has(v)) return false;
-  if (v === 'delete') return CONFIRM_ARG_RX.test(a);
   const tokens = a.split(/\s+/);
+  if (v === 'delete') return CONFIRM_ARG_RX.test(a);
   // A lone token that fails downstream validation still DISPATCHES ("/arc-mode nope"
   // earns the helpful "unknown stance — pick one of..." refusal; a typo is a command
   // attempt, not prose). Only an arg that cannot possibly be the argument — a
@@ -115,8 +150,6 @@ function slashArgOk(verb, arg) {
       && (tokens.length === 1 || (tokens.length === 2 && CONFIRM_ARG_RX.test(tokens[1])));
   }
   if (v === 'mode' || v === 'stance' || v === 'switch') return tokens.length === 1;
-  // (`rename` used to be tested here as `tokens.length <= 2`; it now rides TWO_TOKEN_VERBS with the
-  // others, so the same rule is not spelled twice.)
   // THE SAME RULE, APPLIED TO THE VERBS IT WAS NEVER EXTENDED TO. Everything above was shape-gated
   // as its field report came in; the rest fell through to `return true` and ate whatever followed.
   // Measured: 10 verbs dispatched on a plain English sentence — `/arc-add-account for the new
@@ -125,29 +158,19 @@ function slashArgOk(verb, arg) {
   // dispatch can take here: the command does something wrong AND the sentence explaining what was
   // wanted never reaches the model.
   //
-  // Gated by TOKEN COUNT rather than by id shape, deliberately. A lone token that fails downstream
-  // validation must still DISPATCH — "/arc-export nonsense" earns a real refusal, and a typo is a
-  // command attempt, not prose (the rule stated above `role`). Only a SENTENCE after a one-token
-  // verb is prose. Counting tokens also cannot go stale the way an id-shape regex would when the
-  // set of legal account names changes.
+  // Shape, NOT id-shape: a lone token that fails downstream validation must still DISPATCH —
+  // "/arc-export nonsense" earns a real refusal, and a typo is a command attempt, not prose (the
+  // rule stated above `role`). Only a SENTENCE where the verb has no slot for it is prose.
   //
   // ALIASES ARE LISTED EXPLICITLY because this predicate sees the verb AS TYPED, not canonicalised:
   // gating `remove-account` while leaving `rm-account` open would fix the documented spelling and
   // none of the ones people actually type — the identical drift that put four gates behind the arm
   // gate in arc-pretool-hook.
-  if (ONE_TOKEN_VERBS.has(v)) return tokens.length === 1;
-  if (TWO_TOKEN_VERBS.has(v)) return tokens.length <= 2;
-  // `add-account` takes an id and then FLAGS (`gw --api --url https://…`), so a token count cannot
-  // separate it: the legal form is longer than the prose that abuses it. The distinguishing feature
-  // is that everything past the id is a flag or a flag's value — a second BARE word is prose.
-  if (ADD_ACCOUNT_VERBS.has(v)) {
-    for (let i = 1; i < tokens.length; i++) {
-      if (tokens[i].startsWith('-')) continue;          // a flag
-      if (tokens[i - 1].startsWith('-')) continue;      // that flag's value
-      return false;                                      // a second bare word — prose
-    }
-    return true;
-  }
+  if (POS1_VERBS.has(v)) return argShape(tokens, 1, false);
+  // Deliberately NOT shape-checked on tokens[0]: a misspelled account earns a real "no account X"
+  // refusal instead of vanishing into prose.
+  if (CONFIRM_TAIL_VERBS.has(v)) return argShape(tokens, 1, true);
+  if (POS2_VERBS.has(v)) return argShape(tokens, 2, false);
   // Still open by design: `note`, `alarm` and `delegate`, whose argument IS free text. Gating them
   // would eat the message rather than save it.
   return true;

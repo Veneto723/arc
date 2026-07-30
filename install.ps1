@@ -20,7 +20,21 @@ if (-not $hasClaude) {
 
 # 1. scripts
 New-Item -ItemType Directory -Force $scripts, $commands, $bin, (Join-Path $scripts 'icons') | Out-Null
-Copy-Item (Join-Path $kit 'src\*.js') $scripts -Force
+# COPY VIA TEMP + MOVE, because these files are EXECUTED WHILE THEY ARE BEING REPLACED. A plain
+# Copy-Item truncates the destination and then refills it, and every live session runs code out of
+# this directory continuously — the statusline spawns `node usage-monitor.js` on its own interval,
+# and every hook call loads a script from here. A render landing inside that window executes a
+# half-written or empty file: node exits non-zero, the status bar paints nothing, and it returns on
+# the next tick once the copy has finished. That is the "lost the status bar after an update, comes
+# back after a while" report.
+# Move-Item onto an existing path is a rename, which is atomic on NTFS: a reader gets the whole old
+# file or the whole new one, never a partial. -Force on the temp write, then -Force on the move.
+foreach ($srcFile in Get-ChildItem (Join-Path $kit 'src\*.js')) {
+  $dest = Join-Path $scripts $srcFile.Name
+  $stage = "$dest.deploy-tmp"
+  Copy-Item $srcFile.FullName $stage -Force
+  Move-Item $stage $dest -Force
+}
 Copy-Item (Join-Path $kit 'src\arc-focus.ps1') $scripts -Force
 Copy-Item (Join-Path $kit 'src\arc-focus.vbs') $scripts -Force
 # The birth template MUST land beside arc-invite.js — birthTemplate() resolves it via __dirname, so a

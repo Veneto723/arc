@@ -981,7 +981,7 @@ function requestNotes(session, arg, cwd) {
       const dead = sup.get(n.id);      // keyed by ID: a retraction must survive a merge
       return `  #${String(n.seq).padStart(3)}  ${ago(n.ts).padStart(4)} ago  ${n.from} → ${n.to || 'all'}` +
         `${n.kind && n.kind !== 'info' ? `  <${n.kind}>` : ''}${n.priority === 'high' ? '  [!]' : ''}` +
-        `${n.replyTo ? `  ↩ re #${R.refSeq(all, n.replyTo) ?? '?'}` : ''}${n.supersedes ? `  ⤺ retracts #${R.refSeq(all, n.supersedes) ?? '?'}` : ''}` +
+        `${n.replyTo ? `  ↩ re #${R.refSeq(all, n.replyTo) ?? '?'}` : ''}${n.supersedes ? `  ⤺ retracts #${R.refSeq(all, n.supersedes) ?? '?'}${struckRef(all, n.supersedes)}` : ''}` +
         (dead ? `\n        ⚠ RETRACTED by #${dead.seq} — do NOT act on this` : '') +
         `\n        ${n.body.replace(/\n/g, '\n        ')}` +
         (n.refs ? `\n        refs: ${JSON.stringify(n.refs)}` : '');
@@ -1003,9 +1003,12 @@ function requestNotes(session, arg, cwd) {
     const dead = supU.get(n.id);     // keyed by ID: a retraction must survive a merge
     return `  #${String(n.seq).padStart(3)}  ${ago(n.ts).padStart(4)} ago  from ${n.from}${n.to ? '' : '  (broadcast)'}` +
       `${n.kind && n.kind !== 'info' ? `  <${n.kind}>` : ''}${n.priority === 'high' ? '  [!]' : ''}` +
-      `${n.replyTo ? `  ↩ re #${R.refSeq(allU, n.replyTo) ?? '?'}` : ''}${n.supersedes ? `  ⤺ retracts #${R.refSeq(allU, n.supersedes) ?? '?'}` : ''}` +
+      `${n.replyTo ? `  ↩ re #${R.refSeq(allU, n.replyTo) ?? '?'}` : ''}${n.supersedes ? `  ⤺ retracts #${R.refSeq(allU, n.supersedes) ?? '?'}${struckRef(allU, n.supersedes)}` : ''}` +
       (dead ? `\n        ⚠ RETRACTED by #${dead.seq} (${dead.from}) — do NOT act on this; read #${dead.seq}` : '') +
-      `\n        ${n.body.replace(/\n/g, '\n        ')}` +
+      // A withdrawn note is not work — identify it, do not re-deliver it at working size. Same
+      // reasoning as the injection path: the body nobody may act on is what crowds out the
+      // correction that replaces it.
+      `\n        ${(dead ? clipPlain(n.body, RETRACTED_CLIP) : n.body).replace(/\n/g, '\n        ')}` +
       (n.refs ? `\n        refs: ${JSON.stringify(n.refs)}` : '');
   });
   const mine = R.openRequests(board, me).filter((n) => n.from === me);
@@ -1220,6 +1223,35 @@ function clipBody(body, limit) {
 }
 
 const BODY_CLIP = 400;        // broadcasts: a preview is the point
+// A withdrawn note needs to be IDENTIFIED, not read: enough to know which one it was, and no more.
+const RETRACTED_CLIP = 300;   // a superseded note's own body, when it is delivered
+const RETRACT_REF_CLIP = 120; // the target's opening, quoted on the retraction that strikes it
+// clipBody's tail says "read it whole before acting" — correct for a truncated packet, and exactly
+// wrong for a retracted one, where the instruction is not to act at all. So these two use a plain
+// truncation with no advice attached; the RETRACTED banner above the body carries the instruction.
+function clipPlain(body, limit) {
+  const s = String(body == null ? '' : body).replace(/\s+/g, ' ').trim();
+  if (s.length <= limit) return s;
+  let cut = s.lastIndexOf(' ', limit);
+  if (cut < limit - 40) cut = limit;                     // no space nearby: hard cut
+  return s.slice(0, cut).trimEnd() + '…';
+}
+// THE RETRACTION EDGE, RENDERED ONE WAY FOR EVERY READER. It was spelled in three places — the
+// board view, the unread view, and the delivery injection — and all three printed a bare `#N`: no
+// author, no kind, no text. The opposite edge (reading the note that GOT retracted) printed the
+// author and an instruction, which is backwards, because there the reader already HAS the note in
+// front of them. On this edge they may never have received it: 4 of 25 real retractions are
+// addressed WIDER than the note they strike, so those readers got a correction to something they
+// can never see and cannot look up.
+// Fixed once here rather than three times, for the reason that keeps recurring in this repo: a rule
+// with three copies has no copies. Returns a SUFFIX so each caller keeps its own frame/indent.
+function struckRef(all, ref) {
+  try {
+    const k = R.refKey(ref);
+    const t = (all || []).find((x) => x.id === k || R.refKey(x.id) === k);
+    return t ? ` (from ${t.from}): "${clipPlain(t.body, RETRACT_REF_CLIP)}"` : '';
+  } catch { return ''; }
+}
 // A DIRECTED PACKET IS WORK — it is NEVER truncated. It delivers WHOLE inline up to DIRECT_CLIP,
 // kept safely under the 10k hook cap with frame room (the old 3500 was far below the cap and
 // truncated real packets — four of mine in one day, each ~3600 chars, lost their tail). Above
@@ -1261,15 +1293,38 @@ function injection(session, cwd, opts) {
       // ADDRESSED to me (a directed note OR a named recipient in a subset list) → delivered WHOLE;
       // a broadcast is ambient FYI → preview. A multi-recipient note is work for each name, not ambient.
       const addressed = n.to === role || (Array.isArray(n.to) && n.to.includes(role));
-      const body = addressed ? directBody(n, board, spills) : clipBody(n.body, BODY_CLIP);
+      const dead = sup.get(n.id);      // keyed by ID: a retraction must survive a merge
+      // A RETRACTED NOTE IS NOT WORK, so it does not get the work-sized budget. It used to be
+      // delivered WHOLE — a directed one up to DIRECT_CLIP, spilled to a file above that — with the
+      // warning merely stapled on top. That spends the batch on a body nobody may act on, and the
+      // note that supersedes it is exactly what gets pushed out to make room: the replacement loses
+      // its seat to the thing it replaces. Measured at the time: batches run median 1 note, so
+      // "pushed to the next turn" is the common case, not a rare one, and the reader spends a turn
+      // reading withdrawn content before the correction arrives.
+      // Clipped to an IDENTIFYING opening instead — enough to know WHICH note was withdrawn, not
+      // enough to act on. The authoritative content is in the retraction, which is now likelier to
+      // fit alongside it.
+      const body = dead ? clipPlain(n.body, RETRACTED_CLIP)
+        : addressed ? directBody(n, board, spills) : clipBody(n.body, BODY_CLIP);
       const kind = n.kind && n.kind !== 'info' ? `  <${n.kind}>` : '';
       const thread = n.replyTo ? `  ↩ re #${R.refSeq(allNotes, n.replyTo) ?? '?'}` : '';
-      const dead = sup.get(n.id);      // keyed by ID: a retraction must survive a merge
       // A note whose author RETRACTED it must never be actionable. Say so before the body.
       const retracted = dead ? `\n      ⚠ RETRACTED by #${dead.seq} (${dead.from}) — do NOT act on this; read #${dead.seq} instead.` : '';
+      // THE OTHER EDGE OF THE SAME RELATIONSHIP, and it used to carry nothing. Reading the TARGET
+      // told you who retracted it and what to do; reading the RETRACTION gave you a bare `#N`. That
+      // is backwards: on the target edge the reader already HAS the note, while on this edge they
+      // may never have received it at all. Measured on real traffic: 4 of 25 retractions are
+      // addressed WIDER than the note they strike (arc #184->#144, #185->#141, #188->#183;
+      // whalephone #515->#514), so every reader outside the target's audience got a correction to
+      // something they can never see and cannot look up.
+      // CHAR-capped, never line-capped: these bodies are unwrapped prose and a first "line" runs
+      // p50 151, p90 1582, max 2260 chars on real data — a line cap would let one opening eat half
+      // the injection budget.
+      const struck = n.supersedes
+        ? `\n      ⤺ this RETRACTS #${R.refSeq(allNotes, n.supersedes) ?? '?'}${struckRef(allNotes, n.supersedes)}`
+        : '';
       return `  #${n.seq}${kind}  from ${n.from}${n.to ? '' : ' (broadcast)'}${n.priority === 'high' ? '  [!]' : ''}${thread}${retracted}\n` +
-        `      ${body.replace(/\n/g, '\n      ')}` +
-        (n.supersedes ? `\n      ⤺ this RETRACTS #${R.refSeq(allNotes, n.supersedes) ?? '?'}` : '') +
+        `      ${body.replace(/\n/g, '\n      ')}` + struck +
         (n.refs ? `\n      refs: ${JSON.stringify(n.refs).slice(0, 200)}` : '');
     };
 

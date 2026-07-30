@@ -206,7 +206,16 @@ function run(raw) {
     // noise the reader can see, a swallowed one is a silent permanent gap. Same reasoning for the
     // counter: over-counting costs at most one deferred delivery, under-counting re-opens the
     // trapdoor at 0c.
-    inj.commit();
+    // commit() CAN THROW, and an unguarded throw here lands on the side this comment just called the
+    // worse one. It reaches atomicWriteJson -> renameSync, which refuses EPERM when another process
+    // holds the cursor file open; the throw then skipped recordBlock entirely. Result: the block IS
+    // delivered (it is already on stdout), the cursor does NOT advance, and the budget UNDER-counts —
+    // so the chain can run past the harness's cap and hit the very trapdoor 0c exists to avoid. The
+    // whole thing is swallowed by the caller's catch, so it would have been invisible too.
+    // Guarded separately so recordBlock ALWAYS runs: the budget must match what the HARNESS saw, and
+    // the harness saw a block. A failed commit re-delivers the batch, which is the duplicate we
+    // already prefer over a gap.
+    try { inj.commit(); } catch { /* cursor did not advance — the batch simply re-delivers */ }
     recordBlock(session, emitted + 1);
     return 'notes';
   }

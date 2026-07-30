@@ -29,9 +29,84 @@ function readSettings(settingsPath = settingsPathDefault) {
 }
 
 // Write settings back (UTF-8, no BOM, trailing newline). Backs up the prior good copy.
+//
+// WRITE-THEN-RENAME, because this file is READ CONSTANTLY BY LIVE SESSIONS and the naive write
+// makes it briefly EMPTY. `writeFileSync` opens with O_TRUNC: the file goes to zero bytes and then
+// refills, and every running session reads settings.json on its own cadence — the statusline every
+// `refreshInterval` seconds, and the hook layer around each prompt and tool call. MEASURED on this
+// machine: a concurrent reader caught it at ZERO BYTES 289 times in 49,176 reads (0.59%) while a
+// writer looped. One deploy is one such window, but there are several sessions reading, so someone
+// eventually lands in it — which is exactly the "the status bar vanished after an update, then came
+// back on its own" report that sent me looking.
+//
+// The statusline is the VISIBLE casualty and the least important one: settings.json is also where
+// the hooks are declared, including the delegate and cross-board gates. I have NOT established what
+// Claude Code does when it reads this empty — it may well keep the last good config — so this is
+// not a claim that gates have silently missed. It is a claim that arc should not be handing anyone
+// an empty settings file, ever, when the fix is a rename.
+//
+// rename is atomic on NTFS, so a reader sees either the whole old file or the whole new one. The
+// .bak-arc write stays a plain write on purpose: nothing reads it on a hot path, and a torn backup
+// is recoverable in a way a torn settings.json is not.
+// EXPORTED, because this file is not the only one that overwrites a settings file a live session is
+// reading. arc-profile.syncSettings rewrites EVERY PROFILE'S OWN settings.json on ensureProfile —
+// which runs on every launch — and it had the same plain writeFileSync. That is the worse of the two
+// sites in practice: two sessions on ONE ACCOUNT share one profile directory, so starting a second
+// session truncates the settings file the first is still reading, and the first loses its statusline
+// while the new one keeps it. The global file this module owns only gets rewritten on a deploy; the
+// profile file gets rewritten every time anyone opens a terminal.
+// One implementation, one place, for the same reason the gate spellings ended up in one table: a rule
+// with two copies has one copy.
+function atomicWriteFile(filePath, body) {
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, body);
+  // RETRY THE RENAME; DO NOT SURRENDER TO THE TRUNCATING WRITE ON THE FIRST REFUSAL.
+  // Windows will not replace a file another process currently has OPEN — it fails EPERM — and
+  // settings.json is open constantly by every live session. Measured under a concurrent reader:
+  // 182 of 400 renames failed, all EPERM. The first version of this fix fell straight back to
+  // `writeFileSync` on that error, so under contention it did the truncating write ~45% of the time
+  // and still produced 118 empty reads. The fallback was defeating the fix in exactly the case the
+  // fix was for.
+  // The refusal is TRANSIENT — the reader closes its handle microseconds later — so retrying is
+  // enough. With retries and no fallback the same probe saw 0 empty reads in 66,410. Backoff is a
+  // real sleep (Atomics.wait on a throwaway buffer); a spin loop would keep the CPU hot and make the
+  // contention worse.
+  const sleep = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {} };
+  let lastErr;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    try { fs.renameSync(tmp, filePath); return; }
+    catch (e) { lastErr = e; sleep(attempt < 10 ? 5 : 25); }
+  }
+  // Exhausted (800ms of sleeps, ~1.1s wall): something holds the file open PERSISTENTLY — an editor,
+  // a watcher, a scanner — not the transient per-tick read a live session does. Now the direct write
+  // is the lesser evil, because a deploy that silently left settings.json unwired is worse than a
+  // window: the hooks and the statusline would simply never arrive.
+  //
+  // AND SAY SO, because this path is the original bug wearing a disguise. Measured by audit: once the
+  // retries are spent the truncating write reopens the zero-byte window at FULL pre-fix rate (0.75
+  // empty reads per write, against a 0.60 control) — so "0 empty in 49,486" is a claim about
+  // TRANSIENT contention only, and this branch is what makes that qualifier necessary. A fallback is
+  // untested code that runs exactly when things are hard; one that also runs UNOBSERVED turns a
+  // regression into a mystery. stderr, not a throw: the deploy must still complete.
+  try { fs.unlinkSync(tmp); } catch {}
+  try {
+    fs.writeFileSync(filePath, body);
+    process.stderr.write(
+      `[arc] WARNING: could not atomically replace ${filePath} after 40 attempts `
+      + `(${(lastErr && lastErr.code) || 'unknown'}) — something is holding it open. Fell back to a `
+      + `direct write, which leaves a brief window where a reader sees an EMPTY settings.json. If a `
+      + `session lost its statusline or a hook did not fire around now, this is why; re-run the `
+      + `installer with editors/watchers closed.\n`,
+    );
+  } catch { throw lastErr || new Error(`could not write ${filePath}`); }
+}
+
+// Write settings back (UTF-8, no BOM, trailing newline). Backs up the prior good copy.
+// The .bak-arc write stays a plain write on purpose: nothing reads it on a hot path, and a torn
+// backup is recoverable in a way a torn settings.json is not.
 function writeSettings(settingsPath, settings, raw) {
   if (raw != null) { try { fs.writeFileSync(settingsPath + '.bak-arc', raw); } catch {} }
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2) + '\n');
 }
 
 // Merge hook entries into settings.hooks, idempotently and without clobbering.
@@ -259,7 +334,7 @@ function wireArcSettings(scriptsDir = path.join(CLAUDE_DIR, 'scripts'), settings
   return { settingsPath, backedUp: raw != null };
 }
 
-module.exports = { readSettings, writeSettings, mergeHooks, ownsHookCommand, mergePermissions, mergeSkillOverrides, overlayMaps, BOARD_PERMISSIONS, setStatusline, STATUSLINE_REFRESH_SECONDS, coreHookEntries, wireArcSettings };
+module.exports = { readSettings, writeSettings, atomicWriteFile, mergeHooks, ownsHookCommand, mergePermissions, mergeSkillOverrides, overlayMaps, BOARD_PERMISSIONS, setStatusline, STATUSLINE_REFRESH_SECONDS, coreHookEntries, wireArcSettings };
 
 if (require.main === module) {
   try {

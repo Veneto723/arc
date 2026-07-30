@@ -99,13 +99,33 @@ const UA_FALLBACK = 'claude-code/2.1.212';
 let claudeUA = null;
 function clientUA() {
   if (claudeUA) return claudeUA;
-  // Only ever called on the network path (60s-cached), never per statusline render —
-  // a spawn here costs a fraction of the fetch it decorates.
+  // READ THE VERSION OFF DISK rather than SPAWNING THE BINARY TO ASK IT. This used to run
+  // `execSync('claude --version', { timeout: 4000 })` — launching a ~260MB executable, and blocking
+  // up to four seconds, to obtain a string that is already sitting in a directory name.
+  //
+  // The old comment said this was fine because it is "only ever called on the network path (60s
+  // cached), never per statusline render". Both halves are true and the conclusion still did not
+  // hold: `claudeUA` is a MODULE-LEVEL variable and every refresh is a FRESH PROCESS, so the memo
+  // never survives to be reused — each refresh paid the spawn again. And the refresh child is what
+  // writes the cache, so a stall there is a stall in the only thing that keeps the bar current.
+  //
+  // The native installer keeps one file per version under ~/.local/share/claude/versions, so the
+  // highest-numbered entry IS the version. Compared numerically, not lexically — a string sort puts
+  // 2.1.9 above 2.1.10. If the directory is absent (a different install method), we fall back to
+  // UA_FALLBACK, which is precisely what the old catch did when the spawn failed. Same failure
+  // behaviour, none of the cost.
   try {
-    const v = require('child_process').execSync('claude --version', { encoding: 'utf8', timeout: 4000, windowsHide: true })
-      .trim().split(/\s+/)[0];
-    if (/^\d+\.\d+\.\d+/.test(v)) claudeUA = `claude-code/${v}`;
-  } catch { /* fall through */ }
+    const vdir = path.join(os.homedir(), '.local', 'share', 'claude', 'versions');
+    const parts = (s) => s.split('.').map(Number);
+    const versions = fs.readdirSync(vdir)
+      .map((n) => n.replace(/\.exe$/i, ''))
+      .filter((n) => /^\d+\.\d+\.\d+$/.test(n))
+      .sort((a, b) => {
+        const [A, B] = [parts(a), parts(b)];
+        return (A[0] - B[0]) || (A[1] - B[1]) || (A[2] - B[2]);
+      });
+    if (versions.length) claudeUA = `claude-code/${versions[versions.length - 1]}`;
+  } catch { /* fall through to the fallback UA, exactly as before */ }
   return (claudeUA = claudeUA || UA_FALLBACK);
 }
 
@@ -138,6 +158,29 @@ function writeCacheFile(cache) {
   const tmpPath = `${CACHE_PATH}.${process.pid}.tmp`;
   fs.writeFileSync(tmpPath, JSON.stringify(cache));
   fs.renameSync(tmpPath, CACHE_PATH);
+  sweepStaleTmp();
+}
+
+// A refresh child KILLED BETWEEN THE WRITE AND THE RENAME leaves its temp file behind forever, and
+// nothing collected them: two were sitting in the cache dir when this was found (13KB and 15KB,
+// from pids that died hours apart), which is also the physical evidence that refresh children DO
+// get killed mid-write. Named per-pid so they cannot collide, which is what let them accumulate
+// silently — each orphan has a unique name, so nothing ever overwrote one.
+// Swept on the write path (rare, and already doing directory I/O) rather than on the render path,
+// which must stay a pure cache read. Age-gated: a `.tmp` younger than a minute may belong to a
+// refresh in flight right now, and deleting THAT would cause the very torn write this avoids.
+function sweepStaleTmp() {
+  const dir = path.dirname(CACHE_PATH);
+  const base = path.basename(CACHE_PATH);
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.startsWith(`${base}.`) || !f.endsWith('.tmp')) continue;
+      const p = path.join(dir, f);
+      try {
+        if (Date.now() - fs.statSync(p).mtimeMs > 60_000) fs.unlinkSync(p);
+      } catch { /* gone, or in use — either way not ours to worry about */ }
+    }
+  } catch { /* cache dir unreadable — never let housekeeping break a render */ }
 }
 
 function appendHistory(history, data) {
@@ -727,11 +770,25 @@ async function main() {
   // RENDER STAMP — which sessions are actually painting, and when. A statusline that stops painting
   // shows its last frame forever, which is indistinguishable from one that is up to date and merely
   // unchanged; nothing else on the machine can tell the two apart. One tiny write per render.
-  try {
-    const rsId = (sl && sl.session_id) || process.env.CLAUDE_CODE_SESSION_ID || process.env.ARC_SESSION;
-    if (rsId) fs.writeFileSync(path.join(C.CACHE_DIR, `arc-render-${rsId}.json`),
-      JSON.stringify({ at: Date.now(), arc: process.env.ARC_SESSION || null, pid: process.ppid }));
-  } catch {}
+  // STARTED vs FINISHED, because the started-stamp alone cannot answer the question it was written
+  // for. It is stamped here, before any work, so it proves only that the process LAUNCHED — and a
+  // run that is killed before it prints stamps it just the same. When a pane goes blank, "is arc
+  // failing to finish?" and "is arc finishing and the caller discarding it?" are the two candidates,
+  // and this file could not tell them apart. `done` is written after stdout, so `done < at` means
+  // the last run never completed.
+  const renderStampAt = Date.now();
+  const renderStampId = (sl && sl.session_id) || process.env.CLAUDE_CODE_SESSION_ID || process.env.ARC_SESSION;
+  const renderStampPath = renderStampId ? path.join(C.CACHE_DIR, `arc-render-${renderStampId}.json`) : null;
+  const stampRender = (done) => {
+    if (!renderStampPath) return;
+    try {
+      fs.writeFileSync(renderStampPath, JSON.stringify({
+        at: renderStampAt, done: done || null, ms: done ? done - renderStampAt : null,
+        arc: process.env.ARC_SESSION || null, pid: process.ppid,
+      }));
+    } catch {}
+  };
+  stampRender(null);
   const model = sl && sl.model ? sl.model.display_name : undefined;
   const effort = resolveEffort(sl && sl.effort ? sl.effort.level : undefined); // xhigh->ultracode via transcript
   writeActiveConv(); // bridge cl<->claude session id so `arc` can preserve this session on switch
@@ -749,7 +806,17 @@ async function main() {
   // stale (kept fresh even while on the subscription, so /arc-peek isn't stale).
   const anyGwStale = ((cfg && cfg.accounts) || []).some((a) => a.type === 'api' && GW.usageUrlFor(a) && !readCachedGwUsage(a.id).fresh);
   const needRefresh = !usage.fresh || anyGwStale;
-  if (needRefresh) triggerBackgroundRefresh();
+  // DEFERRED UNTIL AFTER THE PAINT — this line used to spawn here, and a spawn is the single most
+  // expensive thing on the render path (~100-300ms on Windows, against a 133ms floor for the rest).
+  // That matters far more than it looks: Claude Code re-triggers the statusline on every messageId
+  // and tokenUsage change behind a 300ms debounce, and it ABORTS the in-flight run when a new one
+  // starts (`if (s.aborted) return`, so onResult never fires and statusLineText is never set —
+  // the bar then renders as nothing at all, not as a stale frame). A render that takes longer than
+  // the gap between triggers therefore NEVER completes, and a busy session shows a permanently
+  // blank bar while an idle one is fine. Reported exactly that way: the newest session has a bar,
+  // the working ones do not.
+  // The refresh is detached and its result is only read by the NEXT render, so nothing needs it to
+  // have started before we print. Paint first, then spawn.
 
   // This account's OWN series — a shared one interleaved both accounts' utilization
   // and produced a nonsense trend (and ETA) across a switch.
@@ -784,6 +851,12 @@ async function main() {
       ? renderCompact(usageData, sessionEta, acc, model, effort, board, stance, alarm)
       : renderFull(usageData, sessionEta, weekEta, acc, model, effort)
   );
+
+  stampRender(Date.now());   // the bar is out — this run COMPLETED
+
+  // NOW spawn the refresh — the bar is already on stdout, so the caller can complete this run and
+  // set statusLineText even if the spawn is slow. Last thing before exit, deliberately.
+  if (needRefresh) triggerBackgroundRefresh();
 }
 
 // Run as a script (statusline, --refresh worker, --live); stay silent when merely
