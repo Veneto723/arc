@@ -167,14 +167,55 @@ function convLockPath(convId) { return path.join(CACHE_DIR, `arc-convlock-${conv
 // { pid, cwd }; otherwise reclaim any stale lock and return null. Two arc
 // processes on one conversation both write its transcript .jsonl and can crash
 // together — the confirmed cause of the "both sessions died at once" bug.
+// A PID IS NOT AN IDENTITY, and this guard trusted one. Windows recycles pid numbers, so a lock left
+// behind by a dead session eventually names a process that has nothing to do with arc — and
+// `pidAlive` says yes, because SOMETHING holds that number. The result is a conversation that can
+// never be opened again: hit live, `arc delegate audit` refused for a whole day because the lock
+// claimed pid 2152, and pid 2152 was by then SVCHOST.EXE, started 17 hours AFTER the lock was written.
+//
+// arc already solved this for CLAIMS — genuine iff the process started BEFORE the record that names
+// it (procStarts, d7fae3a) — and the lock has always written `at`, so the test needs no format
+// change. Reusing arc-board's helper rather than writing a second start-time probe: that module
+// carries the two corrections this is easy to get wrong in (.ToFileTimeUtc() not .Ticks, and a done
+// marker rather than the exit code), and a second copy would not.
+//
+// FOUR CASES, and the fail direction differs per case on purpose:
+//   pid dead                  -> reclaim. Unchanged.
+//   start readable, < at      -> GENUINE owner. Refuse the launch; this is the bug the lock prevents.
+//   start readable, > at      -> the number was recycled after the lock was written. Not the owner.
+//   start UNREADABLE (null)   -> a protected/system process. arc runs as THIS user and its own start
+//                                is always readable, so an unreadable holder is definitionally not
+//                                arc. Same ruling arc-board's isHolder makes, and its comment names
+//                                this exact case ("dwm.exe on a recycled number is the live example").
+//   cannot ask at all         -> KEEP the lock. A failed probe proves nothing, and two arc processes
+//                                on one conversation corrupt its transcript and can crash together.
+//                                Refusing a launch costs a message; failing open costs the bug.
 function liveOwnerOf(convId) {
   if (!convId) return null;
   const lp = convLockPath(convId);
   let lock; try { lock = JSON.parse(fs.readFileSync(lp, 'utf8')); } catch { return null; }
   if (lock.session === SESSION_ID) return null;      // our own lock (respawn) — fine
-  if (lock.pid && pidAlive(lock.pid)) return { pid: lock.pid, cwd: lock.cwd || '?' };
-  try { fs.unlinkSync(lp); } catch {}                // stale (owner dead) — reclaim
-  return null;
+  if (!lock.pid || !pidAlive(lock.pid)) {
+    try { fs.unlinkSync(lp); } catch {}              // stale (owner dead) — reclaim
+    return null;
+  }
+  if (typeof lock.at === 'number') {
+    let starts = null;
+    // `{ fresh: true }` IS THE FIX, not a detail. procStarts memoises by pid with a TTL, and the whole
+    // premise here is that the NUMBER changed hands — so a start cached while 2152 was still arc would
+    // be handed back for the svchost.exe that later inherited it: start < at -> "GENUINE" -> the same
+    // conversation bricked, this time out of our own cache. isHolder calls WITHOUT fresh on purpose
+    // (it asks about pids it expects to be stable); this caller must never.
+    try { starts = require('./arc-board').procStarts([lock.pid], { fresh: true }); } catch {}
+    if (starts) {                                    // null = could not ask -> fall through, keep it
+      const st = starts[lock.pid];
+      if (st === null || (typeof st === 'number' && st > lock.at)) {
+        try { fs.unlinkSync(lp); } catch {}          // recycled number, or not a readable user process
+        return null;
+      }
+    }
+  }
+  return { pid: lock.pid, cwd: lock.cwd || '?' };
 }
 
 // Claim the conversation for THIS process. Call after the guard passes.
@@ -2321,7 +2362,10 @@ async function main() {
 // it silently ate an invited peer's conversation (a surviving --fork-session re-forked the
 // session on every relaunch) and nothing could unit-test it, because requiring this file used to
 // LAUNCH CLAUDE. A function that decides how a conversation is re-opened has to be testable.
-module.exports = { stripConvArgs, explicitConvId, resolveResumeRole, preservedFlags, SWEEP_RX, sweepStaleStates, reArmPromptOnRespawn, reArmsAfterReason };
+// liveOwnerOf is EXPORTED for the same reason stripConvArgs is: it decides whether a conversation can
+// be opened at all, and when it got that wrong the conversation was unopenable for a day with no test
+// able to say so. A guard that can brick a conversation has to be reachable from the suite.
+module.exports = { stripConvArgs, explicitConvId, resolveResumeRole, preservedFlags, SWEEP_RX, sweepStaleStates, reArmPromptOnRespawn, reArmsAfterReason, liveOwnerOf, convLockPath };
 
 if (require.main === module) {
   main().catch((e) => {

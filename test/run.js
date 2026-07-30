@@ -1246,6 +1246,78 @@ try {
   }
 } catch (e) { ok('arc-wire-settings works', false, e.message + '\n' + (e.stack || '')); }
 
+// ---- the conversation lock: a PID IS NOT AN IDENTITY -------------------------------
+// This guard stops two arc processes opening one conversation — they both write its transcript and
+// can crash together. It asked only "is that pid alive?", and Windows RECYCLES pid numbers, so a lock
+// left by a dead session eventually names an unrelated process that IS alive. Hit live: `arc delegate
+// audit` refused for a full day because the lock claimed pid 2152 and pid 2152 had become SVCHOST.EXE,
+// started 17 HOURS AFTER the lock was written. The conversation was unopenable with no way to say why.
+// arc already solved this for CLAIMS — genuine iff the process started BEFORE the record naming it —
+// and the lock always wrote `at`, so the fix needed no format change.
+section('conversation lock (a recycled pid must not hold a conversation hostage)');
+{
+  // The staging needs a SECOND live process, not our own pid: `pidAlive` returns false for
+  // process.pid on purpose (we are never the other arc), so a lock naming us short-circuits at the
+  // dead branch and BOTH the genuine and recycled cases would pass without reaching the start-time
+  // test at all. The first draft of this test did exactly that.
+  let child = null;
+  try {
+    const RUN3 = require(path.join(SRC, 'arc-runner.js'));
+    const lockOf = RUN3.convLockPath;
+    const B3 = require(path.join(SRC, 'arc-board.js'));
+    child = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'],
+      { stdio: 'ignore', windowsHide: true });
+    const kid = child.pid;
+    const probe = B3.procStarts([kid], { fresh: true });
+    const kidStart = probe ? probe[kid] : null;
+    ok('(staging) a live helper process with a readable start time', typeof kidStart === 'number',
+      'procStarts -> ' + JSON.stringify(probe));
+
+    if (typeof kidStart === 'number') {
+      // (1) GENUINE: alive, and the lock was written AFTER it started. Refuse the launch — this is
+      // the two-processes-one-transcript crash the lock exists to prevent, and it must still fire.
+      const cid1 = 'lock1-1111-2222-3333-444444444444';
+      writeJSON(lockOf(cid1), { pid: kid, cwd: 'E:/x', session: 'someone-else', at: kidStart + 60000 });
+      const own1 = RUN3.liveOwnerOf(cid1);
+      ok('a GENUINE owner still holds the conversation (the guard must not be weakened)',
+        !!own1 && own1.pid === kid && fs.existsSync(lockOf(cid1)), JSON.stringify(own1));
+      fs.rmSync(lockOf(cid1), { force: true });
+
+      // (2) RECYCLED: alive, but it started AFTER the lock was written, so it cannot be what wrote
+      // it. This is the live bug — `arc delegate audit` refused for a day on pid 2152 = svchost.exe.
+      const cid2 = 'lock2-1111-2222-3333-444444444444';
+      writeJSON(lockOf(cid2), { pid: kid, cwd: 'E:/x', session: 'someone-else', at: kidStart - 60000 });
+      const own2 = RUN3.liveOwnerOf(cid2);
+      ok('a RECYCLED pid does not hold it — the holder started after the lock, so it is not the owner',
+        own2 === null && !fs.existsSync(lockOf(cid2)), JSON.stringify(own2));
+      fs.rmSync(lockOf(cid2), { force: true });
+    }
+
+    // (3) DEAD pid: reclaimed. The original behaviour, asserted so the rewrite cannot have lost it.
+    const cid3 = 'lock3-1111-2222-3333-444444444444';
+    writeJSON(lockOf(cid3), { pid: 999999, cwd: 'E:/x', session: 'someone-else', at: Date.now() });
+    ok('a DEAD owner is reclaimed (the original behaviour, still intact)',
+      RUN3.liveOwnerOf(cid3) === null && !fs.existsSync(lockOf(cid3)));
+    fs.rmSync(lockOf(cid3), { force: true });
+
+    // (4) UNREADABLE start — the shape the real lock was in. A protected/system process cannot be
+    // arc: arc runs as THIS user and its own start is always readable. Same ruling arc-board's
+    // isHolder makes. Staged on pid 4 (System), present on every Windows box, and asserted only if
+    // its start really is unreadable here so a machine that CAN read it does not flake.
+    const sys = B3.procStarts([4], { fresh: true });
+    if (sys && sys[4] === null) {
+      const cid4 = 'lock4-1111-2222-3333-444444444444';
+      writeJSON(lockOf(cid4), { pid: 4, cwd: 'E:/x', session: 'someone-else', at: Date.now() });
+      ok('an UNREADABLE holder does not hold it either (a protected process is definitionally not arc)',
+        RUN3.liveOwnerOf(cid4) === null && !fs.existsSync(lockOf(cid4)));
+      fs.rmSync(lockOf(cid4), { force: true });
+    } else {
+      ok('(skipped: pid 4\'s start is readable here, so the unreadable case cannot be staged)', true);
+    }
+  } catch (e) { ok('conversation lock works', false, e.message + '\n' + (e.stack || '')); }
+  finally { if (child) { try { child.kill(); } catch {} } }
+}
+
 // ---- arc-done (derive "done" from git, not from the agent's word) ---------------
 section('arc-done (git-derived completion)');
 try {
@@ -3462,14 +3534,31 @@ try {
     ok('...every pending note ships seen:false explicitly (unconsumed IS unseen — no inferred key)',
       codePend.every((p) => p.seen === false));
 
-    // (2) a CLOSED chair can never consume, so what it owes is a dead letter, not a live arrow
+    // (2) A CLOSED chair is REPORTED AND FLAGGED, not dropped — a deliberate reversal of the original
+    // rule. THIS TEST CAUGHT THE CHANGE, which is why it now states the new contract instead of the
+    // old one rather than being quietly deleted.
+    // The old rule dropped these because a closed chair never consumes, so its unread never drains and
+    // the arrow would be immortal. True — but dropping produced its own lie, and the operator hit it:
+    // the scope reported "1 open" and drew NOTHING, because the single owed note was addressed to a
+    // chair that had since closed. Two true statements that together read as a contradiction, with no
+    // way to tell which was wrong.
+    // The note now travels with closed:true and the RENDERER decides. The immortal-arrow rule is kept
+    // — it moved to how the edge is DRAWN (dashed, dimmed, never live-coloured), not to whether the
+    // operator is told the note exists at all.
     fs.writeFileSync(path.join(fboard.planDir, 'claim-ghost2.json'),
       JSON.stringify({ role: 'ghost2', pid: DEAD_PID, sessionId: 'g2-sess', convId: 'g2', at: 7000 }));
     RMf.appendNote(fboard, { from: 'code', to: 'ghost2', kind: 'request', body: 'nobody will ever read this' });
     const gRepo = (F.snapshot().repos || []).find((r) => r.root === fboard.root);
-    ok('...a CLOSED chair contributes NO pending edge — its unread pile never drains (immortal arrow)',
-      !!gRepo && !gRepo.pending.some((p) => p.to === 'ghost2')
-      && gRepo.roster.some((c) => c.role === 'ghost2' && c.state === 'closed'));
+    const ghostPend = ((gRepo && gRepo.pending) || []).filter((p) => p.to === 'ghost2');
+    ok('...a CLOSED chair DOES contribute a pending edge now, so "1 open" can never draw nothing',
+      ghostPend.length === 1 && gRepo.roster.some((c) => c.role === 'ghost2' && c.state === 'closed'),
+      JSON.stringify(ghostPend).slice(0, 200));
+    ok('...and it is FLAGGED closed:true so the renderer can draw it not-live instead of not at all',
+      ghostPend.length === 1 && ghostPend[0].closed === true);
+    // THE HALF THAT KEEPS THE ORIGINAL RULE HONEST: a LIVE chair's note must NOT be flagged, or the
+    // renderer would dash every edge on the board and "not live" would stop meaning anything.
+    ok('...while a LIVE chair\'s pending note is closed:false (the flag distinguishes, not decorates)',
+      ((gRepo && gRepo.pending) || []).filter((p) => p.to === 'code').every((p) => p.closed === false));
     try { fs.unlinkSync(path.join(fboard.planDir, 'claim-ghost2.json')); } catch {}
   }
 
@@ -7777,6 +7866,109 @@ try {
 
   fs.rmSync(home, { recursive: true, force: true });
 } catch (e) { ok('arc-bundle works', false, e.message + '\n' + (e.stack || '')); }
+
+// ---- arc-scope ring geometry: the C# under test at last ---------------------------
+// For its whole life the scope has been the one shipping surface with ZERO coverage — the suite is
+// Node, the scope is C# built by csc, so its layout rules were backed by a clean compile and the
+// operator's eye. Two rejected routes and why: porting the formula to JS is a SECOND SPELLING of the
+// rule (the bug class this repo has fixed three times over) and would stay green while the C# drifted;
+// a golden-image test needs a display and measures the paint, not the arithmetic. So the SHIPPING
+// BINARY answers: `arc-scope.exe --geom <width> <halfW,...> [nolabel]` runs the same RingRadiusFor the
+// renderer calls and prints one json line, exiting before any Window exists.
+// The exe is gitignored, so a fresh clone SKIPS and stays green; a built tree gets the coverage.
+section('arc-scope ring geometry (the shipping binary answers)');
+try {
+  const EXE = path.join(SRC, '..', 'scope', 'arc-scope.exe');
+  const geom = (w, halves, noLabel) => {
+    const a = ['--geom', String(w), halves.join(',')];
+    if (noLabel) a.push('nolabel');
+    const r = spawnSync(EXE, a, { encoding: 'utf8', timeout: 20000, windowsHide: true });
+    return JSON.parse((r.stdout || '').trim());
+  };
+  if (!fs.existsSync(EXE)) {
+    ok('(skipped: scope/arc-scope.exe not built — run scope/build.ps1 for this coverage)', true);
+  } else {
+    // ACROSS A SWEEP, NOT AT ONE WIDTH. The first version of this asserted the fit rule at 380 only,
+    // where it happens to hold, while wording it as though it held everywhere (audit, on #454). It
+    // does not: at 200px rCap collapses to 32, the PILLS THEMSELVES overlap (gaps go NEGATIVE) and the
+    // 24px floor draws a label into a gap that does not exist. The floor is deliberate — a cramped
+    // window should still show which notes an edge carries — so the exception is asserted rather than
+    // wished away. An exception the test states beats an invariant the test overstates.
+    // The two narrowest widths are BELOW anything the GUI can produce (MinWidth 300) and are here on
+    // purpose: --geom made the geometry reachable without the window, so the window's minimum stopped
+    // being what keeps the ring sane. See the radius floor assertion below.
+    const WIDTHS = [60, 100, 200, 260, 320, 380, 480, 640, 900];
+    const runs = WIDTHS.map((w) => geom(w, [47, 47, 56]));
+    ok('the radius NEVER exceeds what the window can afford (the ring must not overflow)',
+      runs.every((g) => g.radius <= g.rCap + 1e-9),
+      runs.map((g) => `${g.width}:${g.radius}/${g.rCap}`).join(' '));
+    // ★ THE RING IS NEVER INVERTED. rCap = width/2 - maxHalf - 12 went NEGATIVE under ~136px and the
+    // final clamp discarded the 46px floor set three lines earlier, so the radius went negative too —
+    // every node mirrored through the centre and placed off the top of the canvas. Every other
+    // invariant here passed on it, because a negative gap takes the floor exception every time
+    // (audit #457). The floor now binds via rCap, and this is the assertion that says so.
+    ok('the radius is never inverted or degenerate — the 46px floor BINDS, at any width or pill size',
+      runs.every((g) => g.radius >= 46 - 1e-9),
+      runs.map((g) => `${g.width}:${g.radius}`).join(' '));
+    ok('...including when a single pill is wider than the whole canvas',
+      geom(380, [200, 200, 200]).radius >= 46 - 1e-9, JSON.stringify(geom(380, [200, 200, 200])));
+    // ★ THE FINDING, now a test. The chord budget asks for labelBudget+20 of clearance and rCap can
+    // DENY it — at the operator's 380px window the ask was 195px and 99px arrived, so a full-width
+    // 120px chip sat in a 117px gap at MINUS 3px: it reads like a guarantee and is not one. The drawn
+    // label is now clipped to the gap actually delivered.
+    const fits = (g) => g.allow.every((a, i) =>
+      a + 20 <= g.gaps[i] + 1e-9                       // it fits, with the margin lblNeed reserved
+      || (a === 24 && g.gaps[i] < 44 + 1e-9));         // ...or the gap cannot hold ANY label: floor
+    ok('a label never exceeds the gap it was given — at every width, the clamped ones included',
+      runs.every(fits), runs.map((g) => `${g.width}:${JSON.stringify(g.gaps)}->${JSON.stringify(g.allow)}`).join(' '));
+    ok('...and the clamped case is REAL in that sweep, not hypothetical — the budget went unmet',
+      runs.some((g) => g.gaps[0] >= 44 && g.allow[0] < g.labelBudget - 1e-9),
+      runs.map((g) => `${g.width}:${g.allow[0]}/${g.labelBudget}`).join(' '));
+    // The floor is an ESCAPE HATCH, not the normal path: it may only ever bind where the ring is
+    // genuinely degenerate. If it started firing at a usable width, the clip would be eating labels.
+    ok('the 24px floor only fires where the ring is degenerate (gap < 44), never at a usable width',
+      runs.every((g) => g.allow.every((a, i) => a !== 24 || g.gaps[i] < 44 + 1e-9)),
+      runs.filter((g) => g.allow.some((a) => a === 24)).map((g) => g.width + ':' + JSON.stringify(g.gaps)).join(' '));
+    ok('...and that degenerate case is exercised here — at 200px the pills overlap outright',
+      runs[0].gaps.some((x) => x < 0), JSON.stringify(runs[0].gaps));
+    const nar = runs[WIDTHS.indexOf(380)];
+
+    // Where the width DOES permit it, the layout must actually grow to reserve the full budget —
+    // otherwise "clip the label" would be a way to pass the test above by drawing nothing.
+    const wide = geom(900, [47, 47, 56]);
+    ok('where the window can afford it, the full label budget IS delivered',
+      wide.gaps.every((g) => g >= wide.labelBudget + 20 - 1e-9) && wide.allow.every((a) => a === wide.labelBudget),
+      JSON.stringify(wide));
+
+    // MUTATION, BUILT IN AND PERMANENT rather than a mutant I patched by hand once: `nolabel` is the
+    // same binary computing the geometry as it was BEFORE the label was counted. Delete the lblNeed
+    // term and the two runs collapse onto each other — this goes red. That is the property that makes
+    // the assertions above worth having, since a negative assertion passes for free when the branch
+    // it guards was never reachable.
+    const wideNo = geom(900, [47, 47, 56], true);
+    ok('counting the label CHANGES the layout (delete the lblNeed term and this goes red)',
+      wide.radius > wideNo.radius + 1 && wideNo.gaps[0] < wideNo.labelBudget,
+      `labelled r=${wide.radius} gap=${wide.gaps[0]}  ·  unlabelled r=${wideNo.radius} gap=${wideNo.gaps[0]}`);
+
+    // Monotonicity: the two knobs that can only ever demand MORE room.
+    const bigger = geom(900, [47, 47, 80]);
+    ok('a wider pill never shrinks the ring', bigger.radius >= wide.radius - 1e-9,
+      `${wide.radius} -> ${bigger.radius}`);
+    let mono = true, prev = 0, trace = [];
+    for (let n = 3; n <= 8; n++) {
+      const g = geom(900, new Array(n).fill(47));
+      trace.push(n + ':' + g.radius);
+      if (g.radius < prev - 1e-9) mono = false;
+      prev = g.radius;
+    }
+    ok('more sessions never shrink the ring', mono, trace.join(' '));
+
+    // ...and the cramped window still draws SOMETHING. EdgeLabel keeps at least one id, so the edge
+    // says which notes it carries even when the ring has run out of room to say it politely.
+    ok('a cramped window still leaves a drawable label rather than nothing',
+      runs[0].allow.every((a) => a >= 24), JSON.stringify(runs[0]));
+  }
+} catch (e) { ok('arc-scope ring geometry works', false, e.message + '\n' + (e.stack || '')); }
 
 // ---- PROBE: environment touchpoints (informational — never fails build) ------
 section('environment probe (informational)');

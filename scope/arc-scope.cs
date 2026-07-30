@@ -199,8 +199,91 @@ namespace ArcScope {
       // COMMITTED SOLID family instead: identical on every machine, over any background, every build.
     }
 
+    // ---- THE RING GEOMETRY, AS ONE SPELLING -------------------------------------------------------
+    // Lifted out of Render() so it can be TESTED. Nothing in this file was reachable from the suite —
+    // the suite is Node, this is C# — so the dash, the grouping rule and the chord arithmetic were
+    // backed by a clean compile and the operator's eye, which is not the standard anything else here
+    // is held to. The rejected alternative was porting the formula to JS: that is a SECOND SPELLING of
+    // the rule, the exact class of bug this repo has fixed three times (the gate spelling table, the
+    // alias list, struckRef's three call sites), and it would stay green while the C# drifted away
+    // from it. `--geom` drives THESE methods, so the suite tests the arithmetic that actually ships.
+    // Pure: no WPF type, no window, no display.
+    internal static double LabelBudgetFor(double width) { return Math.Max(60, Math.Min(120, width / 3)); }
+
+    // THE FLOOR HAS TO BE THE LAST WORD, NOT THE FIRST. `Math.Max(46, ...)` below set a floor and the
+    // final `Math.Min(..., rCap)` unconditionally threw it away — so on a canvas under ~136px rCap
+    // goes NEGATIVE and takes the radius with it. That is not a small ring, it is the ring turned
+    // INSIDE OUT: every node mirrored through the centre, with cy0 = rr + 22 placing them off the top
+    // of the canvas. All three of the sweep's invariants pass on it, happily, because a negative gap
+    // takes the floor exception every time (audit #457, found by driving --geom at widths the GUI
+    // cannot produce). NOT reachable today — the window carries MinWidth 300 — but the only thing
+    // standing between a negative radius and the renderer was a number in a XAML string with nothing
+    // connecting the two, and the geometry is now directly reachable through --geom.
+    // Flooring rCap makes the 46 bind for real. On an impossible canvas the ring then OVERFLOWS,
+    // which is visibly wrong and recoverable, rather than inverting, which is silently nonsense.
+    internal static double RCapFor(double width, double maxHalf) { return Math.Max(46, (width / 2) - maxHalf - 12); }
+
+    internal static double RingRadiusFor(double width, double[] halves, bool adjacentLabel) {
+      int n = halves.Length;
+      double need = 0, maxHalf = 0;
+      foreach (var h in halves) { need += h * 2 + 34; if (h > maxHalf) maxHalf = h; }
+      double r0 = need / (2 * Math.PI);                       // radius the pills need around the ARC
+      double rCap = RCapFor(width, maxHalf);                  // radius the width can afford
+      double rr = Math.Max(46, Math.Min(r0, rCap));
+      double lblNeed = adjacentLabel ? LabelBudgetFor(width) + 20 : 0;
+      double chordNeed = (2 * maxHalf + 55 + lblNeed) / (2 * Math.Sin(Math.PI / n));
+      return Math.Min(Math.Max(rr, chordNeed), rCap);
+    }
+
+    // The headless probe. Prints ONE json line and exits before any Application or Window exists, so
+    // it runs on a build agent with no display. Gated in the suite on the exe being built, since it
+    // is gitignored — a fresh clone stays green, a built tree gets the coverage.
+    //   arc-scope.exe --geom <width> <halfW,halfW,...> [nolabel]
+    static int Geom(string[] args) {
+      double width; string[] hs;
+      try {
+        width = double.Parse(args[1], CultureInfo.InvariantCulture);
+        hs = args[2].Split(',');
+      } catch { Console.Error.WriteLine("usage: --geom <width> <halfW,halfW,...> [nolabel]"); return 2; }
+      bool adjLabel = !(args.Length > 3 && args[3] == "nolabel");
+      var halves = new double[hs.Length];
+      for (int i = 0; i < hs.Length; i++) halves[i] = double.Parse(hs[i], CultureInfo.InvariantCulture);
+      int n = halves.Length;
+      double maxHalf = 0; foreach (var h in halves) if (h > maxHalf) maxHalf = h;
+      double budget = LabelBudgetFor(width);
+      double rr = RingRadiusFor(width, halves, adjLabel);
+      var sb = new StringBuilder();
+      sb.Append("{\"width\":").Append(Num(width)).Append(",\"n\":").Append(n)
+        .Append(",\"labelBudget\":").Append(Num(budget))
+        .Append(",\"maxHalf\":").Append(Num(maxHalf))
+        .Append(",\"rCap\":").Append(Num(RCapFor(width, maxHalf)))   // NOT a second spelling: the renderer's own
+        .Append(",\"radius\":").Append(Num(rr))
+        .Append(",\"chord\":").Append(Num(2 * rr * Math.Sin(Math.PI / n)))
+        .Append(",\"gaps\":[");
+      // the gap each ADJACENT pair actually gets, and what a label sitting in it may occupy — the
+      // same two quantities the drawn label is now clipped to.
+      for (int i = 0; i < n; i++) {
+        double dist = 2 * rr * Math.Sin(Math.PI / n);
+        double gap = dist - halves[i] - halves[(i + 1) % n];
+        if (i > 0) sb.Append(',');
+        sb.Append(Num(gap));   // adjacent pill-edge clearance actually delivered
+      }
+      sb.Append("],\"allow\":[");
+      for (int i = 0; i < n; i++) {
+        double dist = 2 * rr * Math.Sin(Math.PI / n);
+        double gap = dist - halves[i] - halves[(i + 1) % n] - 20;
+        if (i > 0) sb.Append(',');
+        sb.Append(Num(Math.Min(budget, Math.Max(24, gap))));
+      }
+      sb.Append("]}");
+      Console.Out.WriteLine(sb.ToString());
+      return 0;
+    }
+    static string Num(double d) { return Math.Round(d, 4).ToString(CultureInfo.InvariantCulture); }
+
     [STAThread]
     static void Main(string[] args) {
+      if (args.Length >= 3 && args[0].ToLowerInvariant() == "--geom") { Environment.Exit(Geom(args)); return; }
       int port = 8791, interval = 1500;
       double scale = 1.2;                 // UI zoom: everything (type, chips, buttons, spacing) together
       for (int a = 0; a < args.Length - 1; a++) {
@@ -359,7 +442,13 @@ namespace ArcScope {
       var sb = new StringBuilder();
       foreach (var x in A(Get(r, "roles"))) sb.Append(S(x, "role")).Append(I(x, "pid")).Append(S(x, "activity")).Append(S(x, "state")).Append('|');
       sb.Append(";S"); foreach (var c in A(Get(r, "roster"))) sb.Append(S(c, "role")).Append(S(c, "state")).Append('|');
-      sb.Append(";P"); foreach (var p in A(Get(r, "pending"))) sb.Append(I(p, "seq")).Append(S(p, "to")).Append(Bo(p, "seen") ? '1' : '0').Append('|');
+      // `closed` is hashed even though it is TODAY implied by the roster state above (a note is closed
+      // iff its recipient chair is closed, and ;S hashes every chair's state) — so a flip is currently
+      // always accompanied by a hashed roster change and the gate could not miss it. Hashed anyway
+      // because that is a COINCIDENCE, not a rule: the day `closed` means anything else (a live but
+      // unreachable chair, a per-note flag, a DEAF peer) the correlation breaks and the gate goes
+      // quiet, which is audit #235 exactly. It is one char in a string; the coupling is not worth it.
+      sb.Append(";P"); foreach (var p in A(Get(r, "pending"))) sb.Append(I(p, "seq")).Append(S(p, "to")).Append(Bo(p, "seen") ? '1' : '0').Append(Bo(p, "closed") ? 'c' : '.').Append('|');
       sb.Append(";F"); foreach (var f in A(Get(r, "flow"))) sb.Append(I(f, "seq")).Append(Bo(f, "open") ? '1' : '0').Append('|');
       sb.Append(";W"); foreach (var w in A(Get(r, "waiting"))) sb.Append(I(w, "seq")).Append(Bo(w, "seen") ? '1' : '0').Append('|');
       sb.Append(";R"); foreach (var m in A(Get(r, "roadmap"))) sb.Append(S(m, "title")).Append(S(m, "state")).Append(S(m, "owner")).Append('|');
@@ -582,7 +671,12 @@ namespace ArcScope {
       var boardObj = Get(repo, "board");
       int total = boardObj != null ? I(boardObj, "notes") : flow.Count;
       string cnt = total > flow.Count ? flow.Count + " of " + total : flow.Count.ToString();
-      detail.Children.Add(Section("NOTE FLOW", cnt + (uc > 0 ? "  ·  " + uc + " open" : "")));
+      // "OWED", not "open" (operator's call). The word has to survive being read next to the graph,
+      // and "open" did not: the panel said "1 open" while the canvas drew nothing, and both were
+      // correct — the count is unanswered REQUESTS, the arrows are unconsumed NOTES. Two different
+      // true numbers wearing one word is what made it unreadable. "Owed" says whose turn it is, which
+      // is the thing the operator was actually asking the panel.
+      detail.Children.Add(Section("NOTE FLOW", cnt + (uc > 0 ? "  ·  " + uc + " owed" : "")));
       if (ordered.Count == 0) detail.Children.Add(Empty("no notes yet"));
       firstFlowToggle = null;
       int shown = Math.Min(FLOW_INLINE, ordered.Count);
@@ -1450,24 +1544,58 @@ namespace ArcScope {
         // figure at every width. One radius, evenly divided: the drawing has a shape of its own, and
         // it is the same shape every time. Height is elastic, so the circle is sized by the WIDTH and
         // the canvas simply grows to hold it.
-        double need = 0, maxHalf = 0;
-        foreach (var k in ring) { need += halfW[k] * 2 + 34; if (halfW[k] > maxHalf) maxHalf = halfW[k]; }
-        double r0 = need / (2 * Math.PI);                       // radius the pills need to not touch (around the arc)
-        double rCap = (width / 2) - maxHalf - 12;               // radius the width can afford
-        double rr = Math.Max(46, Math.Min(r0, rCap));
+        // The arithmetic itself lives in RingRadiusFor (near Main) so that `--geom` and this renderer
+        // share ONE spelling and the suite can drive it headlessly. What stays here is the question
+        // only the render knows how to ask: does any ADJACENT pair actually carry a label?
         // ...but the arc budget only stops pills OVERLAPPING around the ring; on a SMALL ring the
         // straight-line CHORD between two ADJACENT pills is far shorter than that arc, so 3 nodes sit
         // research and code side by side at the bottom with barely a gap. Grow the radius until the
         // adjacent chord (2·rr·sin(π/N)) clears both widest half-widths plus a real gap — still capped
         // by the width so it never overflows. Only bites small N; for large N r0 already exceeds this.
-        double chordNeed = (2 * maxHalf + 55) / (2 * Math.Sin(Math.PI / ringN));
-        rr = Math.Min(Math.Max(rr, chordNeed), rCap);
+        // ...AND THE CHORD MUST ALSO CLEAR THE LABEL, which the budget above forgot. The label is a
+        // LAYOUT NODE sitting ON the edge between two pills, so two adjacent pills can clear each other
+        // by 70px while a 90px chip bridges the gap and touches both — which is exactly what the
+        // operator reported ("code and research are still too close", with #441,#440 wedged between
+        // them). The pills were correctly spaced; the thing between them was never counted.
+        // Only ADJACENT ring pairs matter: a chord is the shortest span on the ring, so a label on any
+        // longer edge has room by construction. Still capped by rCap, so this can only ever use width
+        // that already exists — on a narrow window it buys what it can rather than overflowing.
+        bool adjLabel = false;
+        for (int li = 0; li < ringN; li++) {
+          string la = ring[li], lb = ring[(li + 1) % ringN];
+          if (groups.ContainsKey(la + "|" + lb) || groups.ContainsKey(lb + "|" + la)) { adjLabel = true; break; }
+        }
+        var halves = new double[ringN];
+        for (int hi = 0; hi < ringN; hi++) halves[hi] = halfW[ring[hi]];
+        double rr = RingRadiusFor(width, halves, adjLabel);
         double cx0 = width / 2, cy0 = rr + 22;
         // start at the top and go clockwise, so the first name alphabetically is always at 12 o'clock
         for (int i = 0; i < ringN; i++) {
           double ang = -Math.PI / 2 + i * 2 * Math.PI / ringN;
           pos[ring[i]] = new Point(cx0 + rr * Math.Cos(ang), cy0 + rr * Math.Sin(ang));
         }
+      }
+      // ---- THE RESERVATION CAN BE DENIED, AND THE DRAWN LABEL HAS TO RESPECT THAT ----
+      // labelBudget is what the layout ASKS for; rCap is what the window can AFFORD, and when the ask
+      // exceeds it the radius is clamped and the gap comes back short — silently. At the operator's own
+      // 380px window the ask was 195px of pill-edge clearance and 99px was delivered, so a full-width
+      // 120px chip sat in a 117px gap: MINUS 3px, a near miss that reads like a guarantee (audit, on
+      // #451). The formula is not wrong — refusing to overflow the window is right — it just could not
+      // promise what it looked like it promised.
+      // So the text is re-fitted to the gap the layout actually produced, which makes the overlap
+      // structurally impossible rather than merely unlikely. This does NOT re-open the circular
+      // dependency the fixed budget was invented to cut (#241): the layout is FINAL by this point and
+      // shrinking text never asks for more room, so it is a one-way clamp, not a negotiation. Distances
+      // are taken before the vertical shift below, which is a translation and changes none of them.
+      foreach (var k in order) {
+        string[] pk = k.Split('|');
+        if (!pos.ContainsKey(pk[0]) || !pos.ContainsKey(pk[1])) continue;      // an outside endpoint
+        double dxl = pos[pk[0]].X - pos[pk[1]].X, dyl = pos[pk[0]].Y - pos[pk[1]].Y;
+        double gapL = Math.Sqrt(dxl * dxl + dyl * dyl) - halfW[pk[0]] - halfW[pk[1]] - 20;  // 20: the margin lblNeed reserved
+        if (gapL >= labelBudget) continue;                                     // the reservation was met in full
+        string clipped = EdgeLabel(Newest(groups[k]), Math.Max(24, gapL));     // EdgeLabel always keeps at least one id
+        labelText[k] = clipped;
+        labelSize[k] = new Size(TextW(clipped, 10.5, MONO) + 14, 20);
       }
       foreach (var g in gns) { if (pos.ContainsKey(g.Id.Substring(2))) { g.X = pos[g.Id.Substring(2)].X; g.Y = pos[g.Id.Substring(2)].Y; } }
 
@@ -1615,9 +1743,19 @@ namespace ArcScope {
         // blocker says work has stopped — both are the operator's problem, not just the recipient's.
         bool alert = false;
         foreach (var w in list) if (S(w, "priority") == "high") { alert = true; break; }
-        string col = alert ? ALERT : unseen ? ACCENT : WAIT;
+        // OWED TO A CHAIR NOBODY HOLDS. The feed used to drop these entirely, so the panel could
+        // report "1 open" and the graph draw nothing — both true, together unreadable. They are now
+        // reported with closed:true and drawn as NOT LIVE rather than not at all.
+        // DASHED is the whole signal, and it is deliberately the only dashed thing on this canvas: a
+        // colour or an opacity alone would just read as "older", which is what WAIT already means. A
+        // broken line reads as a broken relationship without a legend.
+        // Every note in the group must be closed for the edge to be dead — a chair that reopened with
+        // one fresh note owed is live cooperation again, and the live rendering should win.
+        bool dead = list.Count > 0;
+        foreach (var w in list) if (!Bo(w, "closed")) { dead = false; break; }
+        string col = dead ? WAIT : alert ? ALERT : unseen ? ACCENT : WAIT;
         double thick = Math.Min(1.2 + list.Count * 0.35, 4.0);
-        double opa = unseen ? 0.95 : 0.55;
+        double opa = dead ? 0.45 : unseen ? 0.95 : 0.55;
         if (settling.Contains(key)) { col = WAIT; opa = 0.35; }   // a just-consumed edge lingers faint before it fades
         // STRAIGHT to the boundary, head SEATED on the card. A port edge is a plain straight line (a curve
         // reads wrong for a single arrow); only an outside-pill endpoint bows. Two things make the head sit
@@ -1648,10 +1786,19 @@ namespace ArcScope {
         var wire = new System.Windows.Shapes.Path();   // qualified: System.IO.Path is also in scope
         wire.Data = geo; wire.Stroke = Br(col); wire.StrokeThickness = thick; wire.Opacity = opa;
         wire.StrokeStartLineCap = PenLineCap.Round; wire.StrokeEndLineCap = PenLineCap.Round;
+        // The dash is what says "nobody is sitting there". Butt caps, because a round cap on a dashed
+        // stroke smears the gaps closed at this thickness and it stops reading as broken at all.
+        if (dead) {
+          wire.StrokeDashArray = new DoubleCollection(new double[] { 3, 2.5 });
+          wire.StrokeStartLineCap = PenLineCap.Flat; wire.StrokeEndLineCap = PenLineCap.Flat;
+        }
         canvas.Children.Add(wire);
 
         // Solid head, BASE -> TIP, drawn ON TOP of the pills so its sunk-in point shows instead of hiding.
-        double opaHead = 1.0;   // the HEAD is always solid — never see-through — even when the wire is faint
+        // The HEAD is always solid — never see-through — even when the wire is faint, because the head
+        // is what makes the thing legible as an arrow at all. A dead edge dims it rather than dashing
+        // it: a 10px triangle cannot carry a dash pattern, and the wire already said "not live".
+        double opaHead = dead ? 0.55 : 1.0;
         {
           var head = new Polygon(); head.Fill = Br(col); head.Opacity = opaHead;
           head.Points = new PointCollection();
@@ -1677,8 +1824,16 @@ namespace ArcScope {
         // The wire itself carries the interaction: hovering names the notes, clicking opens them. A
         // transparent fat stroke over the thin visible one gives it a forgiving hit target.
         var edgeNotes = Newest(list); var rp = repo;
+        // A DASH THAT NEEDS EXPLAINING MUST EXPLAIN ITSELF. I shipped the dash arguing that "a broken
+        // line reads as a broken relationship without a legend"; the operator's first question on
+        // seeing it was "what does the dashed arrow mean?", which settles that. It is a new visual
+        // vocabulary word and nothing on the canvas defines it, so the hover says it in plain terms —
+        // naming the chair, because "closed" is the fact that matters and it is per-recipient.
         string tipTxt = pr[0] + " → " + pr[1] + "  ·  " + EdgeLabel(edgeNotes, 400)
-                      + (alert ? "   (blocker/correction)" : "");
+                      + (alert ? "   (blocker/correction)" : "")
+                      + (dead ? "\ndashed = owed to a chair nobody holds: \"" + pr[1]
+                                + "\" is closed, so it cannot read this. Revive it and the arrow goes solid."
+                              : "");
         wire.ToolTip = tipTxt;
         var hit = new System.Windows.Shapes.Path();
         // 14px was a corridor, not a line — it swallowed pointer events well away from the wire and

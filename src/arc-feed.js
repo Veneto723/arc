@@ -66,12 +66,18 @@ const FEED_PORT = parseInt(process.env.ARC_FEED_PORT || '8791', 10);   // next t
 // old shape for hours while `snapshot()` returned the new one correctly when called directly —
 // stop/start does not settle it, because a healthy same-version feed is left alone on purpose.
 // Change the snapshot's SHAPE, bump this in the same edit.
+// v20 = `pending` now carries notes owed to a CLOSED chair as well, each flagged `closed:true`,
+// instead of dropping them. Dropping them made the scope report "1 open" while drawing no arrow —
+// both statements true, together unreadable, and no way to tell which was wrong. The immortal-arrow
+// rule moves to the RENDERER, which draws these as not-live rather than not at all. SHAPE change,
+// hence the bump: a running feed never reloads its source, so without it every scope keeps reading
+// the old shape forever — the exact lesson v2 and v19 record.
 // v19 = seq/reSeq are ESCAPED in the dashboard (a ledger-supplied note position could inject markup
 // into the served HTML). A SECURITY change with no snapshot-shape change — which is exactly the case
 // this counter exists for: without the bump, a feed already running at 18 would keep serving the
 // vulnerable renderer from memory forever, since a detached process never reloads its source. The
 // same lesson as v2/audit #345, re-learned by deploying the fix and finding the live feed unchanged.
-const VERSION = 19;   // 19: dashboard escapes seq/reSeq (security — must self-activate on live feeds)
+const VERSION = 20;   // 20: pending[] reports CLOSED-chair notes too, flagged `closed` (SHAPE change)
 const COOP_MAX = 20;               // recent reply edges kept per board
 const FLOW_MAX = 60;               // recent ledger notes kept per board (the transcript, all kinds)
 const pidFile = (port) => path.join(CACHE_DIR, `arc-feed-${port}.json`);
@@ -465,7 +471,13 @@ function snapshot() {
       // a broadcast has no single recipient (to == null) — say so rather than inventing one
       to: n.to == null ? null : Array.isArray(n.to) ? n.to.join('+') : String(n.to),
       seq: n.seq, id: n.id, ts: n.ts, kind: n.kind || null, priority: n.priority === 'high' ? 'high' : 'normal',
-      open: openIds.has(n.id),        // still awaiting an answer
+      // still awaiting an answer. THE SCOPE DISPLAYS THIS AS "owed", NOT "open" — deliberately, and
+      // the divergence is only safe while nothing infers meaning from the name. The panel once read
+      // "1 open" while the graph drew nothing and both were correct: this counts unanswered REQUESTS,
+      // the arrows count unconsumed NOTES. Two different true numbers wearing one word is what made
+      // it unreadable, so the operator renamed the DISPLAY. The wire name stayed because renaming a
+      // field is a protocol edit and the field name was never what confused anyone.
+      open: openIds.has(n.id),
       text: clip(n.body),
     }));
 
@@ -496,10 +508,17 @@ function snapshot() {
     const pending = [];
     const pendingMore = {};        // role -> directed notes the cap discarded (0 entries = nothing hidden)
     for (const chair of roster) {
-      // A CLOSED chair can never consume, so its unread pile never drains and every note in it
-      // becomes an immortal arrow — the exact staleness this field exists to remove. What a departed
-      // session owes is a dead letter, not pending cooperation.
-      if (chair.state === 'closed') continue;
+      // A CLOSED CHAIR IS REPORTED, AND FLAGGED, RATHER THAN DROPPED. It used to be skipped outright:
+      // a closed chair can never consume, so its unread pile never drains and every note in it would
+      // be an immortal arrow — the staleness this field exists to remove.
+      // But dropping it produced its own lie, and the operator hit it: the scope said "1 open" and
+      // drew NOTHING, because the one owed note was addressed to a chair that had since closed. Two
+      // true statements that read as a contradiction, with no way to tell which was wrong.
+      // So the note travels with `closed: true` and the DECISION moves to the renderer, which can say
+      // "owed to a chair nobody holds" instead of either claiming live cooperation or showing nothing.
+      // The immortal-arrow rule is kept where it belongs — in how it is DRAWN, not in whether the
+      // operator is told it exists.
+      const chairClosed = chair.state === 'closed';
       try {
         const u = B.unreadFor(board, chair.role);
         // FILTER FIRST, THEN CAP. The other order silently loses every directed note older than the
@@ -520,6 +539,10 @@ function snapshot() {
             // rendered permanently red once edges moved from waiting[] to pending[] (blocker 3).
             // Ship it explicitly rather than let the consumer infer it from an absent field.
             seen: false,
+            // NOBODY IS SITTING THERE. Shipped explicitly for the same reason as `seen`: a renderer
+            // that has to infer this from the roster will eventually forget to, and the failure is
+            // silent — an edge that claims live cooperation with a chair that closed hours ago.
+            closed: chairClosed,
           });
         }
         // A cap that hides work must SAY it hid work: a genuine backlog and a truncated one are
