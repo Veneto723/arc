@@ -125,6 +125,9 @@ namespace ArcScope {
 
     // palette
     const string ACCENT = "#5AA3FF", LIVE = "#46C168", WAIT = "#E0A13A", ALERT = "#FF5B50";
+    // a seam being agreed — see the wire colour in the edge pass. Distinct from all four above
+    // on purpose: each of those already means something a contract is not.
+    const string CONTRACT = "#B08BFF";
     const string TXT = "#E8EDF4", TXT2 = "#9AA9BB", DIM = "#65768B", CARD = "#161E2A", HAIR = "#232D3B";
     const string MONO = "Cascadia Mono, Consolas", SANS = "Segoe UI Variable Display, Segoe UI";
     const string CLOSED = "#3A4A5C";
@@ -764,13 +767,16 @@ namespace ArcScope {
       ag.Text = Ago(S(c, "ts")); ag.VerticalAlignment = VerticalAlignment.Center; ag.Margin = new Thickness(10, 0, 0, 0);
       DockPanel.SetDock(ag, Dock.Right); top.Children.Add(ag);
       var hd = new TextBlock(); hd.FontFamily = new FontFamily(MONO); hd.FontSize = 11; hd.VerticalAlignment = VerticalAlignment.Center;
-      hd.Inlines.Add(new Run("#" + seq + " ") { Foreground = Br(ACCENT), FontWeight = FontWeights.SemiBold });
+      hd.Inlines.Add(new Run("#" + seq + " ") { Foreground = Br(CONTRACT), FontWeight = FontWeights.SemiBold });
       hd.Inlines.Add(new Run("opened by " + from) { Foreground = Br(DIM) });
       top.Children.Add(hd);
       stack.Children.Add(top);
 
       // line 2 — the seam itself, in the author's words. Wrapped, not clipped to one line: this is the
       // part a human reads to learn what the contract IS, which is the whole reason for the section.
+      // The BODY stays neutral on purpose (operator's call): violet is the ID's colour, marking which
+      // seam this is, and colouring a whole paragraph with it costs readability while telling the
+      // reader nothing the "#N" has not already said.
       var tx = new TextBlock(); tx.FontFamily = new FontFamily("Segoe UI"); tx.FontSize = 12;
       tx.Foreground = Br("#C3CEDA"); tx.TextWrapping = TextWrapping.Wrap; tx.Text = body;
       tx.Margin = new Thickness(0, 3, 0, 4); tx.MaxHeight = 58; tx.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -937,7 +943,18 @@ namespace ArcScope {
       string to = S(w, "to");
       if (to.Length == 0) to = "all";                           // a broadcast has no single recipient
       string meta = "#" + I(w, "seq") + "  ·  " + Ago(S(w, "ts"));
-      if (alert && kind.Length > 0) meta = kind.ToUpperInvariant() + "  ·  " + meta;
+      // A CONTRACT MUST SAY SO IN THE FLOW. The label was gated on `alert`, i.e. priority == high —
+      // and only `blocker` and `correction` are auto-high, so a contract scrolled past looking exactly
+      // like routine chatter. Reported by the operator against a real note whose body opened
+      // "# CONTRACT — the notice card's action button needs a SECOND meaning": the note was a
+      // perfectly-formed contract and only the RENDER hid it.
+      // The boundary is arc's own KIND_RANK (blocker 0 · correction 1 · contract 2 · request 3 ·
+      // result 4 · info 5), not a taste call: ranks 0-2 are the kinds that change what a reader is
+      // allowed to DO, which is exactly what must never be missed while scrolling. request/result are
+      // the ordinary traffic of the board — labelling those would be noise, and noise is how the
+      // label stops being read.
+      bool binding = kind == "contract" || kind == "blocker" || kind == "correction";
+      if (binding) meta = kind.ToUpperInvariant() + "  ·  " + meta;
       return Note(alert || op, S(w, "from"), "→", to, alert ? ALERT : ACCENT, alert ? ALERT : op ? ALERT : WAIT,
                   meta, S(w, "text"));
     }
@@ -1869,7 +1886,21 @@ namespace ArcScope {
         // one fresh note owed is live cooperation again, and the live rendering should win.
         bool dead = list.Count > 0;
         foreach (var w in list) if (!Bo(w, "closed")) { dead = false; break; }
-        string col = dead ? WAIT : alert ? ALERT : unseen ? ACCENT : WAIT;
+        // A CONTRACT IN FLIGHT IS ITS OWN COLOUR. Accent blue means "live traffic — someone wrote,
+        // the recipient has not read it yet", and that is true of a contract too but badly
+        // incomplete: an unread request costs the reader a turn, an unread CONTRACT is a seam being
+        // agreed, and the operator's question about it is different ("what are they binding
+        // themselves to?" not "when will they get to it?"). It also stays owed until every bound
+        // role declares a half, so it can sit on the canvas far longer than ordinary traffic.
+        // VIOLET because the four existing colours are all spoken for and each already means
+        // something a contract is not: accent=in flight, live=healthy, wait=older/settled,
+        // alert=intervene.
+        // PRECEDENCE: dead > alert > contract > unseen. A blocker or correction still outranks it —
+        // a stop-the-line beats a binding, because one needs you NOW and the other needs you to read
+        // it carefully. And dead outranks everything: owed to a chair nobody holds is not live at all.
+        bool binding = false;
+        foreach (var w in list) if (S(w, "kind") == "contract") { binding = true; break; }
+        string col = dead ? WAIT : alert ? ALERT : binding ? CONTRACT : unseen ? ACCENT : WAIT;
         double thick = Math.Min(1.2 + list.Count * 0.35, 4.0);
         double opa = dead ? 0.45 : unseen ? 0.95 : 0.55;
         if (settling.Contains(key)) { col = WAIT; opa = 0.35; }   // a just-consumed edge lingers faint before it fades
@@ -1945,8 +1976,16 @@ namespace ArcScope {
         // seeing it was "what does the dashed arrow mean?", which settles that. It is a new visual
         // vocabulary word and nothing on the canvas defines it, so the hover says it in plain terms —
         // naming the chair, because "closed" is the fact that matters and it is per-recipient.
+        // NAME THE COLOUR, for the same reason the dash is named below it: the operator's first words
+        // on seeing a new visual word were "what does the dashed arrow mean?", which settled that
+        // "it is self-evident" is not a judgement the person who drew it can make. A violet wire is a
+        // new word too, and it is only shown when `alert` did not already claim the colour.
         string tipTxt = pr[0] + " → " + pr[1] + "  ·  " + EdgeLabel(edgeNotes, 400)
                       + (alert ? "   (blocker/correction)" : "")
+                      + (!alert && !dead && binding
+                          ? "\nviolet = a CONTRACT in flight: a seam being agreed, not just news. It stays"
+                            + "\nowed until every bound role declares its own half.  arc notes --kind contract"
+                          : "")
                       + (dead ? "\ndashed = owed to a chair nobody holds: \"" + pr[1]
                                 + "\" is closed, so it cannot read this. Revive it and the arrow goes solid."
                               : "");
