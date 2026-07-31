@@ -279,15 +279,33 @@ function coreHookEntries(scriptsDir) {
 // delegate` stays OFF the list on purpose and by doctrine: it is the one verb that spawns a
 // session, and the operator's rule is that a spawn is permitted by the human — the permission
 // prompt IS that permission.
-const BOARD_COMMANDS = ['arc join', 'arc await', 'arc role', 'arc notes', 'arc note', 'arc close', 'arc export', 'arc import'];
+// ⚠ `arc note` IS NO LONGER HERE — the operator's rule (2026-07-31): **a session asks before it
+// INITIATES a note; answering one that reached it does not need consent.** Posting is no longer an
+// unattended coordination command, so it leaves this list and falls to the normal permission prompt.
+// The reply half needs no permission entry at all: arc-pretool-hook's reply exemption returns
+// `allow` for a PROVEN reply (addressed to you, from the role you are answering, and the sole
+// command on the line), which bypasses the prompt without an allowlist rule. That gate is stricter
+// than a wildcard could ever be — a wildcard cannot tell a reply from a broadcast.
+// `arc notes` (READING) stays: reading is not initiating, and an unattended session must be able to
+// read its own inbox. Note the two are one character apart and the strings below are matched
+// EXACTLY, so retiring `arc note` cannot take `arc notes` with it.
+const BOARD_COMMANDS = ['arc join', 'arc await', 'arc role', 'arc notes', 'arc close', 'arc export', 'arc import'];
 const SHELL_TOOLS = ['Bash', 'PowerShell'];
 const BOARD_PERMISSIONS = SHELL_TOOLS.flatMap((tool) =>
   BOARD_COMMANDS.flatMap((cmd) => [`${tool}(${cmd}:*)`, `${tool}(${cmd})`]));
+
+// RETIRING A PERMISSION NEEDS ITS OWN LIST, because mergePermissions only ever ADDS. Dropping a
+// command from BOARD_COMMANDS is invisible on any machine that already installed it: the entry sits
+// in settings.json forever and the new rule silently does nothing. Same shape as the feed serving a
+// stale VERSION after deploy — the file changed and the running state did not.
+const RETIRED_PERMISSIONS = SHELL_TOOLS.flatMap((tool) => [`${tool}(arc note:*)`, `${tool}(arc note)`]);
 
 function mergePermissions(settings, allow) {
   if (!settings.permissions || typeof settings.permissions !== 'object') settings.permissions = {};
   const cur = Array.isArray(settings.permissions.allow) ? settings.permissions.allow : (settings.permissions.allow = []);
   for (const p of allow) if (!cur.includes(p)) cur.push(p);
+  // strip anything arc granted and has since taken back — exact match, so `arc notes` is untouched
+  for (let i = cur.length - 1; i >= 0; i--) if (RETIRED_PERMISSIONS.includes(cur[i])) cur.splice(i, 1);
   return settings;
 }
 

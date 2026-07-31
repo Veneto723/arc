@@ -451,6 +451,16 @@ namespace ArcScope {
       sb.Append(";P"); foreach (var p in A(Get(r, "pending"))) sb.Append(I(p, "seq")).Append(S(p, "to")).Append(Bo(p, "seen") ? '1' : '0').Append(Bo(p, "closed") ? 'c' : '.').Append('|');
       sb.Append(";F"); foreach (var f in A(Get(r, "flow"))) sb.Append(I(f, "seq")).Append(Bo(f, "open") ? '1' : '0').Append('|');
       sb.Append(";W"); foreach (var w in A(Get(r, "waiting"))) sb.Append(I(w, "seq")).Append(Bo(w, "seen") ? '1' : '0').Append('|');
+      // CONTRACTS — hashed because they are RENDERED (the rule this comment block states). `awaiting`
+      // is the part that moves: a role declaring its half is exactly the event the section exists to
+      // show, and it changes no other hashed field, so without this the panel would keep showing a
+      // seam as owed after it was settled.
+      sb.Append(";C"); foreach (var c in A(Get(r, "contracts"))) {
+        sb.Append(I(c, "seq")).Append(':');
+        foreach (var w in A(Get(c, "awaiting"))) sb.Append(V(w)).Append(',');
+        sb.Append(I(c, "clauses")).Append('/').Append(I(c, "retracted")).Append('|');
+      }
+      sb.Append(I(r, "contractStrays"));
       sb.Append(";R"); foreach (var m in A(Get(r, "roadmap"))) sb.Append(S(m, "title")).Append(S(m, "state")).Append(S(m, "owner")).Append('|');
       sb.Append(';').Append(I(r, "sessionCount")).Append(';').Append(I(Get(r, "board"), "notes"))
         .Append(';').Append(Bo(r, "roadmapFile") ? '1' : '0');
@@ -676,6 +686,32 @@ namespace ArcScope {
       // correct — the count is unanswered REQUESTS, the arrows are unconsumed NOTES. Two different
       // true numbers wearing one word is what made it unreadable. "Owed" says whose turn it is, which
       // is the thing the operator was actually asking the panel.
+      // ---- CONTRACTS — ABOVE the ledger, and only when something is unsettled ----
+      // A seam nobody has declared their half of outranks the note flow: the flow is what happened,
+      // an open contract is what someone is still WAITING ON. It disappears entirely once every
+      // contract is settled, so its presence is itself the signal — a section that is always there
+      // stops being read.
+      var contracts = A(Get(repo, "contracts"));
+      int strays = I(repo, "contractStrays");
+      if (contracts.Count > 0 || strays > 0) {
+        int more = I(repo, "contractsMore");
+        detail.Children.Add(Section("CONTRACTS", contracts.Count + " open"
+          + (more > 0 ? " (+" + more + " more)" : "")));
+        foreach (var c in contracts) detail.Children.Add(ContractRow(c));
+        // A contract NOTE filed under a non-contract thread is not a contract and `--thread` refuses
+        // it — but dropping it silently is how the count lied in the first place. Say it out loud.
+        if (strays > 0) {
+          var w = new TextBlock();
+          w.FontFamily = new FontFamily("Segoe UI"); w.FontSize = 11; w.TextWrapping = TextWrapping.Wrap;
+          w.Foreground = Br(WAIT); w.Margin = new Thickness(4, 6, 2, 2);
+          w.Text = strays + " contract note" + (strays == 1 ? "" : "s") + " filed under a non-contract thread — "
+                 + "not a seam, and `arc notes --thread` refuses them.";
+          w.ToolTip = "Someone replied with --kind contract to an ordinary note, so the clause folded into "
+                    + "that thread instead of opening a seam.\nSee them with:  arc notes --kind contract";
+          detail.Children.Add(w);
+        }
+      }
+
       detail.Children.Add(Section("NOTE FLOW", cnt + (uc > 0 ? "  ·  " + uc + " owed" : "")));
       if (ordered.Count == 0) detail.Children.Add(Empty("no notes yet"));
       firstFlowToggle = null;
@@ -708,6 +744,86 @@ namespace ArcScope {
       dp.Children.Add(rule); return dp;
     }
     static UIElement Empty(string text) { var t = new TextBlock(); t.FontFamily = new FontFamily("Segoe UI"); t.FontSize = 12; t.FontStyle = FontStyles.Italic; t.Foreground = Br(DIM); t.Text = text; t.Margin = new Thickness(4, 1, 0, 2); return t; }
+
+    // ONE OPEN CONTRACT. A contract is the one thing on this board that binds a role to a promise, and
+    // until every bound role has declared its half the other side is building against a seam that is
+    // not settled yet. That is worth a human's attention in a way a note is not, so it gets its own
+    // row: the seam text, and per-role whether they have declared (✓) or are still owed (waiting).
+    // The section only exists when something is open — a settled contract is history, and a panel
+    // that lists history teaches the reader to stop looking at it.
+    static UIElement ContractRow(object c) {
+      int seq = I(c, "seq");
+      string from = S(c, "from"), body = S(c, "body");
+      var members = A(Get(c, "members"));
+      var awaiting = new List<string>(); foreach (var a in A(Get(c, "awaiting"))) awaiting.Add(V(a));
+      var stack = new StackPanel(); stack.Margin = new Thickness(2, 7, 2, 8);
+
+      // line 1 — #seq · who opened it (left) · age (right)
+      var top = new DockPanel();
+      var ag = new TextBlock(); ag.FontFamily = new FontFamily(MONO); ag.FontSize = 10; ag.Foreground = Br(DIM);
+      ag.Text = Ago(S(c, "ts")); ag.VerticalAlignment = VerticalAlignment.Center; ag.Margin = new Thickness(10, 0, 0, 0);
+      DockPanel.SetDock(ag, Dock.Right); top.Children.Add(ag);
+      var hd = new TextBlock(); hd.FontFamily = new FontFamily(MONO); hd.FontSize = 11; hd.VerticalAlignment = VerticalAlignment.Center;
+      hd.Inlines.Add(new Run("#" + seq + " ") { Foreground = Br(ACCENT), FontWeight = FontWeights.SemiBold });
+      hd.Inlines.Add(new Run("opened by " + from) { Foreground = Br(DIM) });
+      top.Children.Add(hd);
+      stack.Children.Add(top);
+
+      // line 2 — the seam itself, in the author's words. Wrapped, not clipped to one line: this is the
+      // part a human reads to learn what the contract IS, which is the whole reason for the section.
+      var tx = new TextBlock(); tx.FontFamily = new FontFamily("Segoe UI"); tx.FontSize = 12;
+      tx.Foreground = Br("#C3CEDA"); tx.TextWrapping = TextWrapping.Wrap; tx.Text = body;
+      tx.Margin = new Thickness(0, 3, 0, 4); tx.MaxHeight = 58; tx.TextTrimming = TextTrimming.CharacterEllipsis;
+      stack.Children.Add(tx);
+
+      // line 3 — every bound role, and whether it has declared its half. The ✓/waiting split IS the
+      // status: there is no stored "closed" flag anywhere, it is derived from who has a live clause.
+      // ⚠ NOT WHEN NOBODY HAS REPLIED AT ALL. "○ uiux" asserts that uiux owes a half, and on a thread
+      // with zero replies that is a claim about a seam nobody ever treated as one. Three of the four
+      // open contracts on a live board were exactly that — announcements posted with --kind contract,
+      // silent for 42h, 186h and 238h. So a never-answered thread says NEVER ANSWERED and how long,
+      // and does not name debtors. Reporting the silence beats inventing a creditor.
+      var who = new TextBlock(); who.FontFamily = new FontFamily(MONO); who.FontSize = 11; who.TextWrapping = TextWrapping.Wrap;
+      int replies = I(c, "replies");
+      if (replies == 0) {
+        who.Inlines.Add(new Run("— no reply in " + Ago(S(c, "ts"))) { Foreground = Br(WAIT), FontWeight = FontWeights.SemiBold });
+        who.Inlines.Add(new Run("   bound: " + string.Join(", ", ToArr(members))) { Foreground = Br(DIM) });
+      } else {
+        bool first = true;
+        foreach (var m in members) {
+          string role = V(m);
+          bool owed = awaiting.Contains(role);
+          if (!first) who.Inlines.Add(new Run("   ") { Foreground = Br(DIM) });
+          first = false;
+          who.Inlines.Add(new Run(owed ? "○ " : "✓ ") { Foreground = Br(owed ? ALERT : LIVE), FontWeight = FontWeights.Bold });
+          who.Inlines.Add(new Run(role) { Foreground = Br(owed ? "#CBD6E2" : DIM) });
+        }
+      }
+      int retracted = I(c, "retracted");
+      string tail = "   " + I(c, "clauses") + " clause" + (I(c, "clauses") == 1 ? "" : "s")
+                  + (retracted > 0 ? ", " + retracted + " retracted" : "");
+      who.Inlines.Add(new Run(tail) { Foreground = Br(DIM) });
+      who.Margin = new Thickness(0, 1, 0, 0);
+      stack.Children.Add(who);
+
+      var tip = "CONTRACT #" + seq + " — opened by " + from
+              + "\nbound: " + string.Join(", ", ToArr(members))
+              + (replies == 0
+                  ? "\n\nNOBODY HAS REPLIED — not once, in " + Ago(S(c, "ts")) + "."
+                    + "\nA seam gets answered: each bound role declares its own half. A thread that"
+                    + "\nnever draws one is usually an ANNOUNCEMENT posted with --kind contract, and"
+                    + "\nit will sit here forever because there is nothing anyone means to close."
+                    + "\nIf that is what it is, retract it:  arc note <roles> --kind contract --supersedes " + seq
+                  : "\nstill owed a half: " + (awaiting.Count > 0 ? string.Join(", ", awaiting.ToArray()) : "(nobody)"))
+              + "\n\n" + body
+              + "\n\nA contract is settled when every bound role has declared its own half."
+              + "\nRead it in full:   arc notes --thread " + seq;
+      stack.ToolTip = tip;
+      return stack;
+    }
+    // a bare JSON array element (members/awaiting are string arrays, not objects, so S(o,key) does not apply)
+    static string V(object o) { return o == null ? "" : Convert.ToString(o, CultureInfo.InvariantCulture); }
+    static string[] ToArr(List<object> l) { var a = new string[l.Count]; for (int i = 0; i < l.Count; i++) a[i] = V(l[i]); return a; }
     static Ellipse Dot(double sz, string hex) { var e = new Ellipse(); e.Width = sz; e.Height = sz; e.Fill = Br(hex); return e; }
 
     // One NOW row: state dot · role · what it is doing right now · how long since its last transcript write.

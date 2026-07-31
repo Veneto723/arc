@@ -77,8 +77,11 @@ const FEED_PORT = parseInt(process.env.ARC_FEED_PORT || '8791', 10);   // next t
 // this counter exists for: without the bump, a feed already running at 18 would keep serving the
 // vulnerable renderer from memory forever, since a detached process never reloads its source. The
 // same lesson as v2/audit #345, re-learned by deploying the fix and finding the live feed unchanged.
-const VERSION = 20;   // 20: pending[] reports CLOSED-chair notes too, flagged `closed` (SHAPE change)
+const VERSION = 21;   // 21: contracts[] — the OPEN seams and who is still owed a half (SHAPE change)
+                      // 20: pending[] reports CLOSED-chair notes too, flagged `closed` (SHAPE change)
 const COOP_MAX = 20;               // recent reply edges kept per board
+const CONTRACT_MAX = 6;            // OPEN contracts reported per board — a panel, not an archive
+const CONTRACT_CLIP = 320;         // opener text kept per contract: enough to recognise the seam
 const FLOW_MAX = 60;               // recent ledger notes kept per board (the transcript, all kinds)
 const pidFile = (port) => path.join(CACHE_DIR, `arc-feed-${port}.json`);
 
@@ -574,6 +577,19 @@ function snapshot() {
       waiting,
       flow,
       cooperation: coop.slice(-COOP_MAX),
+      // OPEN CONTRACTS — the seams somebody is still owed a half of. Derived in arc-board from the
+      // ledger (no stored "closed" flag to go stale) and capped, since a settled contract is history
+      // and the panel is for what is still owed. `strays` is the count of contract notes filed under
+      // a non-contract thread: not contracts, but not droppable either — see B.contractStrays.
+      contracts: B.contracts(board, notes).filter((c) => c.open).slice(0, CONTRACT_MAX)
+        .map((c) => ({
+          seq: c.seq, from: c.from, ts: c.ts, members: c.members, declared: c.declared,
+          awaiting: c.awaiting, clauses: c.clauses, retracted: c.retracted, replies: c.replies,
+          // clipped HERE, not in the renderer: the snapshot crosses a socket on every poll
+          body: String(c.body).replace(/\s+/g, ' ').trim().slice(0, CONTRACT_CLIP),
+        })),
+      contractsMore: Math.max(0, B.contracts(board, notes).filter((c) => c.open).length - CONTRACT_MAX),
+      contractStrays: B.contractStrays(board, notes).length,
       roadmap: rm.items,
       roadmapFile: rm.file,     // a ROADMAP.md exists — lets the UI say "unreadable", never "empty"
     });

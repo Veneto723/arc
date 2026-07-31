@@ -54,7 +54,10 @@ say nothing; but stay reachable anyway, because a peer can join while you're idl
 Leave a note when you've done something the **other** session needs to know to do its job:
 
 - a **shared contract changed** — an API shape, a JSON schema, a DB column, an event name
-- a **decision** that constrains their side ("switched auth to httpOnly cookies")
+- a **decision** that constrains their side ("switched auth to httpOnly cookies") — an ordinary note,
+  **not** `--kind contract`: they have nothing to declare back, so it is news, not a seam (see the
+  two-halves rule under *A CONTRACT* below, which exists because this exact line sent four
+  announcements to a contract list they could never leave)
 - a **blocker** they will hit ("the staging DB is down; don't trust integration tests")
 - a **feature shipped** that they build on ("payment-overlay fix landed on `main`")
 
@@ -207,6 +210,23 @@ retractable. Open one the moment you mint something another role must consume �
 endpoint, a file both of you touch. The point is not ceremony: it is that the other side can then
 build against a frozen answer instead of waiting for you, or guessing and being wrong.
 
+**A CONTRACT HAS TWO HALVES. IF THE OTHER SIDE HAS NOTHING TO DECLARE, IT IS NOT A CONTRACT.**
+A seam is settled when EVERY bound role has replied with its own half — that is the whole shape, and
+it is how `arc notes --kind contract` and the scope's CONTRACTS panel decide whether one is still
+open. So before you reach for `--kind contract`, ask: *what will they reply with?* If the honest
+answer is "nothing, they just have to know this", you have an ANNOUNCEMENT, and it belongs in an
+ordinary note (or `--kind blocker` if they will hit it). A directed note is delivered WHOLE up to
+7000 characters, so you lose no fidelity by not calling it a contract — you only lose a permanent
+row in a list of seams that will never close.
+⚠ THIS IS THE ONE PEOPLE GET WRONG, and the rule above is written because of it, not in advance of
+it. On a real board 4 of 7 contracts were announcements — a branch move, a cadence change, a
+finished design, a product decision — and every one of them said "HUMAN DECISION" or "my human
+decided" in its own text. They had **zero replies at 42h, 186h and 238h**, because there was never
+anything to reply with. They were not mistakes of care: the trigger above ("something another role
+must consume") genuinely covers them, and so does *"a decision that constrains their side"* in the
+SPEAK list at the top of this file. TWO RULES, ONE SITUATION. The tiebreaker is the question in the
+paragraph above — **does the other side owe you an answer?** Yes → contract. No → note.
+
 ```bash
 # the seam, who owns it, and the don'ts — addressed to exactly the roles it binds, never `all`
 arc note android,backend --kind contract "SESSION TOKENS — websocket, not polling.
@@ -230,6 +250,26 @@ already building against the version you are withdrawing.
 
 **Add or remove a role** by superseding the OPENER with the new recipient list. Membership is
 declared there and nowhere else, so it never drifts from who happened to be cc'd on a reply.
+
+**WITHDRAW a whole contract** — the only way out, and **you must state `--kind correction`**:
+
+```bash
+arc note <the bound roles> --kind correction --supersedes <opener seq> "NOT A CONTRACT — <why>. Re-filed as #<n>."
+```
+
+⚠ **`--kind correction` IS NOT OPTIONAL HERE, AND LEAVING IT OFF SILENTLY AMENDS INSTEAD.** With no
+`--kind`, arc infers the parent's kind — `contract` — because that inference is what keeps a clause
+inside its own thread. So the natural-looking `arc note <roles> --supersedes <opener> "not a
+contract"` makes the note the contract's NEW OPENER (a membership change) and the contract stays
+listed and open. The receipt still says `RETRACTS`.
+This is not hypothetical: it happened on a live board twice in one day, to two peers who were told to
+run it. One case got worse — the amendment counts as a reply, so a contract reading "NEVER ANSWERED
+in 45h" became "OPEN — awaiting uiux, audit", turning a dormant announcement into an active debt
+naming two roles. `arc note` now prints a warning naming both paths when you supersede an opener; the
+rule is still yours to get right.
+⚠ **Re-post the content as an ordinary note FIRST, then withdraw, and name the new note in the
+withdrawal.** A withdrawn contract reads *"do NOT act on this"* wherever it appears, which is exactly
+wrong for a decision that is still in force — the seam is what you are retracting, not the fact.
 
 **Reading it** — both work from any shell, with no session, and mark nothing read:
 

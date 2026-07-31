@@ -4220,7 +4220,35 @@ try {
   for (const tool of ['Bash', 'PowerShell']) {
     ok(`the allowlist covers ${tool} (a session may be given either shell tool)`,
       perms.includes(`${tool}(arc join:*)`) && perms.includes(`${tool}(arc notes:*)`)
-      && perms.includes(`${tool}(arc note:*)`) && perms.includes(`${tool}(arc role:*)`));
+      && perms.includes(`${tool}(arc role:*)`));
+  }
+  // ★ INITIATING A NOTE IS NOT UNATTENDED WORK (operator's rule, 2026-07-31): a session asks before
+  // it POSTS a note; answering one that reached it does not need consent. So `arc note` left the
+  // allowlist while `arc notes` (READING) stayed — they are one character apart and these strings
+  // are matched exactly. The reply half needs no rule here at all: arc-pretool-hook returns `allow`
+  // for a proven reply, which is stricter than a wildcard could be (a wildcard cannot tell a reply
+  // from a broadcast).
+  for (const tool of ['Bash', 'PowerShell']) {
+    ok(`${tool}: posting a note is NOT auto-allowed — initiating one needs the human`,
+      !perms.includes(`${tool}(arc note:*)`) && !perms.includes(`${tool}(arc note)`));
+    ok(`${tool}: ...while READING (arc notes) still is — an unattended peer must read its own inbox`,
+      perms.includes(`${tool}(arc notes:*)`) && perms.includes(`${tool}(arc notes)`));
+  }
+  // RETIRING A RULE MUST ACTUALLY REMOVE IT. mergePermissions only ever ADDED, so dropping a command
+  // from the list was invisible on any machine that had already installed it — the stale entry sat in
+  // settings.json and the new rule silently did nothing. Same shape as a running feed serving a stale
+  // VERSION after deploy: the file changed, the live state did not.
+  {
+    const stale = { permissions: { allow: [
+      'Bash(arc note:*)', 'Bash(arc note)', 'PowerShell(arc note:*)', 'PowerShell(arc note)',
+      'Bash(arc notes:*)', 'Bash(git status)'] } };
+    W.mergePermissions(stale, perms);
+    ok('a re-install STRIPS the retired `arc note` grant from an existing settings.json',
+      !stale.permissions.allow.some((p) => /^(Bash|PowerShell)\(arc note[):]/.test(p)),
+      JSON.stringify(stale.permissions.allow));
+    ok('...without taking `arc notes` or the user\'s own rules with it',
+      stale.permissions.allow.includes('Bash(arc notes:*)') && stale.permissions.allow.includes('Bash(git status)'),
+      JSON.stringify(stale.permissions.allow));
   }
   // `arc delegate` is deliberately NOT allowlisted: it is the one verb that can spawn a whole
   // session, and that stays a per-spawn decision routed through the /arc-mode gate.
@@ -5965,6 +5993,231 @@ try {
         /1 contract\(s\)/.test(F3.requestNotes('', '--kind contract', rrepo).message));
       for (const s of [C2, A2]) { try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`)); } catch {} }
       fs.rmSync(rrepo, { recursive: true, force: true });
+    }
+
+    // ---- IS IT SETTLED? derived from the clauses, never stored ------------------------------------
+    // A contract is open while a bound role has not declared its own half. There is deliberately no
+    // "closed" flag on the note: a declared flag would be a second home for a fact the clauses
+    // already carry, and a stale flag is worse than none because it is machine-trusted. This is what
+    // the scope's CONTRACTS section and `arc notes --kind contract` both read.
+    // ON ITS OWN BOARD, deliberately: the shared `CB` above is mutated by every block between here
+    // and its creation (membership gets superseded, clauses accumulate), so asserting a settled/open
+    // state against it is asserting against whatever the previous test happened to leave behind. The
+    // first draft of this did exactly that and read SESSION TOKENS as bound to android+uiux with 9
+    // clauses. A derivation test needs a board it fully controls.
+    {
+      const drepo = fs.mkdtempSync(path.join(os.tmpdir(), 'cderive-'));
+      fs.mkdirSync(path.join(drepo, '.git'), { recursive: true });
+      const DB = R2.resolveBoard(drepo); R2.ensureBoard(DB);
+      const put = (from, to, body, x = {}) => R2.appendNote(DB, { from, to, kind: 'contract', body, ...x });
+      const seqD = (rec) => (R2.allNotes(DB).find((n) => n.id === rec.id) || {}).seq;
+      const byq = (s) => R2.contracts(DB).find((c) => c.seq === s);
+
+      const tok = put('code', ['android', 'backend'], 'TOKENS — websocket, not polling.');
+      put('backend', ['android'], 'I expose POST /session/token', { replyTo: tok.id });
+      const wrongD = put('android', ['backend'], 'I call it on every request', { replyTo: tok.id });
+      put('android', ['backend'], 'cold start only', { replyTo: tok.id, supersedes: wrongD.id });
+      const off0 = put('code', ['android', 'uiux'], 'OFFLINE — last-write-wins.');
+      put('uiux', ['android'], 'I show a conflict banner', { replyTo: off0.id });
+
+      const tk = byq(seqD(tok));
+      ok('a contract with every bound role declared reads SETTLED',
+        !!tk && tk.open === false && tk.awaiting.length === 0
+        && tk.members.slice().sort().join() === 'android,backend', JSON.stringify(tk));
+      ok('...and a superseded clause is reported as retracted, not as a second declaration',
+        tk.retracted === 1 && tk.clauses === 4, JSON.stringify(tk));
+
+      const off = byq(seqD(off0));
+      ok('a contract missing one half reads OPEN, and names exactly who is still owed',
+        !!off && off.open === true && off.awaiting.join() === 'android', JSON.stringify(off));
+      ok('...and it counts REPLIES, so "somebody is owed" can be told from "nobody answered"',
+        off.replies === 1, JSON.stringify(off));
+
+      // ★ A THREAD NOBODY EVER ANSWERED. `awaiting: [uiux]` asserts uiux owes a half — true for a seam
+      // being negotiated, FALSE for an announcement that was posted with --kind contract and never
+      // drew a reply. Measured on a live board: 3 of 4 open contracts had ZERO replies at 42h, 186h
+      // and 238h, and reading their bodies they are a branch move, a cadence instruction and a
+      // finalized design — none has a half for anyone to declare. arc must not invent that creditor.
+      const shout = put('android', ['uiux', 'audit'], 'THE WORKING TREE MOVED TO `reforge`.');
+      const never = byq(seqD(shout));
+      ok('a contract nobody has answered reports ZERO replies — the renderers say so instead of naming debtors',
+        never.replies === 0 && never.open === true && never.clauses === 1, JSON.stringify(never));
+
+      // ★ THE TIE-BREAK IS CONTENT, NOT LEDGER POSITION. Two clones can each amend the same opener and
+      // then `arc import` merges them; `.find()` took whichever landed first, so the two clones
+      // computed DIFFERENT membership from identical notes. `ord` cannot fix it (per-origin, not a
+      // total order across a merge); `ts` travels in the note, so every clone agrees — and where it is
+      // wrong it is wrong identically, which beats diverging. `id` breaks an exact tie.
+      const forked = put('code', ['android'], 'FORK TEST — v0');
+      const fSeq = seqD(forked);
+      R2.appendNote(DB, { from: 'code', to: ['android', 'uiux'], kind: 'contract',
+        supersedes: forked.id, body: 'v1 — uiux added', ts: '2026-01-01T00:00:00.000Z' });
+      R2.appendNote(DB, { from: 'code', to: ['android', 'audit'], kind: 'contract',
+        supersedes: forked.id, body: 'v2 — audit added', ts: '2026-06-01T00:00:00.000Z' });
+      const fk = byq(fSeq);
+      ok('two amendments to ONE opener resolve by TIMESTAMP, not by which merged first',
+        fk.members.join() === 'android,audit', JSON.stringify(fk));
+      ok('...and the fork is REPORTED, because it is two clones disagreeing, not a detail',
+        fk.conflicts.length === 1 && fk.conflicts[0].by.length === 2, JSON.stringify(fk.conflicts));
+      ok('...and the OPENER\'s author does not count as having declared a half',
+        off.declared.join() === 'uiux', JSON.stringify(off));
+
+      const half = put('android', ['uiux'], 'I merge by last-write-wins', { replyTo: off0.id });
+      ok('declaring the missing half settles it', byq(seqD(off0)).open === false);
+
+      // ★ SUPERSEDING YOUR OWN CLAUSE IS A REVISION, NOT A WITHDRAWAL — so the seam stays settled and
+      // the role stays declared. I wrote this test the other way first, expecting a retraction to
+      // re-open the contract, and the code disagreed. The code is right: `--supersedes` APPENDS a
+      // replacement ("you append a correction that NAMES the note it retracts"), and the skill's rule
+      // is "you may REVISE only your own clause". The correction IS android's half now — a different
+      // half, possibly a refusal, but a declaration all the same. arc cannot read whether the new text
+      // means "here is my revised position" or "I take it back"; that is what the operator reads the
+      // body for, which is exactly why the panel shows the seam text and not just a status dot.
+      put('android', ['uiux'], 'CORRECTION — I cannot do last-write-wins, I need a merge UI',
+        { supersedes: half.id });
+      const revised = byq(seqD(off0));
+      ok('superseding your own clause REVISES it — the role stays declared, the seam stays settled',
+        revised.open === false && revised.declared.includes('android'), JSON.stringify(revised));
+      ok('...and the retraction is still counted, so a reader sees the clause was replaced',
+        revised.retracted === 1, JSON.stringify(revised));
+
+      // ★ WITHDRAWING A CONTRACT — the only way out, and it did not exist until a live board needed
+      // it. Superseding the opener already means "amend membership", so it cannot also mean
+      // "withdraw"; the KIND of the superseding note is the signal that separates them. Before this,
+      // retracting an opener the documented way left the contract listed AND open — and the
+      // contract-kind form added a reply, so a never-answered announcement began reading as a live
+      // negotiation. Caught by sandboxing the command before telling four agents to run it.
+      // ★★ DRIVEN THROUGH `arc note`, NOT appendNote — and that distinction is the entire finding.
+      // The first version of this test called R2.appendNote directly with `kind: 'correction'` and
+      // passed. The SHIPPING command does not do that: with no --kind, arc-board infers the parent's
+      // kind (arc-board.js:431, `parentKind === 'contract'`), so the note stores as `contract` and
+      // AMENDS. I shipped the wrong command to two live peers on the strength of that green test;
+      // both ran it, both got a ✓ receipt saying RETRACTS, and nothing was withdrawn.
+      {
+        const wrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-'));
+        fs.mkdirSync(path.join(wrepo, '.git'), { recursive: true });
+        const WB = R2.resolveBoard(wrepo); R2.ensureBoard(WB);
+        const wsid = (nm, role) => {
+          const s = `${nm}-cwd-${process.pid}`;
+          fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`),
+            JSON.stringify({ pid: process.pid, cwd: wrepo, convId: nm + 'cwd' }));
+          F3.requestRole(s, role, wrepo);
+          return s;
+        };
+        const WA = wsid('and', 'android'); wsid('ui', 'uiux'); wsid('aud', 'audit');
+
+        F3.requestNote(WA, 'uiux,audit --kind contract "THE TREE MOVED."', wrepo);
+        ok('(staging) an announcement posted as a contract is listed', R2.contracts(WB).length === 1);
+
+        // the command that LOOKS right and silently amends — asserted so it can never quietly change
+        const amendRes = F3.requestNote(WA, 'uiux,audit --supersedes 1 "NOT A CONTRACT — withdrawn."', wrepo);
+        ok('a bare --supersedes on an opener AMENDS (kind inherited) — the contract survives',
+          R2.contracts(WB).length === 1 && R2.allNotes(WB).slice(-1)[0].kind === 'contract',
+          R2.allNotes(WB).slice(-1)[0].kind + ' / ' + R2.contracts(WB).length);
+        ok('...and the receipt SAYS SO instead of only saying RETRACTS — the mistake is named where it is made',
+          /AMENDED contract #1/.test(amendRes.message) && /--kind correction --supersedes 1/.test(amendRes.message),
+          amendRes.message);
+
+        // the command that actually withdraws, driven the way a peer types it
+        const wrepo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'cwd2-'));
+        fs.mkdirSync(path.join(wrepo2, '.git'), { recursive: true });
+        const WB2 = R2.resolveBoard(wrepo2); R2.ensureBoard(WB2);
+        const w2 = (nm, role) => {
+          const s = `${nm}-cwd2-${process.pid}`;
+          fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`),
+            JSON.stringify({ pid: process.pid, cwd: wrepo2, convId: nm + 'cwd2' }));
+          F3.requestRole(s, role, wrepo2);
+          return s;
+        };
+        const WA2 = w2('and2', 'android'); w2('ui2', 'uiux');
+        F3.requestNote(WA2, 'uiux --kind contract "THE TREE MOVED."', wrepo2);
+        F3.requestNote(WA2, 'uiux --kind correction --supersedes 1 "NOT A CONTRACT — withdrawn."', wrepo2);
+        const wOne = R2.contracts(WB2).find((c) => c.seq === 1);
+        ok('`--kind correction --supersedes <opener>` WITHDRAWS the contract, through the real command',
+          !!wOne && wOne.withdrawn === true && wOne.open === false, JSON.stringify(R2.contracts(WB2)));
+        // ★ LISTED, NOT DROPPED. The first version asserted `.length === 0` — i.e. it vanished — which
+        // contradicted contractStrays ten lines away, where this diff had already ruled that a group
+        // that is no longer a live contract gets REPORTED. Two policies for one question is how the
+        // list-vs-thread disagreement got created. It also broke real output: with the group gone, its
+        // own clauses failed the stray lookup and were reported as misfiled (4 of 8 on a live board).
+        ok('...and it stays LISTED as withdrawn — the same rule strays already follow',
+          R2.contracts(WB2).some((c) => c.seq === 1), JSON.stringify(R2.contracts(WB2)));
+        ok('...so its own clauses are NOT then reported as misfiled strays',
+          !R2.contractStrays(WB2).some((s) => s.rootSeq === 1), JSON.stringify(R2.contractStrays(WB2)));
+
+        // ...and the amend path must NOT be swallowed by the withdraw rule.
+        F3.requestNote(WA2, 'uiux --kind contract "SEAM v1"', wrepo2);
+        F3.requestNote(WA2, 'uiux,audit --kind contract --supersedes 3 "SEAM v1 — audit added"', wrepo2);
+        const amended = R2.contracts(WB2).find((c) => c.seq === 3);
+        ok('...while an explicit --kind contract supersede still AMENDS membership, as before',
+          !!amended && amended.withdrawn === false && amended.members.join() === 'uiux,audit', JSON.stringify(amended));
+
+        fs.rmSync(wrepo, { recursive: true, force: true });
+        fs.rmSync(wrepo2, { recursive: true, force: true });
+      }
+
+      // Membership is DECLARED: superseding the OPENER is the only way to change who is bound, and a
+      // role added that way is immediately owed a half.
+      put('code', ['android', 'uiux', 'audit'], 'OFFLINE — last-write-wins. (audit added)',
+        { supersedes: off0.id });
+      const widened = R2.contracts(DB).find((c) => c.members.includes('audit'));
+      ok('superseding the OPENER changes membership, and a newly bound role is owed a half',
+        !!widened && widened.awaiting.includes('audit'), JSON.stringify(widened));
+      fs.rmSync(drepo, { recursive: true, force: true });
+    }
+
+    // ---- A CONTRACT NOTE UNDER A NON-CONTRACT THREAD IS NOT A CONTRACT ----------------------------
+    // The two shipped reads disagreed about this for real. `--kind contract` grouped by the root of
+    // every contract-KIND note and took that root as a contract whatever it was, while `--thread`
+    // REFUSED the same row ("is not a contract — it is an <info>"). Measured live: 9 listed, 7
+    // openable, nothing saying which two or why — and one of them was a cmd.exe truncation artifact
+    // whose body was a mangled command line. Both reads now come from R.contracts(), and the strays
+    // are REPORTED rather than silently taken out with the count.
+    {
+      const misfiled = R2.appendNote(CB, { from: 'uiux', to: 'code', kind: 'info', body: 'just a note' });
+      const before = R2.contracts(CB).length;
+      R2.appendNote(CB, { from: 'code', to: ['uiux'], kind: 'contract',
+        body: 'I own the cache key', replyTo: misfiled.id });
+      ok('a contract note filed under a NON-contract thread does not become a contract',
+        R2.contracts(CB).length === before, `${before} -> ${R2.contracts(CB).length}`);
+      const strays = R2.contractStrays(CB);
+      ok('...it is REPORTED as a stray instead of vanishing with the count',
+        strays.length === 1 && strays[0].rootKind === 'info'
+        && strays[0].rootSeq === R2.allNotes(CB).find((n) => n.id === misfiled.id).seq, JSON.stringify(strays));
+      const listed = F3.requestNotes('', '--kind contract', crepo);
+      ok('...and the list read SAYS SO, so the count and `--thread` can no longer disagree',
+        /filed under a NON-contract thread/.test(listed.message), listed.message);
+    }
+
+    // ★ AND THE POST ITSELF WARNS, which is the only moment it can be fixed cheaply. arc already
+    // hinted when you replied to a CONTRACT with a contract ("this is a CLAUSE") — but the parent
+    // being an ORDINARY note was silent, and that is the worse case: the thread's root is not a
+    // contract, so `--thread` refuses it and `--kind contract` cannot list it. The seam is INVISIBLE.
+    // Live example that found this: a genuine contract ("NOTIFICATION CHANNEL NAMES. My human said
+    // go."), an amendment, and an accepted revision, all threaded onto an info note about a
+    // light-theme vote — a whole negotiation no contract read could see.
+    {
+      const irepo = fs.mkdtempSync(path.join(os.tmpdir(), 'invis-'));
+      fs.mkdirSync(path.join(irepo, '.git'), { recursive: true });
+      const IB = R2.resolveBoard(irepo); R2.ensureBoard(IB);
+      const isid = (nm, role) => {
+        const s = `${nm}-invis-${process.pid}`;
+        fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`),
+          JSON.stringify({ pid: process.pid, cwd: irepo, convId: nm + 'invis' }));
+        F3.requestRole(s, role, irepo);
+        return s;
+      };
+      const IU = isid('iu', 'uiux'); isid('ia', 'android');
+      F3.requestNote(IU, 'android "LIGHT-THEME VOTE CHECK — closed."', irepo);          // #1, an info note
+      const bad = F3.requestNote(IU, 'android --kind contract --reply-to 1 "CONTRACT — CHANNEL NAMES."', irepo);
+      ok('posting a contract as a reply to a NON-contract warns that it is INVISIBLE',
+        /INVISIBLE/.test(bad.message) && /NO --reply-to/.test(bad.message), bad.message);
+      ok('...and it really is invisible — not listed, reported as a stray',
+        R2.contracts(IB).length === 0 && R2.contractStrays(IB).length === 1);
+      const good = F3.requestNote(IU, 'android --kind contract "CONTRACT — CHANNEL NAMES. Standalone."', irepo);
+      ok('...while the standalone re-post is listed and draws NO warning',
+        R2.contracts(IB).length === 1 && !/INVISIBLE/.test(good.message), good.message);
+      fs.rmSync(irepo, { recursive: true, force: true });
     }
 
     // `--thread` must not manufacture authority: it printed "CONTRACT #N" over routine chatter.

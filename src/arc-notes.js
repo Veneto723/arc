@@ -581,9 +581,63 @@ function requestNote(session, arg, cwd, opts) {
         const rootSeq = R.refSeq(all, note.replyTo);
         clauseNote = `\n  this is a CLAUSE of contract #${rootSeq}, not a new contract. To open a SEPARATE one,\n`
           + `    post it with NO --reply-to:  arc note <roles> --kind contract "<the other seam>"`;
+      } else {
+        // ⚠ THE SILENT HALF, AND IT IS WORSE THAN THE ONE ABOVE. The hint only fired when the parent
+        // was itself a contract. Reply to an ORDINARY note with --kind contract and nothing warned at
+        // all — yet the note lands in a thread whose ROOT is not a contract, so `--thread` refuses it
+        // and `--kind contract` cannot list it. The contract becomes INVISIBLE to every contract read
+        // on the board.
+        // Found on a live board: a real seam ("CONTRACT — NOTIFICATION CHANNEL NAMES. My human said
+        // go. Terms below; reply to amend or accept and it is live."), plus an amendment and an
+        // accepted revision, all threaded onto an info note about a light-theme vote. Three notes, a
+        // whole negotiation, and no contract read could see any of it. Announcements filed as
+        // contracts are noise; this is the opposite and worse — a genuine agreement, hidden.
+        // ASKED OF contractStrays, NOT RE-DERIVED: the warning must fire exactly when the note IS a
+        // stray, and the only way to guarantee that is to ask the same function the panel asks.
+        // Checking `parent.kind` here would be a second spelling — and the parent is not even the
+        // right question, since the note's ROOT may be several replies further up.
+        try {
+          if (R.contractStrays(target, all).some((s) => s.seq === seq)) {
+            clauseNote = `\n  ⚠ this contract landed in a NON-CONTRACT thread (#${R.refSeq(all, note.replyTo)} is a`
+              + ` <${parent ? (parent.kind || 'info') : 'missing'}>), so it is INVISIBLE:\n`
+              + `    "arc notes --kind contract" will not list it and "--thread" refuses to open it.\n`
+              + `    If it is a real seam, re-post it standalone — NO --reply-to:\n`
+              + `      arc note <roles> --kind contract "<the seam>"`;
+          }
+        } catch { /* a hint must never break a post */ }
       }
     } catch { /* a hint must never break a post */ }
   }
+  // AMENDED, NOT WITHDRAWN — and the receipt has to say which, because the two look identical.
+  // Superseding a contract's OPENER means "change who is bound"; withdrawing the contract needs
+  // `--kind correction`. With no --kind at all, arc-board infers `contract` from the parent (that
+  // inference is right for a clause and keeps a thread coherent), so the natural command —
+  // `arc note <roles> --supersedes <opener> "NOT A CONTRACT"` — quietly AMENDS.
+  // THIS FIRED ON A LIVE BOARD, TWICE, AND THE RECEIPT SAID "RETRACTS" BOTH TIMES. Two peers were
+  // told (by me) to withdraw four announcements filed as contracts; both ran it, both got ✓, and
+  // nothing was withdrawn. One got WORSE: the amendment counts as a reply, so a contract that read
+  // "NEVER ANSWERED in 45h" became "OPEN — awaiting uiux, audit" — a dormant note converted into an
+  // active debt naming two roles. Command succeeded, receipt confirmed, thing did not happen.
+  // So say it here, where the author still remembers what they meant — the same reason the clause
+  // hint above exists, and the same failure it was written for.
+  let withdrawNote = '';
+  if (!crossFrom && note.supersedes && note.kind === 'contract') {
+    try {
+      const all = R.allNotes(target);
+      const key = R.refKey(note.supersedes);
+      const tgt = all.find((n) => n.id === key || R.refKey(n.id) === key);
+      // only the OPENER — superseding a CLAUSE is an ordinary revision and needs no warning
+      if (tgt && (tgt.kind || 'info') === 'contract' && !tgt.replyTo && !tgt.supersedes) {
+        const tSeq = R.refSeq(all, note.supersedes);
+        withdrawNote = `\n  ⚠ this AMENDED contract #${tSeq} — it is the opener, so this note is now the contract's\n`
+          + `    membership. It did NOT withdraw it, and the contract is still listed and still open.\n`
+          + `    To WITHDRAW the whole contract (use when it was never a seam — nobody has a half to\n`
+          + `    declare), the kind must be stated:\n`
+          + `      arc note <roles> --kind correction --supersedes ${tSeq} "NOT A CONTRACT — <why>"`;
+      }
+    } catch { /* a hint must never break a post */ }
+  }
+
   // THE EMPTY CHAIR. Posting to a role nobody holds used to return a cheerful ✓ and nothing
   // else: the note went nowhere, and a `request` was worse — the sender armed a listener and
   // waited forever for an answer that could not come. Silent, and the exact class of failure
@@ -703,7 +757,7 @@ function requestNote(session, arg, cwd, opts) {
                + `    cannot reply to you here. Anything you need BACK goes through your human.\n` : '') +
     (extra ? `  ${extra}\n` : '') +
     `  "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"\n` +
-    (chair ? chair : `  they'll see it when they next take a turn.`) + clauseNote + digest };
+    (chair ? chair : `  they'll see it when they next take a turn.`) + clauseNote + withdrawNote + digest };
 }
 
 const NOTE_USAGE =
@@ -921,34 +975,44 @@ function requestNotes(session, arg, cwd) {
     // a count taken from kind-matches alone under-reports any clause that predates the inheritance
     // rule above (or was filed by hand), and a contract that lies about its own size is worse than
     // one that is merely terse.
-    const groups = new Map();
-    for (const n of hits) {
-      const root = rootOf(n, all, byId);
-      if (!groups.has(root.id)) groups.set(root.id, { root, clauses: [] });
+    // THIS READ USED TO DISAGREE WITH `--thread` ABOUT WHAT A CONTRACT IS. It grouped by the root of
+    // every contract-KIND note and took that root as a contract whatever kind it actually was, so a
+    // clause misfiled under an ordinary note produced a row that `--thread` then refused to open
+    // ("#514 is not a contract — it is an <info>"). Nine listed, seven openable. Both reads now come
+    // from R.contracts(), which uses the `--thread` rule, and the misfiled ones are REPORTED below
+    // rather than silently vanishing with the count.
+    const list = R.contracts(board, all, sup);
+    const strays = R.contractStrays(board, all);
+    if (!list.length && !strays.length) {
+      return { ok: true, plain: true, message: `${head0}\n  no "${kind}" notes on this board yet.` +
+        (kind === 'contract' ? `\n  open one:  arc note <roleA>,<roleB> --kind contract "<the seam, and the don'ts>"` : '') };
     }
-    for (const n of all) {
-      const root = rootOf(n, all, byId);
-      if (groups.has(root.id)) groups.get(root.id).clauses.push(n);
-    }
-    const rows = [...groups.values()]
-      .sort((a, b) => b.root.seq - a.root.seq)
-      .map(({ root, clauses }) => {
-        const live = clauses.filter((n) => !sup.get(n.id));
-        let memberSrc = root;                       // same rule as the full read: DECLARED, not inferred
-        for (let hops = 0; hops < 64; hops++) {
-          const next = clauses.find((n) => n.supersedes && R.refKey(n.supersedes) === memberSrc.id);
-          if (!next) break;
-          memberSrc = next;
-        }
-        const members = recipients(memberSrc);
-        const dead = clauses.length - live.length;
-        return `  #${String(root.seq).padStart(3)}  ${peekBody(String(root.body)).slice(0, 60)}\n` +
-          `        bound: ${members.join(', ') || '(nobody named)'}   ·   ${clauses.length} clause(s)` +
-          (dead ? `, ${dead} retracted` : '') + `   ·   ${ago(root.ts)} ago`;
-      });
+    const rows = list.map((c) =>
+      `  #${String(c.seq).padStart(3)}  ${peekBody(c.body).slice(0, 60)}\n` +
+      `        bound: ${c.members.join(', ') || '(nobody named)'}   ·   ${c.clauses} clause(s)` +
+      (c.retracted ? `, ${c.retracted} retracted` : '') + `   ·   ${ago(c.ts)} ago\n` +
+      // "awaiting X" claims X owes a half — FALSE for a thread nobody ever answered (3 of 4 open
+      // contracts on a live board had zero replies at 42h/186h/238h: announcements posted with
+      // --kind contract). But "NEVER ANSWERED" was the same overclaim in the other direction — a seam
+      // posted 30 seconds ago also has zero replies, and it has not been ignored, it has not been
+      // REACHED yet. So report the measurement and let the reader judge: "no reply in 45h" and "no
+      // reply yet (2m)" are one fact, and the number carries the conclusion without the panel
+      // asserting one. Same lesson as the `open` -> `owed` rename: the count was right and the WORD
+      // was doing unearned work.
+      `        ${c.withdrawn ? `⊘ WITHDRAWN — no longer a seam (the opener was retracted with a correction)`
+        : c.replies === 0 ? `— no reply in ${ago(c.ts)} — nobody has declared a half yet`
+        : c.open ? `⧗ OPEN — awaiting ${c.awaiting.join(', ')}` : '✓ settled — every bound role has declared'}`
+      + (c.conflicts.length ? `\n        ⚠ FORKED — #${c.conflicts[0].of} was superseded by ${c.conflicts[0].by.map((s) => '#' + s).join(' and ')}; newest by timestamp wins` : ''));
+    const strayLine = strays.length
+      ? `\n\n  ⚠ ${strays.length} contract note(s) filed under a NON-contract thread — not a contract, and`
+        + `\n     --thread refuses them: `
+        + strays.map((s) => `#${s.seq} (${s.from}) under #${s.rootSeq} <${s.rootKind}>`).join(', ')
+        + `\n     Re-post as its own seam:  arc note <roles> --kind contract "<the seam>"   (no --reply-to)`
+      : '';
+    const openN = list.filter((c) => c.open).length;
     return { ok: true, plain: true, message:
-      `${head0}\n  ${groups.size} ${kind}(s)\n\n` + rows.join('\n\n') +
-      `\n\n  read one in full:  arc notes --thread <seq>` };
+      `${head0}\n  ${list.length} ${kind}(s)` + (openN ? `, ${openN} OPEN` : '') + `\n\n` + rows.join('\n\n') +
+      strayLine + `\n\n  read one in full:  arc notes --thread <seq>` };
   }
 
   if (headM) {

@@ -487,6 +487,163 @@ function supersededMap(board, all) {
   return m;
 }
 
+// ---- CONTRACTS, DERIVED — never a stored "closed" flag -------------------------------------------
+// A contract is not a file class, it is a THREAD: an opener of kind `contract` plus every note that
+// replies to (or supersedes) it. Two things about it are already true in the ledger and this function
+// only reads them out — it invents no field, so there is nothing that can drift out of date. That is
+// deliberate: a DECLARED "closed" flag would be a fact with two homes (the flag and the clauses), and
+// a stale flag is worse than no flag because it is trusted. Derived fails visibly and can be
+// asserted against the notes it came from.
+//
+// WHO IS BOUND is the OPENER'S recipient list, and it changes only by SUPERSEDING the opener — the
+// same rule `arc notes --thread` prints, and for the reason recorded there: inferring membership from
+// the newest clause reads a reply addressed to the other party as the whole membership, and silently
+// drops a role from its own contract.
+//
+// WHAT "UNCLOSED" MEANS: a bound role that has not yet DECLARED ITS OWN HALF. The peers skill states
+// the protocol — "each side then declares ONLY ITS OWN half" — so a seam is settled exactly when
+// every bound role has a live clause in the thread, and open while anyone is still owed.
+// A RETRACTED CLAUSE RE-OPENS IT, which is the point rather than an edge case: withdrawing your half
+// means the other side is building against something you have taken back, and that has to be visible.
+function contracts(board, allIn, supIn) {
+  const all = allIn || allNotes(board);
+  const sup = supIn || supersededMap(board, all);
+  const byId = new Map(all.map((n) => [n.id, n]));
+  const recipients = (n) => (n.to == null ? [] : (Array.isArray(n.to) ? n.to.slice() : [String(n.to)]));
+
+  // A thread's root: walk `replyTo || supersedes` — supersedes IS a thread edge, because the
+  // documented way to retract a clause is `--supersedes` with no `--reply-to`, and treating that as
+  // a new root ejects the amendment from the contract it amends.
+  const memo = new Map();
+  const rootOf = (n) => {
+    if (memo.has(n.id)) return memo.get(n.id);
+    memo.set(n.id, n);                                  // provisional — also breaks a reference cycle
+    const ref = n.replyTo || n.supersedes;
+    if (!ref) return n;
+    const key = refKey(ref);
+    const up = byId.get(key) || all.find((x) => refKey(x.id) === key || String(x.seq) === String(ref));
+    if (!up || up.id === n.id) return n;
+    const r = rootOf(up);
+    memo.set(n.id, r);
+    return r;
+  };
+
+  const groups = new Map();
+  for (const n of all) {
+    const root = rootOf(n);
+    if ((root.kind || 'info') !== 'contract') continue;   // only a contract THREAD counts
+    if (!groups.has(root.id)) groups.set(root.id, { root, clauses: [] });
+    groups.get(root.id).clauses.push(n);
+  }
+
+  return [...groups.values()].map(({ root, clauses }) => {
+    // THE TIE-BREAK IS A FUNCTION OF CONTENT, NEVER OF LEDGER POSITION. This walk used `.find()`,
+    // which takes the first match in ledger order — and ledger order is MERGE order, so two clones
+    // that each amended the same opener would compute different memberships from the same notes.
+    // That is reasoning by position, which this file forbids everywhere else ("a note's identity is
+    // its stable id, NEVER its line").
+    // `ord` is NOT a candidate: it is per-origin, so origin A's ord 5 against origin B's ord 5 is not
+    // a comparison at all. `ts` travels inside the note, so every clone sees the same values — clock
+    // skew can still pick the wrong winner, but it picks the SAME wrong winner everywhere, and
+    // agreeing-and-wrong beats diverging. `id` is the deterministic backstop for an exact ts tie.
+    // TWO amendments to one opener is a genuine disagreement between two humans' clones, so it is
+    // REPORTED as well as resolved — resolving silently would hide the one thing worth knowing.
+    let memberSrc = root;
+    const conflicts = [];
+    for (let hops = 0; hops < 64; hops++) {              // bounded: a cycle must not hang a render
+      const cands = clauses.filter((n) => n.supersedes && refKey(n.supersedes) === memberSrc.id);
+      if (!cands.length) break;
+      if (cands.length > 1) {
+        cands.sort((a, b) => (Date.parse(a.ts) || 0) - (Date.parse(b.ts) || 0)
+          || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        conflicts.push({ of: memberSrc.seq, by: cands.map((n) => n.seq) });
+      }
+      memberSrc = cands[cands.length - 1];               // newest by ts, id as the exact-tie backstop
+    }
+    // WITHDRAWN — the one way out of a contract, and it did not exist until a real board needed it.
+    // Superseding the OPENER is how membership changes, so it cannot also mean "withdraw"; that is the
+    // usual byte-identical problem. But the KIND of the superseding note is a real signal already in
+    // the ledger and it says exactly the right thing:
+    //     superseded by a `contract` note   -> AMENDED. The replacement IS the new opener.
+    //     superseded by a `correction`      -> WITHDRAWN. "I was wrong that this is a seam."
+    // Without this a contract is PERMANENT: retracting the opener the documented way left it listed
+    // and still open, and the contract-kind form even added a reply, so a never-answered announcement
+    // started reading as a live negotiation. Verified in a sandbox before this was written, because
+    // the fix I was about to ship instead was to tell four agents to run a command that does nothing.
+    // ⚠ WITHDRAWN IS LISTED, NOT DROPPED — and the reason is that this diff had already answered the
+    // same question the other way ten lines below. `contractStrays` REPORTS a group that is not a
+    // live contract rather than removing it from the count; returning null here made a withdrawn one
+    // VANISH. Two policies for one question ("what do we do with a group that is no longer a live
+    // contract") is precisely how the `--kind contract` / `--thread` disagreement this file exists to
+    // fix got created. audit's ruling, and it is right: a withdrawal is MORE interesting than a
+    // misfiled note — somebody deliberately closed a seam, and "why is it gone" is the question a
+    // reader will actually have. It also fixes a live nonsense: with the group gone, its own clauses
+    // failed the stray lookup and were reported as misfiled (4 of 8 on a real board).
+    const withdrawn = (memberSrc.kind || 'info') !== 'contract';
+    const members = recipients(memberSrc);
+    const live = clauses.filter((n) => !sup.get(n.id));
+    // The opener is the ASK, not a declaration — its author has not thereby declared a half. Only a
+    // clause does, and only a live one.
+    const declared = new Set(live.filter((n) => n.id !== root.id).map((n) => n.from));
+    const awaiting = members.filter((r) => !declared.has(r));
+    return {
+      id: root.id, seq: root.seq, from: root.from, ts: root.ts, body: String(root.body || ''),
+      members, declared: members.filter((r) => declared.has(r)), awaiting,
+      clauses: clauses.length, retracted: clauses.length - live.length,
+      // REPLIES SEPARATE "A SEAM BEING NEGOTIATED" FROM "A POST NOBODY ANSWERED", and the difference
+      // is not cosmetic — it is the difference between a true and a false statement. `awaiting` says
+      // a role owes a half, which is only meaningful if the thread is a seam at all. Measured on a
+      // live board: of 4 open contracts, THREE had zero replies at 42h, 186h and 238h — they are
+      // announcements posted with `--kind contract`, and calling them "awaiting uiux" asserts a debt
+      // nobody ever incurred. With replies>0 someone has engaged and the debt is real.
+      // Deliberately NOT a guess at intent: an announcement and an ignored seam are byte-identical,
+      // exactly like the clause-vs-new-contract case this file refuses to guess. Age plus silence is
+      // reported; the reader draws the conclusion.
+      replies: clauses.length - 1,
+      // A withdrawn seam owes nobody anything — it is not open, whoever had not declared a half.
+      withdrawn, open: !withdrawn && awaiting.length > 0,
+      // two amendments to one opener: resolved above (newest ts, id as backstop) AND reported here,
+      // because a fork like that is two clones disagreeing, not a detail
+      conflicts,
+    };
+  }).sort((a, b) => b.seq - a.seq);
+}
+
+// A `contract` note whose THREAD ROOT is not a contract — someone meant to declare a clause and
+// filed it under an ordinary note. Reported rather than dropped, because the two reads of this board
+// disagreed about them for real: `arc notes --kind contract` counted their root as a contract (it
+// grouped by "root of every contract-kind note", whatever that root turned out to be) while
+// `arc notes --thread` REFUSED to open the same row — "#514 is not a contract — it is an <info>".
+// Nine listed, seven openable, and nothing said which two or why. Measured on a live board: 2 of 9,
+// and one of them is a cmd.exe truncation artifact whose body is a mangled command line, so this is
+// a real data problem an operator should see and not a hypothetical.
+// The `--thread` rule is the correct one — a contract thread is rooted at a contract — so that is
+// what `contracts()` returns, and these are handed back separately so nobody has to choose between
+// a wrong count and a silent drop.
+function contractStrays(board, allIn) {
+  const all = allIn || allNotes(board);
+  const roots = new Map(contracts(board, all).map((c) => [c.id, true]));
+  const byId = new Map(all.map((n) => [n.id, n]));
+  const seenGuard = new Set();
+  const rootIdOf = (n) => {
+    let cur = n; seenGuard.clear();
+    for (let hops = 0; hops < 256; hops++) {
+      const ref = cur.replyTo || cur.supersedes;
+      if (!ref || seenGuard.has(cur.id)) break;
+      seenGuard.add(cur.id);
+      const key = refKey(ref);
+      const up = byId.get(key) || all.find((x) => refKey(x.id) === key || String(x.seq) === String(ref));
+      if (!up || up.id === cur.id) break;
+      cur = up;
+    }
+    return cur;
+  };
+  return all.filter((n) => (n.kind || 'info') === 'contract')
+    .map((n) => ({ note: n, root: rootIdOf(n) }))
+    .filter(({ note, root }) => root.id !== note.id && !roots.has(root.id))
+    .map(({ note, root }) => ({ seq: note.seq, from: note.from, rootSeq: root.seq, rootKind: root.kind || 'info' }));
+}
+
 // A `request` with no `result`/`correction` replying to it: asked, and never answered. This is
 // the thing that used to scroll silently away.
 //
@@ -1181,7 +1338,7 @@ module.exports = {
   PLAN_DIR, GITIGNORE_BODY,
   canonical, repoRoot, resolveBoard, ensureBoard,
   notesPath, appendNote, sanitizeBody, allNotes, noteCount, latestSeq,
-  KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo, seenBy, requestStatus,
+  KINDS, KIND_RANK, DEFAULT_KIND, normalizeKind, supersededMap, openRequests, repliesTo, seenBy, requestStatus, contracts, contractStrays,
   // EXPORTED because a caller outside this file was answering "is this note directed at <role>?"
   // with `n.to === role` and getting it wrong for both an array `to` and a broadcast. There is one
   // right answer to that question and it lives here; anyone who needs it should be able to reach it
