@@ -298,6 +298,12 @@ const BOARD_PERMISSIONS = SHELL_TOOLS.flatMap((tool) =>
 // command from BOARD_COMMANDS is invisible on any machine that already installed it: the entry sits
 // in settings.json forever and the new rule silently does nothing. Same shape as the feed serving a
 // stale VERSION after deploy — the file changed and the running state did not.
+// ⚠ MATCH THESE EXACTLY, NEVER BY PREFIX. `"arc notes all".startsWith("arc note")` is TRUE — the
+// retired WRITE command is a textual prefix of the READ command that must keep working. `arc notes`
+// survives only because its own four grants sit in the list as separate entries; if anyone ever
+// "tidies" those as redundant, or broadens this strip to a prefix/regex match, an unattended session
+// loses the ability to read its own inbox and goes silently deaf. The `includes()` below is exact by
+// construction — keep it that way. (audit, on #479.)
 const RETIRED_PERMISSIONS = SHELL_TOOLS.flatMap((tool) => [`${tool}(arc note:*)`, `${tool}(arc note)`]);
 
 function mergePermissions(settings, allow) {
@@ -352,7 +358,7 @@ function wireArcSettings(scriptsDir = path.join(CLAUDE_DIR, 'scripts'), settings
   return { settingsPath, backedUp: raw != null };
 }
 
-module.exports = { readSettings, writeSettings, atomicWriteFile, mergeHooks, ownsHookCommand, mergePermissions, mergeSkillOverrides, overlayMaps, BOARD_PERMISSIONS, setStatusline, STATUSLINE_REFRESH_SECONDS, coreHookEntries, wireArcSettings };
+module.exports = { readSettings, writeSettings, atomicWriteFile, RETIRED_PERMISSIONS, mergeHooks, ownsHookCommand, mergePermissions, mergeSkillOverrides, overlayMaps, BOARD_PERMISSIONS, setStatusline, STATUSLINE_REFRESH_SECONDS, coreHookEntries, wireArcSettings };
 
 if (require.main === module) {
   try {

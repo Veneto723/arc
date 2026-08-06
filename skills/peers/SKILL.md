@@ -111,9 +111,24 @@ arc note research --kind request --body-file ./packet.md    # more than one — 
 ```
   your role: android — the android app surface — Kotlin, layouts, gestures
   roster:
-    ● research  live   — investigation and docs; READ-ONLY on code
-    ○ frontend  closed — the web surface   ← empty chair: arc delegate frontend
+    ◐ research  live · balanced · active   — investigation and docs; READ-ONLY on code
+                  ↳ 40s ago: reading src/arc-board.js
+    ◐ uiux      live · balanced · idle 22m — the UI/UX surface
+    · frontend  closed                     — the web surface   ← empty chair: arc delegate frontend
 ```
+
+**`active` / `idle` and the `↳ <age> ago:` line say whether an ANSWER IS COMING — not whether to ask.**
+They come from the peer's own transcript heartbeat: `active` means it is working right now, `idle Nm`
+means nothing has moved for that long. Useful when you are waiting on a request: a peer that is
+working will get to you, one that has been idle for an hour may need its human.
+⚠ **Never withhold a note because a peer looks busy.** The board is asynchronous — a note costs the
+recipient nothing until its own turn reaches it, so "they're busy, I won't ask" only delays your own
+work and hides a question they wanted. It is the same mistake as branching on the roster's glyphs to
+decide how to delegate: the state is information about THEM, never permission for YOU.
+The AGE LEADS that line because `active` only means "wrote something in the last 15 minutes" — a
+true `active` can still be a quarter of an hour stale, and a bare "now" would hide that.
+An idle peer shows no activity line at all — its last action is history, and printing it would read
+as "working on" something it stopped doing an hour ago.
 
 Every role's duty is declared in `.arc/roles/<role>.md` — it travels with the board (`arc export` /
 `arc import`, never git) and **outlives the session that wrote it**. That's what makes an empty chair
@@ -178,7 +193,9 @@ arm `arc join <your-role>` before you go idle, and that wake hands you the answe
 get on with something else — the reply will find you.
 
 **Answer one the same way:** `arc note <them> --reply-to <seq> "DONE — <findings + file:line>"`.
-Say `DONE`, `BLOCKED`, or `REVISE` up front so they know the outcome before reading the detail.
+Say `DONE`, `BLOCKED`, or `REVISE` up front so they know the outcome before reading the detail — and
+then the thing they must ACT on, before anything else. See *"what must they do differently?"* below;
+this line is the same rule, and a reply that opens with agreement instead has already lost it.
 
 ## The note kinds (optional — use them when they apply)
 
@@ -353,13 +370,39 @@ was, and the traffic proves it. Measured across two real boards (1,199 KB and 1,
 nearly half of everything ever written. That is ten times the size of every visual affordance on
 both boards combined, so it is the only lever in note-writing worth pulling.
 
-So: **each round answers less than the one before it, and must be shorter than what it answers.**
-By round three you are trading corrections, not findings — a paragraph, not a packet. If your reply
-is as long as the note it answers, you are writing a new note and calling it an answer.
+## Before you send a reply, answer this: WHAT MUST THEY DO DIFFERENTLY?
 
-This is a rule about SIZE, not about stopping: the late rounds are not worthless — a peer found a
-real inversion bug on round four of one thread. A hard cap on rounds would have lost it. What that
-finding needed was four lines, and it got a page.
+Put that in the first line. It is the note. Everything else is optional and has to earn its place
+against it — and most of what fills a long reply is not it:
+
+- **Accepting a correction is not something they act on.** The receipt already told them it landed.
+- **Justifying a decision that is YOURS to make is not something they act on.** Announce the call in
+  one line; the reasoning belongs to whoever asks for it, and usually that is your human, not them.
+- **Restating their point before answering it** is not something they act on. They wrote it.
+- What IS the note: an objection to their method · a constraint they must now build against · a
+  number that changes what they do next · a blocker · a question only they can answer.
+
+⚠ **THE LENGTH RULE ALONE DOES NOT BITE, AND A REAL THREAD PROVED IT.** The earlier version of this
+section said only "shorter than what it answers", which is satisfiable by cutting one sentence.
+Measured on a live board — four notes, one thread, five minutes:
+
+```
+  #1062 android  4,416 ch        #1064 android  4,309 ch
+  #1063 uiux     4,384 ch        #1065 uiux     4,697 ch
+```
+
+`#1063` and `#1064` PASSED the rule — by 32 and 75 characters — and the thread sat at ~4,400
+characters for four straight rounds. `#1065` then grew, and the one thing android actually had to act
+on (an objection that its test artifact "is not an artifact on any branch") was the LAST section,
+under an acknowledgement and four paragraphs defending a design call that was uiux's to make alone.
+So the rule is not "trim a little": **a reply is a FRACTION of what it answers, because there is less
+to say each time.** By round three you are trading corrections, not findings — a paragraph, not a
+packet. If your reply is the same size as the note it answers, you have written a new note and called
+it an answer, whatever the character count says.
+
+This is a rule about SIZE and ORDER, not about stopping: the late rounds are not worthless — a peer
+found a real inversion bug on round four of one thread. A hard cap on rounds would have lost it. What
+that finding needed was four lines, and it got a page.
 
 You don't need the ack, because arc already shows you the receipt. Run `arc notes` and your recent
 sent notes carry it — derived from the reader's cursor, no note of its own, no ping to anyone:

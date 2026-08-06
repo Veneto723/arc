@@ -333,17 +333,20 @@ function transcriptDoing(convId) {
     // "Doing" = the most recent tool ACTION in the tail — a clean, COMPLETE answer ("editing X", "Rebuild
     // Y") — preferred over reply PROSE, which is a wall or a clause cut mid-thought. Only a pure-
     // conversation turn (no tool_use anywhere in the tail) falls back to the reply's first clause.
-    let firstText = null;
+    let firstText = null, firstAt = null;
     for (let i = lines.length - 1; i >= 0; i--) {
       const ln = lines[i].trim();
       if (!ln.startsWith('{')) continue;
       let j; try { j = JSON.parse(ln); } catch { continue; }
       if (j.type !== 'assistant' || !j.message || !Array.isArray(j.message.content)) continue;
       const tool = j.message.content.find((c) => c && c.type === 'tool_use');
-      if (tool && tool.name) { const d = describeTool(tool.name, tool.input); return d.length > DOING_MAX ? d.slice(0, DOING_MAX - 1) + '…' : d; }
+      if (tool && tool.name) {
+        const d = describeTool(tool.name, tool.input);
+        return { text: d.length > DOING_MAX ? d.slice(0, DOING_MAX - 1) + '…' : d, at: Date.parse(j.timestamp) || null };
+      }
       if (firstText === null) {
         const text = j.message.content.find((c) => c && c.type === 'text' && c.text);
-        if (text) firstText = String(text.text);
+        if (text) { firstText = String(text.text); firstAt = Date.parse(j.timestamp) || null; }
       }
     }
     if (firstText !== null) {
@@ -353,7 +356,7 @@ function transcriptDoing(convId) {
         .replace(/\s+/g, ' ').trim();
       const m = t.match(/^.{20,}?[.!?:;—]/);        // clip to the first CLAUSE boundary (sentence / colon / dash)
       if (m) t = m[0].trim();
-      return t.length > 84 ? t.slice(0, 83) + '…' : t;
+      return { text: t.length > 84 ? t.slice(0, 83) + '…' : t, at: firstAt };
     }
   } catch {}
   return null;
@@ -364,13 +367,21 @@ function transcriptDoing(convId) {
 // this session last actually do something" is the one evidence-backed answer to "what is it doing"
 // that does not depend on the session having self-reported via `arc status`.
 function roleStateOf(claim) {
-  if (!claim || !claim.sessionId) return { state: 'active', lastTurn: null, doing: null, task: null };
+  if (!claim || !claim.sessionId) return { state: 'active', lastTurn: null, doing: null, doingAt: null, task: null };
 
   // THE HEARTBEAT FIRST. The transcript beats only during work — it advances with every tool call
   // while a turn runs and stops the moment the session idles (arc-notes.js:748).
   let last = null;
   try { last = require('./arc-invite').lastTurnAt(claim.convId, null); } catch {}
-  const doing = transcriptDoing(claim.convId);
+  // THE AGE MUST BELONG TO THE THING IT LABELS. transcriptDoing returned a bare string, so the roster
+  // stamped it with `lastTurn` — the newest transcript write of ANY kind. Those diverge inside a long
+  // turn: assistant text written after the last tool call advances lastTurn while `doing` stays put,
+  // so a five-minute-old action rendered as "3s ago". It UNDERSTATED staleness, which is the one
+  // direction the stamp was added to prevent (audit, on #481). It now carries its own timestamp, and
+  // `doing` stays a plain string here so the feed snapshot's shape — and its VERSION — are untouched.
+  const d0 = transcriptDoing(claim.convId);
+  const doing = d0 ? d0.text : null;
+  const doingAt = d0 ? d0.at : null;
   const task = transcriptTask(claim.convId);
   // null, NOT Infinity: an unreadable transcript is NO EVIDENCE, and Infinity would quietly read as
   // "silent forever" — asserting idle (or deaf) about a session nothing is known about. Both are
@@ -390,7 +401,7 @@ function roleStateOf(claim) {
   // Reachability still has a home: arc-notes.js:820 badges DEAF on the statusline, where it also
   // requires evidence of a MISSED NOTE — not merely a missing marker — which is the check this
   // never had. (Operator's call, this session.)
-  return { state: (quiet != null && quiet > IDLE_MS) ? 'idle' : 'active', lastTurn: last, doing, task };
+  return { state: (quiet != null && quiet > IDLE_MS) ? 'idle' : 'active', lastTurn: last, doing, doingAt, task };
 }
 // The state alone, for callers that do not want the heartbeat.
 function roleState(claim) { return roleStateOf(claim).state; }
@@ -849,7 +860,7 @@ function serve(port) {
   if (ka.unref) ka.unref();
 }
 
-module.exports = { snapshot, liveSessions, activeBoards, watchDirs, hostAllowed, dashboardHtml, ensureFeed, stopFeed, feedStatus,
+module.exports = { snapshot, roleStateOf, liveSessions, activeBoards, watchDirs, hostAllowed, dashboardHtml, ensureFeed, stopFeed, feedStatus,
   sweepOrphans, health, readPid, pidFile, FEED_PORT, VERSION,
   __parseRoadmap: parseRoadmap };   // exported for the dialect tests — parsing is the part that silently lies
 

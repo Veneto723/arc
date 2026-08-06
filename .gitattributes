@@ -15,3 +15,11 @@ skills/*/SKILL.md text eol=lf
 # the 580 control characters it is looking for. Same class as the stubs above, one severity higher:
 # the stubs failed a test, this failed the feature.
 bundles/*/workflows/*.js text eol=lf
+
+# THE SAME CLASS, A THIRD TIME. A python `io.open(path,"w")` on Windows translates \n to \r\n, and one
+# edit rewrote test/run.js end-to-end: an 8,599-line diff hiding a 324-line change. The commit was
+# never at risk (core.autocrlf=true, index uniformly LF) — REVIEW LEGIBILITY was, and it was caught by
+# eyeballing a diffstat rather than by anything structural. The working tree was measurably mixed
+# (28 CRLF files, 11 LF) while the index was clean. Pin it, the way the stubs and the workflows above
+# were each pinned after an incident of exactly this shape.
+*.js text eol=lf

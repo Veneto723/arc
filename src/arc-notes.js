@@ -230,10 +230,44 @@ function rosterLines(board, meRole) {
         if (STANCE_GLYPH[st]) { lead = STANCE_GLYPH[st]; state = `live · ${st}`; }
       } catch { /* stance is a hint; presence must render without it */ }
     }
+    // WHAT THEY ARE DOING RIGHT NOW — the same heartbeat the operator's scope reads, given to the
+    // PEERS as well. `live` only ever meant "a session holds this chair"; it says nothing about
+    // whether that session is working or has been quiet for an hour, and a peer waiting on an answer
+    // could not tell those apart. Read from arc-feed's roleStateOf rather than re-derived: the rule
+    // for "is this session working" already exists there, and two spellings of it would drift.
+    // ⚠ THIS IS "IS AN ANSWER COMING?", NOT "SHOULD I ASK?". Asking a busy peer costs it nothing —
+    // the board is asynchronous and it reads on its own turn. Do NOT withhold a note because a peer
+    // looks busy; that is the same mistake as branching on ●/○ to decide how to delegate.
+    let nowLine = '';
+    if (r.live) {
+      try {
+        const claim = liveList.find((l) => l.role === r.role);
+        const act = require('./arc-feed').roleStateOf(claim);
+        state += ` · ${act.state}`;
+        if (act.state === 'idle' && act.lastTurn) state += ` ${ago(act.lastTurn)}`;
+        // Only an ACTIVE peer has anything to report; an idle one's last action is history, and
+        // printing it would read as "working on" something it stopped doing an hour ago.
+        // ⚠ THE AGE LEADS, and it is not decoration: `active` means "wrote something within IDLE_MS",
+        // which is FIFTEEN MINUTES — so a line labelled "now" can be a quarter of an hour old and
+        // still be true. Putting the age first makes staleness impossible to miss, and costs a reader
+        // nothing when it says 3s. (audit asked for this stamp believing the line was a peer's own
+        // self-report; it is not — `doing` is derived by arc from the transcript's last tool_use,
+        // while the self-reported field is `activity`, from `arc status`, which the roster never
+        // shows. The stamp earns its place on the IDLE_MS window alone.)
+        if (act.state === 'active' && act.doing) {
+          // `doingAt` is the timestamp of the very entry the text came from; `lastTurn` is only a
+          // proxy for it and understates staleness inside a long turn. Prefer the real one, fall
+          // back to the proxy, and say so when there is neither.
+          const at = act.doingAt || act.lastTurn;
+          const when = at ? `${ago(at)} ago` : 'age unknown';
+          nowLine = `\n      ${' '.repeat(w)}  ↳ ${when}: ${act.doing}`;
+        }
+      } catch { /* activity is a hint; the roster must render without it */ }
+    }
     const hint = r.live ? ''
       : revivable ? `   ← was here; REVIVE as itself: arc delegate ${r.role} "<packet>"`
         : r.declared ? `   ← empty chair: arc delegate ${r.role} "<packet>"` : '';
-    return `    ${lead} ${r.role.padEnd(w)}  ${state.padEnd(15)}${what}${hint}`;
+    return `    ${lead} ${r.role.padEnd(w)}  ${state.padEnd(26)}${what}${hint}${nowLine}`;
   }).join('\n');
 }
 
@@ -608,6 +642,48 @@ function requestNote(session, arg, cwd, opts) {
       }
     } catch { /* a hint must never break a post */ }
   }
+  // ⚠ A REPLY THAT DID NOT SHRINK — said HERE, with the two numbers, because saying it in the skill
+  // did not work. The rule ("a reply is a FRACTION of what it answers") shipped 2026-07-30; a live
+  // thread on 2026-08-06, in sessions started that morning, ran FOUR rounds at ~4,400 chars anyway:
+  //     #1062 4416 -> #1063 4384 -> #1064 4309 -> #1065 4697
+  // #1063 and #1064 PASSED the old wording by 32 and 75 characters. A rule you satisfy by cutting one
+  // sentence is not a rule, and one that lives only in a 34KB file is enforced by memory — which this
+  // codebase measures at ~93%. Prose asks; the tool has both numbers and can just say it.
+  // NOT A BLOCK, and not on the first answer. Answering a short question at length is CORRECT (a
+  // one-line ask can deserve a real packet), so this only fires from the SECOND reply onward — the
+  // rounds the measurement actually indicts, where 28-44% of all board bytes live. Threshold is 75%
+  // of the parent rather than 100%: at parity the thread has already stalled, which is exactly what
+  // those four notes did while technically complying.
+  let shrinkNote = '';
+  if (!crossFrom && note.replyTo) {
+    try {
+      const all = R.allNotes(target);
+      const key = R.refKey(note.replyTo);
+      const byId = new Map(all.map((n) => [n.id, n]));
+      const parent = byId.get(key) || all.find((n) => R.refKey(n.id) === key);
+      // how deep is this in the thread? depth 1 = the first answer, and that one is never nagged.
+      let depth = 0, cur = note;
+      for (let i = 0; i < 64 && cur && cur.replyTo; i++) {
+        const k = R.refKey(cur.replyTo);
+        const up = byId.get(k) || all.find((n) => R.refKey(n.id) === k);
+        if (!up || up.id === cur.id) break;
+        depth++; cur = up;
+      }
+      const mine = String(body || '').length, theirs = parent ? String(parent.body || '').length : 0;
+      // ABSOLUTE FLOOR as well as the ratio, or the rule fires on exchanges that are already fine: a
+      // 300-char answer to a 200-char question is 150% and is exactly what a late round SHOULD look
+      // like. The complaint is never "you replied", it is "you replied with a packet" — so the reply
+      // has to be big in its own right before its size is anyone's business.
+      if (depth >= 2 && theirs > 0 && mine >= SHRINK_FLOOR && mine >= theirs * 0.75) {
+        shrinkNote = `\n  ⚠ this reply is ${mine >= theirs ? 'LONGER than' : 'nearly as long as'} the note it answers`
+          + ` (${mine} vs ${theirs} chars, round ${depth + 1}).\n`
+          + `    A reply is a FRACTION of what it answers — by now you are trading corrections, not\n`
+          + `    findings. If the thing they must ACT on is not in your first line, supersede this\n`
+          + `    with a shorter one:  arc note <them> --supersedes ${seq} "<the ask, in a paragraph>"`;
+      }
+    } catch { /* a hint must never break a post */ }
+  }
+
   // AMENDED, NOT WITHDRAWN — and the receipt has to say which, because the two look identical.
   // Superseding a contract's OPENER means "change who is bound"; withdrawing the contract needs
   // `--kind correction`. With no --kind at all, arc-board infers `contract` from the parent (that
@@ -757,7 +833,7 @@ function requestNote(session, arg, cwd, opts) {
                + `    cannot reply to you here. Anything you need BACK goes through your human.\n` : '') +
     (extra ? `  ${extra}\n` : '') +
     `  "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"\n` +
-    (chair ? chair : `  they'll see it when they next take a turn.`) + clauseNote + withdrawNote + digest };
+    (chair ? chair : `  they'll see it when they next take a turn.`) + clauseNote + withdrawNote + shrinkNote + digest };
 }
 
 const NOTE_USAGE =
@@ -1288,6 +1364,7 @@ function clipBody(body, limit) {
 
 const BODY_CLIP = 400;        // broadcasts: a preview is the point
 // A withdrawn note needs to be IDENTIFIED, not read: enough to know which one it was, and no more.
+const SHRINK_FLOOR = 1500;   // a reply under this is not the problem, whatever its ratio
 const RETRACTED_CLIP = 300;   // a superseded note's own body, when it is delivered
 const RETRACT_REF_CLIP = 120; // the target's opening, quoted on the retraction that strikes it
 // clipBody's tail says "read it whole before acting" — correct for a truncated packet, and exactly

@@ -748,6 +748,46 @@ namespace ArcScope {
     }
     static UIElement Empty(string text) { var t = new TextBlock(); t.FontFamily = new FontFamily("Segoe UI"); t.FontSize = 12; t.FontStyle = FontStyles.Italic; t.Foreground = Br(DIM); t.Text = text; t.Margin = new Thickness(4, 1, 0, 2); return t; }
 
+    // NOTE TEXT YOU CAN SELECT AND COPY. A WPF TextBlock renders text and nothing else — no caret, no
+    // selection, no Ctrl+C — so a note body could be READ here and never taken out, which is the wrong
+    // way round for a panel whose whole job is showing you what a peer wrote. A read-only TextBox is
+    // the standard way to get selectable text in WPF, and it brings the Copy context menu for free.
+    // Styled back down to look exactly like the TextBlock it replaces: no border, no background, no
+    // padding — the only visible difference is that a drag now highlights.
+    // ⚠ TWO THINGS A TextBox DOES THAT A TextBlock DOES NOT, both of which would break this panel:
+    //   · it swallows the mouse wheel, so a long note inside the ScrollViewer would trap the scroll.
+    //     The wheel is re-raised to the parent, which is what makes the enclosing scroll keep working.
+    //   · AcceptsReturn defaults false, which flattens a multi-line body into one line. It is
+    //     read-only, so allowing returns costs nothing and preserves the note's shape.
+    static TextBox SelectableText(string text, double size, string color, string family) {
+      var t = new TextBox();
+      t.Text = text;
+      t.IsReadOnly = true;
+      t.IsReadOnlyCaretVisible = false;
+      t.AcceptsReturn = true;
+      t.TextWrapping = TextWrapping.Wrap;
+      t.BorderThickness = new Thickness(0);
+      t.Background = Brushes.Transparent;
+      t.Foreground = Br(color);
+      t.FontSize = size;
+      if (family != null) t.FontFamily = new FontFamily(family);
+      t.Padding = new Thickness(0);
+      t.Margin = new Thickness(0);
+      t.SelectionBrush = Br(ACCENT);
+      t.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+      t.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+      t.PreviewMouseWheel += delegate (object s, System.Windows.Input.MouseWheelEventArgs e) {
+        if (e.Handled) return;
+        e.Handled = true;
+        var again = new System.Windows.Input.MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta);
+        again.RoutedEvent = UIElement.MouseWheelEvent;
+        again.Source = s;
+        var up = VisualTreeHelper.GetParent((DependencyObject)s) as UIElement;
+        if (up != null) up.RaiseEvent(again);
+      };
+      return t;
+    }
+
     // ONE OPEN CONTRACT. A contract is the one thing on this board that binds a role to a promise, and
     // until every bound role has declared its half the other side is building against a seam that is
     // not settled yet. That is worth a human's attention in a way a note is not, so it gets its own
@@ -777,9 +817,13 @@ namespace ArcScope {
       // The BODY stays neutral on purpose (operator's call): violet is the ID's colour, marking which
       // seam this is, and colouring a whole paragraph with it costs readability while telling the
       // reader nothing the "#N" has not already said.
-      var tx = new TextBlock(); tx.FontFamily = new FontFamily("Segoe UI"); tx.FontSize = 12;
-      tx.Foreground = Br("#C3CEDA"); tx.TextWrapping = TextWrapping.Wrap; tx.Text = body;
-      tx.Margin = new Thickness(0, 3, 0, 4); tx.MaxHeight = 58; tx.TextTrimming = TextTrimming.CharacterEllipsis;
+      var tx = SelectableText(body, 12, "#C3CEDA", "Segoe UI");
+      // The MaxHeight+ellipsis clamp went with the TextBlock (a TextBox has no TextTrimming), and it
+      // is not missed: the FEED already clips this body to CONTRACT_CLIP (320 chars), so the text was
+      // bounded before it ever arrived. Clamping it a second time here only re-hid what the first clip
+      // had already made short enough to read — and a height clamp with no ellipsis would have cut a
+      // seam mid-word with nothing to say it had been cut.
+      tx.Margin = new Thickness(0, 3, 0, 4);
       stack.Children.Add(tx);
 
       // line 3 — every bound role, and whether it has declared its half. The ✓/waiting split IS the
@@ -896,8 +940,9 @@ namespace ArcScope {
       var bodyB = new Border(); bodyB.Background = Br("#131A24"); bodyB.BorderBrush = Br(HAIR); bodyB.BorderThickness = new Thickness(2, 0, 0, 0); bodyB.CornerRadius = new CornerRadius(0);
       bodyB.BorderBrush = Br(ACCENT); bodyB.Padding = new Thickness(11, 8, 12, 9); bodyB.Margin = new Thickness(22, 2, 2, 8); bodyB.MaxHeight = 0; bodyB.Opacity = 0;
       var inner = new StackPanel();
-      var bm = new TextBlock(); bm.FontFamily = new FontFamily(MONO); bm.FontSize = 10; bm.Foreground = Br(DIM); bm.Text = from + " " + arrow + " " + to + "  ·  " + meta.Replace("  ·  ", " · "); bm.Margin = new Thickness(0, 0, 0, 5);
-      var bt = new TextBlock(); bt.FontSize = 12.5; bt.Foreground = Br("#CDD8E4"); bt.TextWrapping = TextWrapping.Wrap; bt.Text = body.Length > 0 ? body : "(no content)";
+      var bm = SelectableText(from + " " + arrow + " " + to + "  ·  " + meta.Replace("  ·  ", " · "), 10, DIM, MONO);
+      bm.Margin = new Thickness(0, 0, 0, 5);
+      var bt = SelectableText(body.Length > 0 ? body : "(no content)", 12.5, "#CDD8E4", null);
       inner.Children.Add(bm); inner.Children.Add(bt);
       // A long note used to be CLIPPED mid-sentence at the expand height with no way to read the rest.
       // Scroll inside the box instead, so any length is reachable.

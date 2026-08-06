@@ -213,6 +213,26 @@ try {
       && args.filter((a) => a === '/grant:r').length === 1);
     ok('...targets the given directory in every icacls call', calls.every((a) => a[0] === 'C:/x/arc-profiles'));
 
+    // ★★ THE VANISHING STATUS BAR, AND IT LIVED HERE. `/inheritance:r` and `/grant:r` used to be two
+    // SEPARATE icacls calls — and between them the directory has NO ACEs AT ALL: inheritance stripped,
+    // nothing granted yet, unreadable to everyone including its owner. That directory is a live
+    // session's CLAUDE_CONFIG_DIR, and ensureProfile runs on every launch and every /arc-switch.
+    // MEASURED after eight wrong theories: a reader hammering a file inside it logged 868
+    // ACCESS-DENIED reads in a 32ms window that began the instant `/inheritance:r` ran. Driving
+    // ensureProfile against four live sessions on one account killed all four statuslines at once,
+    // permanently, while a control session on another account was untouched. Same probe after this
+    // fix: 0 denials in 450,625 reads, and `icacls <dir>` shows a byte-identical final ACL.
+    // A gap here is not cosmetic: the same shape on secureFileArgs makes `.credentials.json`
+    // briefly unreadable to a session that needs it to stay logged in.
+    ok('★ /inheritance:r and /grant:r are ONE call — split, the dir is briefly unreadable to its owner',
+      calls.some((a) => a.includes('/inheritance:r') && a.includes('/grant:r')),
+      JSON.stringify(calls));
+    ok('...and the same for the credential FILE — identical defect one object down',
+      C.secureFileArgs('C:/x/p/.credentials.json', 'DOM\\user')
+        .some((a) => a.includes('/inheritance:r') && a.includes('/grant:r')));
+    ok('...no icacls call strips inheritance WITHOUT granting in the same breath',
+      !calls.some((a) => a.includes('/inheritance:r') && !a.includes('/grant:r')));
+
     // secureFileArgs closes the EXISTING-credential-file exposure (audit #289 blocker 2): a broadly
     // readable .credentials.json keeps its own explicit ACL unless the FILE itself is reset. Same
     // exact-boundary sequence as the dir, but plain F (a file has no OI/CI container-inherit flags).
@@ -1318,6 +1338,59 @@ section('conversation lock (a recycled pid must not hold a conversation hostage)
   finally { if (child) { try { child.kill(); } catch {} } }
 }
 
+// ---- the roster tells a peer what the others are DOING, not just that they exist ----------
+// `live` only ever meant "a session holds this chair". A peer waiting on an answer could not tell a
+// session that is working from one that has been quiet for an hour — the operator could (arc-scope
+// reads exactly this), the peers could not. The state comes from arc-feed.roleStateOf, NOT re-derived
+// here: "is this session working" is one rule and two spellings of it would drift.
+section('roster activity (a peer can see whether an answer is coming)');
+{
+  try {
+    const F4 = require(path.join(SRC, 'arc-feed.js'));
+    const R2 = require(path.join(SRC, 'arc-board.js'));
+    const F3 = require(path.join(SRC, 'arc-notes.js'));
+    ok('arc-feed exports roleStateOf, so the roster and the scope share ONE rule',
+      typeof F4.roleStateOf === 'function');
+
+    // a claim with no session is not evidence of anything — it must not assert idle
+    const blank = F4.roleStateOf(null);
+    ok('...a claim with no session reports active, never a bare accusation of idleness',
+      blank && blank.state === 'active' && blank.doing === null, JSON.stringify(blank));
+
+    // an unreadable transcript is NO EVIDENCE: lastTurn null, and the state must not claim idle
+    const ghost = F4.roleStateOf({ role: 'x', sessionId: 'nope-0', convId: 'no-such-conv-000000' });
+    // THE AGE MUST BELONG TO THE THING IT LABELS. `doing` used to be a bare string, stamped with
+    // `lastTurn` — the newest transcript write of ANY kind. Those diverge inside a long turn (text
+    // written after the last tool call advances lastTurn while doing stays put), so a five-minute-old
+    // action rendered "3s ago" — UNDERSTATING staleness, the one direction the stamp exists to stop.
+    ok('roleStateOf carries doingAt, so the roster stamps the ACTION, not the last write of any kind',
+      Object.prototype.hasOwnProperty.call(F4.roleStateOf(null), 'doingAt'));
+    ok('...and both are null when there is no transcript, never a stale object',
+      ghost.doing === null && ghost.doingAt === null, JSON.stringify(ghost));
+    ok('...and an unreadable transcript yields no lastTurn and does not assert idle either',
+      ghost && ghost.lastTurn === null && ghost.state === 'active', JSON.stringify(ghost));
+
+    // the roster renders the state without needing the activity to be available
+    const rrepo = fs.mkdtempSync(path.join(os.tmpdir(), 'roster-'));
+    fs.mkdirSync(path.join(rrepo, '.git'), { recursive: true });
+    const RB3 = R2.resolveBoard(rrepo); R2.ensureBoard(RB3);
+    const rs = (nm, role) => {
+      const s2 = `${nm}-roster-${process.pid}`;
+      fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s2}.json`),
+        JSON.stringify({ pid: process.pid, cwd: rrepo, convId: nm + 'roster' }));
+      F3.requestRole(s2, role, rrepo);
+      return s2;
+    };
+    const RA = rs('ra', 'android'), RU = rs('ru', 'uiux');
+    const out = F3.requestRole(RU, '', rrepo).message;
+    ok('the roster shows a live peer\'s ACTIVITY state next to its stance, not just "live"',
+      /android[^\n]*live[^\n]*(active|idle)/.test(out), out);
+    ok('...and it still renders when the transcript says nothing (a hint must never break the roster)',
+      /roster:/.test(out) && /android/.test(out), out);
+    for (const s2 of [RA, RU]) { try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${s2}.json`)); } catch {} }
+    fs.rmSync(rrepo, { recursive: true, force: true });
+  } catch (e) { ok('roster activity works', false, e.message + '\n' + (e.stack || '')); }
+}
 // ---- arc-done (derive "done" from git, not from the agent's word) ---------------
 section('arc-done (git-derived completion)');
 try {
@@ -4234,6 +4307,22 @@ try {
     ok(`${tool}: ...while READING (arc notes) still is — an unattended peer must read its own inbox`,
       perms.includes(`${tool}(arc notes:*)`) && perms.includes(`${tool}(arc notes)`));
   }
+  // ...AND IT MUST REACH THE PROFILES TOO. arc-profile.syncSettings merges permissions as a UNION,
+  // which can ADD but never REMOVE — so a retirement landed on the root file while every profiled
+  // account kept the grant forever. Measured on a live box after retiring `arc note`: root 0 grants,
+  // the cetus profile still 4. Most sessions run under a profile, so the rule silently did nothing
+  // for them. A retirement that reaches only one of the two stores is not a retirement.
+  {
+    const prof = { allow: ['Bash(arc note:*)', 'Bash(arc notes:*)', 'Bash(mine)'] };
+    const master = { allow: ['Bash(arc role:*)'] };
+    const union = [...new Set([...master.allow, ...prof.allow])]
+      .filter((x) => !W.RETIRED_PERMISSIONS.includes(x));
+    ok('the profile union STRIPS a retired grant too — a union can add but never remove',
+      !union.includes('Bash(arc note:*)') && union.includes('Bash(arc notes:*)') && union.includes('Bash(mine)'),
+      JSON.stringify(union));
+    ok('...and arc-profile APPLIES that list, rather than this test re-deriving the rule beside it',
+      /RETIRED_PERMISSIONS/.test(fs.readFileSync(path.join(SRC, 'arc-profile.js'), 'utf8')));
+  }
   // RETIRING A RULE MUST ACTUALLY REMOVE IT. mergePermissions only ever ADDED, so dropping a command
   // from the list was invisible on any machine that had already installed it — the stale entry sat in
   // settings.json and the new rule silently did nothing. Same shape as a running feed serving a stale
@@ -6220,6 +6309,55 @@ try {
       fs.rmSync(irepo, { recursive: true, force: true });
     }
 
+    // ★ THE SHRINK RULE, ENFORCED BY THE TOOL RATHER THAN BY MEMORY. The rule shipped in the peers
+    // skill on 2026-07-30; a live thread on 2026-08-06, in sessions started that morning, ran FOUR
+    // rounds at ~4,400 chars anyway (4416 -> 4384 -> 4309 -> 4697). Two of those PASSED the old
+    // wording by 32 and 75 characters. Prose asks; the post has both numbers and can say it.
+    // Not a block, and never on the first answer — a one-line ask can deserve a real packet.
+    {
+      const srepo = fs.mkdtempSync(path.join(os.tmpdir(), 'shrink-'));
+      fs.mkdirSync(path.join(srepo, '.git'), { recursive: true });
+      const SB2 = R2.resolveBoard(srepo); R2.ensureBoard(SB2);
+      const ssid = (nm, role) => {
+        const s2 = `${nm}-shrink-${process.pid}`;
+        fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s2}.json`),
+          JSON.stringify({ pid: process.pid, cwd: srepo, convId: nm + 'shrink' }));
+        F3.requestRole(s2, role, srepo);
+        return s2;
+      };
+      const SA = ssid('sa', 'android'), SU = ssid('su', 'uiux');
+      const bodyFile = (n, tag) => {
+        const f = path.join(srepo, `b-${tag}.txt`);
+        fs.writeFileSync(f, 'x'.repeat(n));
+        return f;
+      };
+      const warns = (r) => /⚠ this reply is/.test(r.message);
+
+      // the real thread, replayed at its real sizes
+      const o1 = F3.requestNote(SA, 'uiux --body-file ' + bodyFile(4416, 'a'), srepo);
+      const o2 = F3.requestNote(SU, 'android --reply-to 1 --body-file ' + bodyFile(4384, 'b'), srepo);
+      ok('the OPENER and the FIRST answer are never nagged — a short ask can deserve a real packet',
+        !warns(o1) && !warns(o2), o2.message);
+      const o3 = F3.requestNote(SA, 'uiux --reply-to 2 --body-file ' + bodyFile(4309, 'c'), srepo);
+      ok('a round-3 reply that merely SHAVES a sentence is flagged (4309 vs 4384 passed the old rule)',
+        warns(o3) && /round 3/.test(o3.message), o3.message);
+      const o4 = F3.requestNote(SU, 'android --reply-to 3 --body-file ' + bodyFile(4697, 'd'), srepo);
+      ok('...and one that GREW says so with both numbers',
+        warns(o4) && /LONGER than/.test(o4.message) && /4697 vs 4309/.test(o4.message), o4.message);
+
+      // and it must not nag an exchange that is already small
+      F3.requestNote(SA, 'uiux --body-file ' + bodyFile(900, 'e'), srepo);
+      F3.requestNote(SU, 'android --reply-to 5 --body-file ' + bodyFile(180, 'f'), srepo);
+      const q = F3.requestNote(SA, 'uiux --reply-to 6 --body-file ' + bodyFile(300, 'g'), srepo);
+      ok('a SHORT late reply stays quiet — 300 vs 180 is 167% and is exactly what a late round should be',
+        !warns(q), q.message);
+      const pk = F3.requestNote(SU, 'android --reply-to 7 --body-file ' + bodyFile(2400, 'h'), srepo);
+      ok('...while a PACKET dropped late in a thread is still flagged, whatever it answers',
+        warns(pk), pk.message);
+
+      for (const s2 of [SA, SU]) { try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${s2}.json`)); } catch {} }
+      fs.rmSync(srepo, { recursive: true, force: true });
+    }
     // `--thread` must not manufacture authority: it printed "CONTRACT #N" over routine chatter.
     const chat = R2.appendNote(CB, { from: 'code', to: 'android', kind: 'info', body: 'routine chatter' });
     const notAContract = F3.requestNotes('', '--thread ' + R2.allNotes(CB).find((n) => n.id === chat.id).seq, crepo);

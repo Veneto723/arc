@@ -135,10 +135,18 @@ function syncSettings(dir) {
       // survive the next launch (ensureProfile runs every launch, so "next" is soon).
       const mp = master[k] || {}, cp = (cur[k] && typeof cur[k] === 'object') ? cur[k] : {};
       const merged = { ...mp, ...cp };
+      // A UNION CAN ADD BUT NEVER REMOVE, so a grant arc has RETIRED lives forever in every profile.
+      // Measured after retiring `arc note`: root had 0 grants, the cetus profile still had 4 — so the
+      // operator's "ask before you initiate a note" rule reached only sessions on the ROOT settings
+      // and silently did nothing for every profiled account, which is most of them.
+      // Same shape as mergePermissions before its retirement list: the removal is invisible on any
+      // store that already has the entry. Both halves now strip from the same exported list, because
+      // a retirement that only applies to one of two stores is not a retirement.
+      const retired = require('./arc-wire-settings').RETIRED_PERMISSIONS || [];
       for (const list of ['allow', 'deny', 'ask']) {
         const a = Array.isArray(mp[list]) ? mp[list] : [];
         const b = Array.isArray(cp[list]) ? cp[list] : [];
-        if (a.length || b.length) merged[list] = [...new Set([...a, ...b])];
+        if (a.length || b.length) merged[list] = [...new Set([...a, ...b])].filter((p) => !retired.includes(p));
       }
       next[k] = merged;
     }

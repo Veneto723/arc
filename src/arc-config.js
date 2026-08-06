@@ -286,12 +286,24 @@ const _securedDirs = new Set();
 // ACEs but leaves unrelated EXPLICIT grants behind; `/grant:r` only replaces the named trustee. Reset
 // first (discard every explicit ACE), set ownership to the current user, then remove inheritance and
 // grant exactly user + SYSTEM + builtin Administrators (SID is language-independent).
+// ⚠ `/inheritance:r` AND `/grant:r` MUST BE ONE CALL. As two, the directory is left with NO ACEs AT
+// ALL between them — inheritance stripped, nothing granted yet — and it is UNREADABLE to everyone
+// including its owner. This directory is a live session's CLAUDE_CONFIG_DIR, and ensureProfile runs
+// on every launch and every /arc-switch, so that window lands on sessions that are running right now.
+// MEASURED, which is how it was finally caught after eight wrong theories: a reader hammering a file
+// in the directory logged 868 ACCESS-DENIED reads in a 32ms window, beginning the instant
+// `/inheritance:r` ran and ending when `/grant:r` returned.
+// THIS IS THE VANISHING STATUS BAR. Driving ensureProfile('cetus') against four live sessions on that
+// account killed the statusline of ALL FOUR simultaneously, permanently — while a control session on
+// a different account kept painting. The same run with only the settings.json write (the previously
+// suspected cause) harmed nothing, which is what isolated it to here.
+// icacls applies every option in one invocation, so combining them means the DACL goes straight from
+// "inherited" to "exactly these three" with no gap a reader can fall into.
 function secureDirArgs(dir, user) {
   return [
     [dir, '/setowner', user],
     [dir, '/reset'],
-    [dir, '/inheritance:r'],
-    [dir, '/grant:r', `${user}:(OI)(CI)F`, 'SYSTEM:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'],
+    [dir, '/inheritance:r', '/grant:r', `${user}:(OI)(CI)F`, 'SYSTEM:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'],
   ];
 }
 // The same exact-boundary sequence for a FILE (no OI/CI — those are container-inherit flags). Locking
@@ -299,12 +311,14 @@ function secureDirArgs(dir, user) {
 // the directory's inheritable grants govern NEW descendants, not a file whose DACL was set before the
 // dir was locked, so `.credentials.json` could stay world-readable (audit #289 blocker 2). Reset the
 // file's own DACL and re-grant exactly the three principals.
+// Same single-call rule as the directory above, and for the same reason: split in two, the FILE is
+// briefly unreadable — and this one is `.credentials.json`, which a live session reads to stay logged
+// in. Not the statusline symptom (that was the dir), but the identical defect one object down.
 function secureFileArgs(file, user) {
   return [
     [file, '/setowner', user],
     [file, '/reset'],
-    [file, '/inheritance:r'],
-    [file, '/grant:r', `${user}:F`, 'SYSTEM:F', '*S-1-5-32-544:F'],
+    [file, '/inheritance:r', '/grant:r', `${user}:F`, 'SYSTEM:F', '*S-1-5-32-544:F'],
   ];
 }
 function currentUser() {
