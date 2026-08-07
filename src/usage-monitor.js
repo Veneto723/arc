@@ -670,8 +670,13 @@ function renderCompact(data, sessionEta, acc, model, effort, board, stance, alar
   // Two-row layout: line 1 = accounts/usage (switching-critical), line 2 = this
   // session's stats (model/effort · stance · unread notes). Loading/alert states stay single line.
   // An ACTIVE board alarm is a stop-the-line STATE, so it rides at the FRONT of line 2, alerting —
-  // the raise line scrolls away, but the status bar persists until someone clears it.
-  const alarmSeg = alarm ? blinkAlert(`! ${alarm}, arc alarm --clear`) : '';
+  // the note scrolls away, but the status bar persists until this session has taken it up.
+  // WARNING THIS SAID `arc alarm --clear`, WHICH NO LONGER EXISTS. The verb was folded into the note
+  // kind, and the badge now dissolves when you READ the note (the read stamps the same ack a
+  // tool-call block would) or when it ages past its TTL. A status bar that prescribes a dead command
+  // is worse than one that says nothing: it sends the reader to a failure at the moment they are
+  // most alarmed, which is the one moment a wrong instruction costs the most.
+  const alarmSeg = alarm ? blinkAlert(`! ${alarm}, read it: arc notes`) : '';
   const line2 = [alarmSeg, formatModel(model, effort), stanceSeg(stance), boardSeg(board)].filter(Boolean).join(' | ');
   const withL2 = (line1) => (line2 ? `${line1}\n${line2}` : line1);
 

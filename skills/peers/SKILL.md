@@ -1,6 +1,6 @@
 ---
 name: peers
-description: Coordinate with ANOTHER arc session working in this same repo — a "peer" (e.g. a read-only `research` peer while you write code, or `android` while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel between you. Read this when any of these is true — you changed something a peer needs to know (a shared contract, a decision that constrains them, a blocker they'll hit); you are STUCK in an area a peer owns; a peer's note reached you; you hold a board role, or were INVITED/forked as a peer; you learned something in ONE repo that a session in a DIFFERENT repo's board should hear (tunnel it with `--board`, never join theirs). Covers when a note is worth leaving, how to ask well, the note kinds, retracting with `--supersedes`, leaving a one-way note on ANOTHER repo's board, and who an invited peer actually answers to.
+description: Coordinate with ANOTHER arc session working in this same repo — a "peer" (e.g. a read-only `research` peer while you write code, or `android` while you are `backend`). You cannot see each other's context; a shared "board" of sticky notes is the only channel between you. Read this when any of these is true — you changed something a peer needs to know (a shared contract, a decision that constrains them, an alarm they'll hit); you are STUCK in an area a peer owns; a peer's note reached you; you hold a board role, or were INVITED/forked as a peer; you learned something in ONE repo that a session in a DIFFERENT repo's board should hear (tunnel it with `--board`, never join theirs). Covers when a note is worth leaving, how to ask well, the note kinds, retracting with `--supersedes`, leaving a one-way note on ANOTHER repo's board, and who an invited peer actually answers to.
 ---
 
 # Peers & the board
@@ -58,7 +58,7 @@ Leave a note when you've done something the **other** session needs to know to d
   **not** `--kind contract`: they have nothing to declare back, so it is news, not a seam (see the
   two-halves rule under *A CONTRACT* below, which exists because this exact line sent four
   announcements to a contract list they could never leave)
-- a **blocker** they will hit ("the staging DB is down; don't trust integration tests")
+- an **alarm** — work has stopped ("the staging DB is down; don't trust integration tests")
 - a **feature shipped** that they build on ("payment-overlay fix landed on `main`")
 
 Do **not** note routine progress ("read three files", "renamed a var", "tests pass"). If it
@@ -214,11 +214,42 @@ arc note android --reply-to 8 "DONE — breaks on client <3.2; 3.2+ handles 202"
 # RETRACT something you said. --supersedes implies kind: correction and is auto-HIGH.
 arc note android --supersedes 13 "CORRECTION — I was wrong: they CAN coexist, because…"
 
-# BLOCK them (auto-HIGH):
-arc note all --kind blocker "staging DB is down — don't trust integration tests"
+# STOP THE LINE (auto-HIGH, and it INTERRUPTS — see below):
+arc note all --kind alarm "staging DB is down — don't trust integration tests"
 ```
 
-Kinds: `info` · `request` · `result` · `correction` · `blocker` · `contract`.
+Kinds: `info` · `request` · `result` · `correction` · `alarm` · `contract`.
+
+### The kind decides how HARD the note lands
+
+A note reaches an idle peer by waking its listener, and a busy peer at its turn end. Two kinds do not
+wait for that: **`alarm` and `correction` also stop the recipient at its NEXT TOOL CALL.**
+
+| kind | reaches them |
+|---|---|
+| `alarm` · `correction` | **immediately** — their next tool call is denied and hands them your note |
+| `contract` · `request` · `result` · `info` | at their turn boundary, like ordinary news |
+
+Those two earn it for the same reason: an `alarm` says work has stopped, and a `correction` retracts
+something the recipient **may be building on right now**. Waiting for its turn to end is waiting too
+long. Everything else can wait, and should — a channel that interrupts for routine news stops being
+read, which costs you the one case it existed for.
+
+**It is ADDRESSED.** A directed alarm stops only its recipients; `--kind alarm all` stops everyone.
+Aim it: on the two live boards 176 of 183 such notes were directed, and interrupting every peer for a
+correction meant for one is exactly how the channel would become noise.
+
+⚠ **THE BODY IS FORCE-FED into a busy peer's context**, so it is capped and framed as untrusted
+coordination data — never as an instruction the reader must obey. Write it as something they can act
+on in one line; the detail belongs in a note they read at their own pace.
+
+⚠ **THE CEILING: "at once" means "at its next tool call".** Nothing can interrupt a peer
+mid-generation — Claude Code exposes no such hook, and `PreToolUse` is the earliest lever there is.
+A peer grinding through one long call (a build, a web search) is unreachable until that call returns.
+
+*(There is no `arc alarm` verb. There used to be; it posted a `blocker` note and wrote the flag
+itself. One tunnel is better than two: you post a note, the kind does the rest. `blocker` was this
+kind's old name and still reads on old notes.)*
 
 ## A CONTRACT — so two roles can work in parallel without asking each other
 
@@ -232,7 +263,7 @@ A seam is settled when EVERY bound role has replied with its own half — that i
 it is how `arc notes --kind contract` and the scope's CONTRACTS panel decide whether one is still
 open. So before you reach for `--kind contract`, ask: *what will they reply with?* If the honest
 answer is "nothing, they just have to know this", you have an ANNOUNCEMENT, and it belongs in an
-ordinary note (or `--kind blocker` if they will hit it). A directed note is delivered WHOLE up to
+ordinary note (or `--kind alarm` if they will hit it). A directed note is delivered WHOLE up to
 7000 characters, so you lose no fidelity by not calling it a contract — you only lose a permanent
 row in a list of seams that will never close.
 ⚠ THIS IS THE ONE PEOPLE GET WRONG, and the rule above is written because of it, not in advance of
@@ -380,7 +411,7 @@ against it — and most of what fills a long reply is not it:
   one line; the reasoning belongs to whoever asks for it, and usually that is your human, not them.
 - **Restating their point before answering it** is not something they act on. They wrote it.
 - What IS the note: an objection to their method · a constraint they must now build against · a
-  number that changes what they do next · a blocker · a question only they can answer.
+  number that changes what they do next · an alarm · a question only they can answer.
 
 ⚠ **THE LENGTH RULE ALONE DOES NOT BITE, AND A REAL THREAD PROVED IT.** The earlier version of this
 section said only "shorter than what it answers", which is satisfiable by cutting one sentence.
@@ -416,7 +447,7 @@ sent notes carry it — derived from the reader's cursor, no note of its own, no
 - **A directed note** flips to **✓ seen** the instant that peer's next board read passes it. That
   is your "they got it" — and the reason a "thanks" note is pure waste.
 - **A broadcast** shows **N of M seen** and who is missing (`2/3 seen · missing: audit`), so an
-  announcer can confirm a blocker reached everyone **without asking**.
+  announcer can confirm an alarm reached everyone **without asking**.
 
 "Seen" is the mail-signature sense — **delivered into their context, not read-and-agreed.** It says
 the note landed, not that they acted on it. When you need *action* confirmed, that is a real reply

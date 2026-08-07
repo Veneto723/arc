@@ -684,6 +684,21 @@ function requestNote(session, arg, cwd, opts) {
     } catch { /* a hint must never break a post */ }
   }
 
+  // ★ RANK <= 1 INTERRUPTS. This is the fold: `arc alarm` used to be a second verb with its own
+  // raise path, and the operator's call was to have ONE tunnel — you post a note, and the KIND
+  // decides how hard it lands. `alarm` (rank 0) and `correction` (rank 1) are the two that cannot
+  // wait for a turn boundary: an alarm says work has stopped, and a correction retracts something the
+  // recipient may be building on RIGHT NOW. Everything at rank >= 2 keeps the ordinary pace.
+  // Measured before wiring it: 1.6 interrupts/day on this board, 5.0 on the busier one, across ALL
+  // roles — a few per day, not a nag. And 176 of the 183 such notes are DIRECTED, which is why the
+  // flag had to gain recipients before this could be turned on.
+  // The flag is an INDEX over the ledger, never a second truth: every note it names is already
+  // stored, and it can be rebuilt from them. Failure here is silent by design — the note is safely
+  // on the board either way, and a coordination nicety must never fail a post.
+  if (!crossFrom && R.KIND_RANK[note.kind] <= 1) {
+    try { require('./arc-alarm').raiseFromNote(target, note, seq); } catch { /* the note still landed */ }
+  }
+
   // AMENDED, NOT WITHDRAWN — and the receipt has to say which, because the two look identical.
   // Superseding a contract's OPENER means "change who is bound"; withdrawing the contract needs
   // `--kind correction`. With no --kind at all, arc-board infers `contract` from the parent (that
@@ -856,7 +871,7 @@ const NOTE_USAGE =
   '              as "<thisboard>/<yourrole>". No requests, no replies: they cannot answer you there.\n' +
   '  answer:   /arc-note android --reply-to 8 "DONE — here is what I found"   (kind: result)\n' +
   '  retract:  /arc-note android --supersedes 13 "CORRECTION — I was wrong because…"\n' +
-  `  kinds: ${R.KINDS.join(' · ')}   (blocker + correction are auto-HIGH priority)\n` +
+  `  kinds: ${R.KINDS.join(' · ')}   (alarm + correction are auto-HIGH priority)\n` +
   '  a --supersedes note WARNS every future reader of the note it retracts — that is how an\n' +
   '  append-only ledger stays honest: you never rewrite history, you correct it.';
 
@@ -1483,18 +1498,26 @@ function injection(session, cwd, opts) {
     // it again. If it has NOT been seen, show it AND stamp the ack, so the flag-gate won't block for
     // it. Fail-open on any hiccup (a require/read failure just leaves the pre-review double-show).
     let alarmId = null, alarmSeen = false;
-    try { const AL = require('./arc-alarm'); const f = AL.readFlag(board);
-      if (f) { alarmId = f.id; alarmSeen = AL.readAck(session) === f.id; } } catch { /* fail-open */ }
+    // The flag is a LIST now (one live entry per recipient), so "the alarm" became "the alarm ids".
+    // Suppression is still per-note: a note already delivered by the flag-block must not be shown a
+    // second time as a note. Kept as a Set so the lookup below stays O(1) on the hot delivery path.
+    let alarmIds = new Set(), seenIds = new Set();
+    try {
+      const AL = require('./arc-alarm');
+      const live = AL.readFlag(board) || [];
+      alarmIds = new Set(live.map((x) => String(x.id)));
+      seenIds = new Set(AL.readAck(session).map(String));
+    } catch { /* fail-open */ }
 
     const picked = [];   // CONSUMED — the cursor advances over all of these (shown or suppressed)
     const shown = [];    // actually surfaced to the peer
     let used = 0, showAlarm = false;
     for (const n of u.notes) {
-      const suppress = !!alarmId && n.id === alarmId && alarmSeen;    // already seen via the flag-block
+      const suppress = alarmIds.has(String(n.id)) && seenIds.has(String(n.id));   // already seen via the flag-block
       const row = suppress ? '' : rowFor(n);
       if (shown.length && used + row.length > INJECT_MAX) break;      // cap by SHOWN content; always show ≥1
       picked.push(n);
-      if (!suppress) { shown.push(n); used += row.length; if (n.id === alarmId) showAlarm = true; }
+      if (!suppress) { shown.push(n); used += row.length; if (alarmIds.has(String(n.id))) { showAlarm = true; alarmId = n.id; } }
     }
     const suppressed = picked.length - shown.length;
     const more = u.count - picked.length;
@@ -1511,7 +1534,7 @@ function injection(session, cwd, opts) {
     if (!shown.length) { R.writeCursor(board, role, newCursor); return null; }
 
     // Display: float what MATTERS to the top of THIS batch — high priority first, then by
-    // KIND (a blocker or a retraction must never sit under routine news), then oldest-first.
+    // KIND (an alarm or a retraction must never sit under routine news), then oldest-first.
     // This only reorders what we're already showing; the cursor still advances by seq.
     const rank = (n) => R.KIND_RANK[n.kind || R.DEFAULT_KIND] ?? 5;
     const display = [...shown].sort((a, b) =>
@@ -1519,7 +1542,7 @@ function injection(session, cwd, opts) {
     spills.length = 0;   // the accounting pass above also called rowFor; collect spills from the SHOWN rows only
 
     // AN ALARM MUST NOT BE BURIED BY VOLUME. Delivery walks unread notes OLDEST-FIRST and stops when
-    // the injection budget fills, so a burst of routine notes can push an ALARM or a BLOCKER past the
+    // the injection budget fills, so a burst of routine notes can push an ALARM or a ALARM past the
     // cut and into "…and N more still unread" — where it reads as ordinary backlog. The float-to-top
     // sort above cannot help: it only reorders what is already SHOWN.
     // Reordering delivery itself is NOT the fix — the cursor is a high-water mark, so picking a later

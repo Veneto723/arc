@@ -255,7 +255,7 @@ function run(raw) {
   // blocks a tool call ONCE per alarm per session (an ack), and only after that ack durably
   // persisted — so a failed ack-write lets the tool run rather than wedge the peer for the whole
   // TTL. The body is UNTRUSTED coordination text force-fed into context: framed as "a peer raised",
-  // never as an instruction, and capped at the source. `arc alarm` itself is EXEMPT so a peer can
+  // never as an instruction, and capped at the source. `arc note`/`arc notes` are EXEMPT so a peer can
   // always raise or clear (else clearing an alarm would be blocked by the alarm). FAILS OPEN on any
   // error — like every other arc gate, a coordination nicety must never block a session's work.
   const session0 = (process.env.ARC_SESSION || '').trim();

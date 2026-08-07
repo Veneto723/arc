@@ -94,6 +94,15 @@ function deliverBoard(hook) {
   // injects nothing, so the default costs zero tokens). This is what makes the dial actually
   // steer the agent: it is re-asserted every turn, exactly where the board notes ride.
   try { const d = require('./arc-stance').directive(require('./arc-stance').getStance(session)); if (d) parts.push(d); } catch {}
+  // EVERY REPLY'S LENGTH, WRITTEN DOWN — and nothing said about it. This first injected a nag ("your
+  // last reply was 2,400 chars"); the operator cut it and asked for the log instead, because the
+  // nag's justification was a number borrowed from a different rule. Baseline first, intervention
+  // after. Silent by design: it appends one line to .arc/verbosity.jsonl and returns nothing to the
+  // prompt, so a bug here can waste a write but can never put words in front of the model.
+  try {
+    const tp = require('./arc-invite').transcriptPath(require('./arc-notes').sessionConv(session));
+    if (tp) require('./arc-verbosity').record(tp, cwd);
+  } catch { /* measuring must never wedge a prompt */ }
   try {
     const inj = require('./arc-notes').injection(session, cwd); // NB: advances the read cursor
     if (inj) parts.push(inj.text);
@@ -217,17 +226,6 @@ function run(raw) {
       process.exit(0);
     }
     return r.plain ? block(r.message) : clBlock(r.message);
-  }
-  if (action === 'alarm') {
-    // Raise (or clear) a board-wide fire alarm from the human's tab, at zero tokens — the same
-    // effect as an agent's terminal `arc alarm`: a broadcast note wakes idle peers, and a flag
-    // interrupts busy peers at their next tool call. A fire-and-report action, so BLOCK with the
-    // result (the prompt is erased; the raise already happened here in-hook).
-    const AL = require('./arc-alarm');
-    const cwd = require('./arc-notes').resolveCwd(session, typeof hook.cwd === 'string' ? hook.cwd : null);
-    const a = String(arg || '').trim();
-    const r = (a === '--clear' || a === 'clear') ? AL.clear(cwd) : AL.raise(session, a, cwd);
-    return block(`[arc alarm] ${r.message}`);
   }
   if (action === 'peek' || action === 'usage') {
     // Read-only usage readout — rendered entirely here (no trigger, no relaunch).

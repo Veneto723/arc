@@ -187,6 +187,58 @@ function seedClaudeJson(dir) {
 
 // Create/repair `accId`'s profile dir. Idempotent — cheap to call every launch.
 // Returns the dir path (to use as CLAUDE_CONFIG_DIR).
+// ---- CLAUDE.md: one canonical file, imported by every profile ----------------------------------
+// THE GAP THIS CLOSES, measured 2026-08-07: `~/.claude/CLAUDE.md` is NOT read inside a profiled
+// session. Claude Code reads <CLAUDE_CONFIG_DIR>/CLAUDE.md, and CLAUDE_CONFIG_DIR is the profile.
+// Of four profiles on this machine exactly one had the file; switching accounts silently dropped the
+// operator's entire reply contract. Same shape as the skillOverrides gap that SHARED_DIRS closes —
+// but SHARED_DIRS junctions DIRECTORIES, and this is a single file.
+//
+// WHY AN IMPORT AND NOT A HARD LINK. A hard link also works on NTFS without admin, and the operator
+// rejected it for a specific reason: several sessions on different accounts run at once and may edit
+// the rules at the same time. A hard link is INVISIBLE — any tool that write-replaces the file
+// (temp + rename) silently detaches that one profile, and the profiles then drift with nothing to
+// show for it. An `@import` line is a fact you can read in the file.
+//
+// VERIFIED END-TO-END, not assumed: a headless `claude -p` run against a profile carrying only an
+// import line reported the imported marker (ARCPROBE_9Z2K), at both project and profile level.
+//
+// The profile file is EXTENDED, never overwritten. The import goes on top; anything the operator
+// writes below it survives, so a profile can still carry account-specific rules.
+const CLAUDE_MD = 'CLAUDE.md';
+function canonicalClaudeMd() { return path.join(C.CLAUDE_DIR, CLAUDE_MD); }
+
+function importLine() { return '@' + canonicalClaudeMd().replace(/\\/g, '/'); }
+
+function syncClaudeMd(dir) {
+  try {
+    const canon = canonicalClaudeMd();
+    const mine = path.join(dir, CLAUDE_MD);
+    if (path.resolve(mine) === path.resolve(canon)) return false;   // the root itself is not a profile
+    const line = importLine();
+
+    let body = '';
+    try { body = fs.readFileSync(mine, 'utf8'); } catch { /* first time */ }
+    // Already importing it — including an older absolute spelling with backslashes.
+    if (body.split('\n').some((l) => l.trim().replace(/\\/g, '/') === line)) return false;
+
+    // A profile that already holds real content is the one case where writing blind loses work: the
+    // canonical file is seeded FROM such a profile, so keep the body and put the import above it.
+    if (!fs.existsSync(canon)) {
+      if (!body.trim()) return false;                 // nothing to promote, nothing to import
+      fs.writeFileSync(canon, body);                  // first profile with rules becomes canonical
+    }
+    // The profile that SEEDED the canonical file still holds a full copy of it. Keeping that copy
+    // below the import would show the model the same rules twice — and worse, the copy would then
+    // drift silently while looking authoritative. Reduce it to the pointer.
+    let canonBody = '';
+    try { canonBody = fs.readFileSync(canon, 'utf8'); } catch {}
+    const keep = body.trim() && body.trim() !== canonBody.trim();
+    fs.writeFileSync(mine, line + '\n' + (keep ? '\n' + body.replace(/^\n+/, '') : ''));
+    return true;
+  } catch { return false; }   // never block a launch over a docs file
+}
+
 function ensureProfile(accId) {
   const dir = profileDir(accId);
   fs.mkdirSync(dir, { recursive: true });
@@ -217,6 +269,7 @@ function ensureProfile(accId) {
   }
   seedClaudeJson(dir);
   syncSettings(dir);
+  syncClaudeMd(dir);
   return dir;
 }
 
@@ -297,4 +350,4 @@ function removeProfile(accId) {
   return dest;
 }
 
-module.exports = { PROFILES_DIR, ARC_SETTINGS_KEYS, syncSettings, profileDir, credsPath, ensureProfile, hasCreds, seedCreds, renameProfile, removeProfile, SHARED_DIRS, adoptIntoShared };
+module.exports = { PROFILES_DIR, ARC_SETTINGS_KEYS, syncSettings, profileDir, credsPath, ensureProfile, hasCreds, seedCreds, renameProfile, removeProfile, SHARED_DIRS, adoptIntoShared, syncClaudeMd, canonicalClaudeMd, importLine };

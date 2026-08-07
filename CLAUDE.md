@@ -41,7 +41,7 @@ The retired `arc:<verb>` colon shape survives only as `LEGACY_RX`, strip-only in
 
 Full module map and mechanics are in **[`docs/architecture.md`](docs/architecture.md)**. Read the section for the area you're touching rather than pulling all of it into context:
 
-- **The board** — `arc-board`, `arc-notes`, `arc-invite`, `arc-await`, `arc-sync`, `arc-done`, `arc-postcommit`. The claim/revive lifecycle, the id/ord merge model, the listener wake, the DEAF heartbeat.
+- **The board** — `arc-board`, `arc-notes`, `arc-alarm`, `arc-invite`, `arc-await`, `arc-sync`, `arc-feed`, `arc-done`, `arc-postcommit`. The claim/revive lifecycle, the id/ord merge model, the listener wake, the DEAF heartbeat, the note KINDS (rank <= 1 interrupts at the next tool call; there is no `arc alarm` verb), and contracts as derived threads.
 - **The account wrapper** — `arc-runner`, `arc-config`, `arc-profile`, `arc-switch-core`, `usage-monitor`. Launch/respawn, `stripConvArgs`, mid-conversation account switch, settings merge policies, DPAPI keys.
 - **The hook layer** — `arc-switch-hook`, `arc-stop-hook`, `arc-pretool-hook`, `arc-wire-settings`. How commands and board delivery run before the model.
 - **Supporting modules** — one-liners for everything else (`arc-bundle`, `arc-stance`, `arc-duty`, …).

@@ -1731,6 +1731,28 @@ async function main() {
   // `arc await [role]` — the bare LISTEN half of `arc join` (no claim). Kept as a working
   // primitive (deployed hooks on other machines still teach it) but no longer documented:
   // `arc join` is the one verb surfaces teach.
+  // A RETIRED VERB MUST SAY SO, NOT LAUNCH A SESSION. Unknown arguments fall through to `claude`
+  // by design — that is how `arc "fix the build"` works. But a verb that USED to exist is not an
+  // unknown argument, it is muscle memory: after `arc alarm` was folded into the note kind,
+  // `arc alarm "the build is broken"` quietly started a NEW SESSION with that sentence as its
+  // prompt. Silent, billable, and the alarm never raised. Caught by doing it myself while testing
+  // the removal — it cost a stray session before I noticed the launch banner.
+  // Same shape as RETIRED_PERMISSIONS in arc-wire-settings: removing a thing is only half the job;
+  // the other half is telling whoever reaches for it where it went.
+  const RETIRED_VERBS = {
+    alarm: 'arc note <roles> --kind alarm "<what stopped>"   (or --kind correction to retract)',
+  };
+  if (Object.prototype.hasOwnProperty.call(RETIRED_VERBS, userArgs[0])) {
+    process.stderr.write(
+      `[arc] \`arc ${userArgs[0]}\` no longer exists — it is a NOTE KIND now, so everything goes\n`
+      + `  through one tunnel and the kind decides how hard it lands.\n`
+      + `      ${RETIRED_VERBS[userArgs[0]]}\n`
+      + `  A rank<=1 note (alarm, correction) still stops a busy peer at its next tool call — that\n`
+      + `  half did not go away, it moved behind the kind.\n`
+      + `  Refusing rather than launching: these args would otherwise have become a new session\n`
+      + `  with your message as its prompt.\n`);
+    process.exit(2);
+  }
   if (userArgs[0] === 'await') {
     require('./arc-await').awaitOnce(userArgs[1], process.cwd()).then((code) => process.exit(code));
     return;
@@ -1739,17 +1761,6 @@ async function main() {
   // set the interrupt flag (every BUSY peer stops at its next tool call to read it). `--clear` takes
   // it down. The one board action that INTERRUPTS instead of waiting — debounced, capped, and the
   // raiser never blocks on its own alarm. Use it for a stop-the-line correction, not routine news.
-  if (userArgs[0] === 'alarm') {
-    const AL = require('./arc-alarm');
-    const rest = userArgs.slice(1);
-    if (rest[0] === '--clear' || rest[0] === 'clear') {
-      process.stdout.write(`[arc alarm] ${AL.clear(process.cwd()).message}\n`);
-      process.exit(0);
-    }
-    const r = AL.raise(process.env.ARC_SESSION || '', rest.join(' '), process.cwd());
-    process.stdout.write(`[arc alarm] ${r.message}\n`);
-    process.exit(r.ok ? 0 : 1);
-  }
   // `arc feed [--stop|--status]` — the read-only operator status feed (127.0.0.1). Bare = ensure it
   // is up and print the URL a widget reads; --status reports health; --stop takes it down. The feed
   // also auto-starts with every session, so this is mainly for inspecting or controlling it by hand.

@@ -63,8 +63,8 @@ The board — sticky notes between sessions working in the same folder:
   /arc-note <role> --kind request <text>     ASK — tracked until answered (⧗ shown to you)
   /arc-note <role> --reply-to #N <text>      ANSWER #N (threads it; kind: result)
   /arc-note <role> --supersedes #N <text>    RETRACT #N — every future reader of #N is warned
-                         kinds: info · request · result · correction · blocker · contract
-                         (blocker + correction are auto-HIGH; plain notes need no flags)
+                         kinds: info · request · result · correction · alarm · contract
+                         (alarm + correction are auto-HIGH; plain notes need no flags)
   A CONTRACT — what two roles agreed, so they can work in parallel without asking:
   arc note <roleA>,<roleB> --kind contract "<the seam, who owns it, the don'ts>"
                          opens one. Each side then replies with ONLY its own half

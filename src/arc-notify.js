@@ -251,6 +251,38 @@ function run(raw) {
     process.exit(0);
   }
 
+  // A turn that ends with a BOARD NOTE still undelivered is not "ready" either. arc-stop-hook is
+  // wired ahead of this script on Stop (arc-wire-settings.js) and blocks the stop to hand the note
+  // over, so the session goes straight back to work — while this toast said it was waiting for you.
+  // MEASURED before the fix, over 224 toasts in the trace log against three boards: 29 of them
+  // (13%) fired on a turn that still had a note to deliver — 17 result, 7 correction, 7 info,
+  // 3 contract, 2 request.
+  //
+  // WHY A READ-ONLY UNREAD CHECK AND NOT A MARKER FILE. The obvious build is: the stop-hook writes a
+  // "I delivered" file, this one reads it. That is a RACE — it is only correct if Claude Code runs
+  // Stop hooks strictly in order, which is an assumption about someone else's scheduler that nothing
+  // here verifies. `badge()` asks the ledger directly and does NOT advance the read cursor, so this
+  // guard is right whichever hook runs first, and it cannot consume a note the session then never
+  // sees. Costs one ledger read on a path that is already doing file I/O.
+  //
+  // AND IT MUST RETURN BEFORE THE TIMER IS CONSUMED, twenty lines below. Same trap the compaction
+  // guard calls out: swallowing the toast but eating the turn start time would make the REAL
+  // completion report the continuation's length instead of the whole turn. `elapsed=186s` on a turn
+  // that had been running for ten minutes is that bug, not a fast turn.
+  if (mode === 'done') {
+    let pending = 0;
+    try {
+      // ARC_SESSION is arc's own session id and is a DIFFERENT namespace from hook.session_id —
+      // no fallback to `sid`, which could only ever miss. Absent env → badge returns null → toast.
+      const b = require('./arc-notes').badge((process.env.ARC_SESSION || '').trim(), hook.cwd);
+      pending = (b && !b.noRole && b.count) || 0;
+    } catch { pending = 0; }   // a broken board must never cost a real notification
+    if (pending) {
+      trace(`skip-note sid=${sid.slice(0, 8)} ${pending} unread — the stop-hook delivers it, session continues`);
+      process.exit(0);
+    }
+  }
+
   // A 'fail' that lands DURING a compaction is the compaction pause, not an error — stay silent and
   // leave the turn timer running, so the truthful Stop afterwards still reports the whole turn.
   // Checked BEFORE the timer is consumed below, which is the whole point: swallowing the toast but

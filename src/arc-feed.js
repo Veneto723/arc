@@ -60,7 +60,7 @@ const FEED_PORT = parseInt(process.env.ARC_FEED_PORT || '8791', 10);   // next t
 // v12 = per-repo `bonds` — lifetime note count per PAIR, plus strength relative to the strongest pair
 // on that board. A relationship, not an event: arrows say what is owed now, a bond says who has worked
 // with whom. Computed over the WHOLE ledger, not the 60-note flow window.
-// v13 = `priority` (high for blocker/correction) on pending + flow, so an ALERT note can be coloured
+// v13 = `priority` (high for alarm/correction) on pending + flow, so an ALERT note can be coloured
 // as one. Red is reserved for exactly this; ordinary in-flight notes are the neutral accent.
 // LESSON, twice over: v6's fields were added WITHOUT bumping this, and the running feed served the
 // old shape for hours while `snapshot()` returned the new one correctly when called directly —
@@ -545,7 +545,7 @@ function snapshot() {
         for (const n of kept) {
           pending.push({
             from: n.from, to: chair.role, seq: n.seq, id: n.id, ts: n.ts, text: clip(n.body),
-            // an ALERT note (blocker/correction) is stamped high by arc-board.js:326 — the operator
+            // an ALERT note (alarm/correction) is stamped high by arc-board.js:326 — the operator
             // needs that on the graph, not only in a list they may not scroll to
             kind: n.kind || null, priority: n.priority === 'high' ? 'high' : 'normal',
             // UNCONSUMED IS UNSEEN — by definition, this is the recipient's unread pile. The GUI

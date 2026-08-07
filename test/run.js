@@ -1391,6 +1391,314 @@ section('roster activity (a peer can see whether an answer is coming)');
     fs.rmSync(rrepo, { recursive: true, force: true });
   } catch (e) { ok('roster activity works', false, e.message + '\n' + (e.stack || '')); }
 }
+// ---- a "ready" toast must not fire when a note is still undelivered -----------------------------
+// THE FALSE POSITIVE, found by the operator and then measured: on Stop, arc-stop-hook is wired ahead
+// of arc-notify. It blocks the stop to hand over a note that landed mid-turn, so the session goes
+// straight back to work — while arc-notify, which knew nothing about that, toasted "— ready".
+// Counted over the real trace log (224 toasts) against three boards: 29 of them (13%) fired on a turn
+// that still had a note to deliver — 17 result, 7 correction, 7 info, 3 contract, 2 request.
+//
+// The guard is a READ-ONLY unread check, not a marker file the stop-hook writes. A marker is only
+// correct if Claude Code runs Stop hooks strictly in order, which is an assumption about someone
+// else's scheduler. badge() asks the ledger and does not advance the read cursor, so the guard holds
+// whichever hook runs first and can never consume a note the session then never sees.
+//
+// DRIVEN THROUGH THE REAL HOOK BINARY, and pinned so it CANNOT pop a toast on the operator's desktop:
+// ARC_NOTIFY_MIN_MS is set past any test duration, so every path here is silent. That makes "silent"
+// useless as an assertion — so the real assertion is the TURN CLOCK. The min-duration path consumes
+// it; only the note guard returns before that block. Clock survives ⇒ the guard ran.
+section('notify: no "ready" toast while a note is still undelivered');
+try {
+  const NOTIFY = path.join(SRC, 'arc-notify.js');
+  const NB = require(path.join(SRC, 'arc-notes.js'));
+  // A board only exists inside a git repo — resolveBoard refuses otherwise, and a non-repo fixture
+  // makes every assertion here pass for the wrong reason (no board ⇒ no unread ⇒ guard never fires).
+  const nrepo = path.join(TMP, 'notify-note'); fs.mkdirSync(nrepo, { recursive: true });
+  spawnSync('git', ['init', '-q'], { cwd: nrepo });
+  const NS = 'notify-note-sess';
+  const cache = path.join(os.homedir(), '.claude', 'cache');
+  fs.mkdirSync(cache, { recursive: true });
+  const turn = path.join(cache, `arc-turn-${NS}.json`);
+  const trace = path.join(cache, 'arc-notify.log');
+
+  // The claim path verifies a live arc-runner pid — point it at THIS process.
+  fs.writeFileSync(path.join(cache, `arc-state-${NS}.json`), JSON.stringify({ pid: process.pid, cwd: nrepo }));
+  NB.requestRole(NS, 'android', nrepo);
+
+  const hit = (mode, extraEnv) => spawnSync(process.execPath, [NOTIFY, mode], {
+    input: JSON.stringify({ session_id: NS, cwd: nrepo }),
+    encoding: 'utf8',
+    env: { ...process.env, ARC_SESSION: NS, ARC_NOTIFY_MIN_MS: '3600000' },  // never toast, either way
+    ...(extraEnv || {}),
+  });
+
+  // --- baseline: no note pending, the guard must NOT fire ---------------------------------------
+  hit('start');
+  ok('a turn start records its clock', fs.existsSync(turn));
+  const clean = hit('done');
+  ok('with NO note pending the guard stands down (the min-duration path takes it instead)',
+    clean.status === 0 && !fs.existsSync(turn), 'clock consumed=' + String(!fs.existsSync(turn)));
+
+  // --- a note lands mid-turn --------------------------------------------------------------------
+  // Posted by a DIFFERENT session, because unreadFor drops the author's own notes — a note android
+  // wrote to itself would leave nothing unread and the test would pass for the wrong reason.
+  const OS_ = 'notify-note-other';
+  fs.writeFileSync(path.join(cache, `arc-state-${OS_}.json`), JSON.stringify({ pid: process.pid, cwd: nrepo }));
+  NB.requestRole(OS_, 'uiux', nrepo);
+  NB.requestNote(OS_, 'android --kind result "the crash is a null intent"', nrepo);
+
+  const before = (() => { try { return fs.readFileSync(trace, 'utf8').length; } catch { return 0; } })();
+  hit('start');
+  ok('the clock is running again', fs.existsSync(turn));
+  const guarded = hit('done');
+  const added = (() => { try { return fs.readFileSync(trace, 'utf8').slice(before); } catch { return ''; } })();
+
+  ok('a Stop with an unread note exits clean', guarded.status === 0, guarded.stderr);
+  ok('...and the guard names itself in the trace, so this is not passing by accident',
+    /skip-note/.test(added), JSON.stringify(added.slice(-200)));
+  // THE REGRESSION. Without the guard the run falls through to the elapsed block, which unlinks the
+  // clock — so the session's REAL completion afterwards would report the continuation's length
+  // instead of the whole turn. Same trap the compaction guard calls out.
+  ok('...and the turn clock SURVIVES, so the real Stop still reports the whole turn',
+    fs.existsSync(turn), 'clock gone — the guard ran too late in the file');
+
+  // --- once the note is read, the toast is owed again --------------------------------------------
+  NB.injection(NS, nrepo);                       // android reads it; cursor advances
+  const after2 = (() => { try { return fs.readFileSync(trace, 'utf8').length; } catch { return 0; } })();
+  hit('done');
+  const tail = (() => { try { return fs.readFileSync(trace, 'utf8').slice(after2); } catch { return ''; } })();
+  ok('with the note read the guard stands down again — it must not silence sessions forever',
+    !/skip-note/.test(tail), JSON.stringify(tail.slice(-200)));
+
+  // --- a broken board must never cost a real notification -----------------------------------------
+  try { fs.writeFileSync(path.join(nrepo, '.arc', 'peer', 'notes.jsonl'), '{{{ not json\n'); } catch {}
+  hit('start');
+  const broke = hit('done');
+  ok('a corrupt ledger does not wedge the hook — a broken board must not swallow notifications',
+    broke.status === 0, broke.stderr);
+} catch (e) { ok('notify note guard works', false, e.message + '\n' + (e.stack || '')); }
+
+// ---- CLAUDE.md reaches every profile ------------------------------------------------------------
+// THE GAP, measured 2026-08-07: `~/.claude/CLAUDE.md` is not read inside a profiled session, because
+// Claude Code reads <CLAUDE_CONFIG_DIR>/CLAUDE.md and CLAUDE_CONFIG_DIR is the profile. Four profiles
+// existed on the operator's machine; exactly one had the file. `/arc-switch` silently dropped the
+// whole reply contract. Same shape as the skillOverrides gap SHARED_DIRS closes — but that junctions
+// DIRECTORIES, and this is one file.
+// The fix is an `@import` line rather than a hard link, and the operator picked it for a stated
+// reason: several sessions on different accounts run at once and may edit the rules together. A hard
+// link is invisible, so a write-replace detaches one profile and the copies drift with nothing to
+// show for it. Verified end-to-end before it was built (headless `claude -p` resolved the import at
+// both project and profile level) and after (the cetus profile, which never had the file, reported
+// the banned-padding section).
+section('CLAUDE.md import (one canonical file, every profile sees it)');
+{
+  try {
+    const P = require(path.join(SRC, 'arc-profile.js'));
+    const home = fs.mkdtempSync(path.join(TMP, 'cmd-'));
+    const canon = path.join(home, 'CLAUDE.md');
+    // syncClaudeMd resolves the canonical path through arc-config's CLAUDE_DIR, so drive it by
+    // pointing at directories under a throwaway root and asserting on relative shape instead.
+    const line = P.importLine();
+    ok('the import line is a single @ + an absolute forward-slash path',
+      /^@[A-Za-z]:\/.*\/CLAUDE\.md$/.test(line), line);
+    ok('...and it names the canonical file, not a profile copy',
+      line.slice(1) === P.canonicalClaudeMd().replace(/\\/g, '/'), line);
+
+    // --- the promote-then-point path -------------------------------------------------------------
+    // The first profile that HAS rules becomes the canonical source. Its own copy then collapses to
+    // the pointer: keeping it would show the model the same rules twice, and the copy would drift
+    // while still looking authoritative.
+    {
+      const prof = path.join(home, 'p1');
+      fs.mkdirSync(prof, { recursive: true });
+      const RULES = '# Global instructions\n\nAnswer short.\n';
+      fs.writeFileSync(path.join(prof, 'CLAUDE.md'), RULES);
+      const canonExisted = fs.existsSync(P.canonicalClaudeMd());
+      P.syncClaudeMd(prof);
+      const after = fs.readFileSync(path.join(prof, 'CLAUDE.md'), 'utf8');
+      ok('a profile gets the import line on top', after.startsWith(line + '\n'), JSON.stringify(after.slice(0, 60)));
+      ok('the first profile WITH rules seeds the canonical file',
+        canonExisted || fs.readFileSync(P.canonicalClaudeMd(), 'utf8').includes('Answer short.'));
+      ok('...and its own copy collapses to the pointer — two copies of one rule set drift silently',
+        canonExisted || after.trim() === line, JSON.stringify(after));
+
+      // The OTHER branch: a profile whose rules differ from canonical keeps them. This only exists
+      // once a canonical file is in place, which the block above guarantees.
+      const p1b = path.join(home, 'p1b');
+      fs.mkdirSync(p1b, { recursive: true });
+      fs.writeFileSync(path.join(p1b, 'CLAUDE.md'), 'Account-specific rule.\n');
+      P.syncClaudeMd(p1b);
+      const kept = fs.readFileSync(path.join(p1b, 'CLAUDE.md'), 'utf8');
+      ok('a profile with DIFFERENT local rules keeps them below the import',
+        kept.startsWith(line + '\n') && kept.includes('Account-specific rule.'), JSON.stringify(kept));
+    }
+
+    // --- idempotence: ensureProfile runs on every launch -----------------------------------------
+    {
+      const prof = path.join(home, 'p2');
+      fs.mkdirSync(prof, { recursive: true });
+      const first = P.syncClaudeMd(prof);
+      const body1 = fs.existsSync(path.join(prof, 'CLAUDE.md')) ? fs.readFileSync(path.join(prof, 'CLAUDE.md'), 'utf8') : '';
+      const second = P.syncClaudeMd(prof);
+      const body2 = fs.existsSync(path.join(prof, 'CLAUDE.md')) ? fs.readFileSync(path.join(prof, 'CLAUDE.md'), 'utf8') : '';
+      ok('a second run reports no change — ensureProfile runs every launch', second === false, String(first) + '/' + String(second));
+      ok('...and does not append a second import line', body1 === body2 && (body2.match(/^@/gm) || []).length <= 1,
+        JSON.stringify(body2.slice(0, 80)));
+    }
+
+    // --- an existing import written with backslashes is recognised, not duplicated ----------------
+    {
+      const prof = path.join(home, 'p3');
+      fs.mkdirSync(prof, { recursive: true });
+      fs.writeFileSync(path.join(prof, 'CLAUDE.md'), '@' + P.canonicalClaudeMd() + '\n\nlocal rule\n');
+      ok('a backslash-spelled import already present is left alone', P.syncClaudeMd(prof) === false);
+    }
+
+    // --- the canonical file must never import itself ----------------------------------------------
+    {
+      const root = path.dirname(P.canonicalClaudeMd());
+      ok('the root config dir is refused as a profile — a self-import would loop',
+        P.syncClaudeMd(root) === false);
+    }
+
+    // --- it must never block a launch --------------------------------------------------------------
+    ok('an unwritable target returns false rather than throwing',
+      P.syncClaudeMd(path.join(home, 'no', 'such', 'dir')) === false);
+
+    // --- wired into the launch path ----------------------------------------------------------------
+    ok('ensureProfile calls it — otherwise a switched account still loses the rules', (() => {
+      const src = fs.readFileSync(path.join(SRC, 'arc-profile.js'), 'utf8');
+      const fn = src.slice(src.indexOf('function ensureProfile('));
+      return /syncClaudeMd\(dir\)/.test(fn.slice(0, fn.indexOf('\n}')));
+    })());
+  } catch (e) { ok('CLAUDE.md import works', false, e.message + '\n' + (e.stack || '')); }
+}
+
+// ---- the verbosity log: a baseline, collected before deciding on an intervention ---------------
+// The reply contract is prose in the operator's CLAUDE.md and it MOSTLY HOLDS — measured over one
+// real session, 862 turns: median question 116 chars, median reply 212 (1.8x). But 82 replies ran
+// past 1500, and 38 of the 276 questions under 60 chars got a wall. The median says the contract is
+// honoured; the operator says otherwise; both are true, because one-line narration between tool
+// calls drags the median down until the walls vanish into it.
+// This started as a NAG injected into the next prompt and the operator cut it — the nag's supporting
+// number (98-99% hook-enforced vs 93-94% prose) was borrowed from arc-comply, a different rule with
+// a different shape. So it logs and says nothing. What is tested here is therefore mostly what it
+// must NOT do: never speak, never double-count, never wedge a prompt.
+section('verbosity log (measure every reply; say nothing about it)');
+{
+  try {
+    const V = require(path.join(SRC, 'arc-verbosity.js'));
+    const wall = 'x'.repeat(2400);
+    const mkT = (q, a) => {
+      const f = path.join(TMP, `vb-${Math.abs(q.length * 131 + a.length)}.jsonl`);
+      fs.writeFileSync(f, [
+        JSON.stringify({ type: 'user', message: { content: q } }),
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: a }] } }),
+      ].join('\n') + '\n');
+      return f;
+    };
+    const box = (n) => { const d = path.join(TMP, `vbox-${n}`); fs.mkdirSync(d, { recursive: true }); return d; };
+
+    // --- the row is raw numbers, no verdict ------------------------------------------------------
+    {
+      const c = box('row');
+      const r = V.record(mkT('go', wall), c);
+      ok('a row carries the two lengths and nothing judged', r && r.q === 2 && r.a === 2400, JSON.stringify(r));
+      ok('...and no "wall" column — a threshold baked into data can only confirm itself',
+        r && !('wall' in r), JSON.stringify(r));
+      ok('the log lands under .arc/, which is already gitignored — it never travels by git',
+        V.logPath(c).replace(/\\/g, '/').endsWith('/.arc/verbosity.jsonl'), V.logPath(c));
+      ok('...and it is readable back as one row', V.rows(c).length === 1);
+    }
+
+    // --- lead is recorded, not acted on ----------------------------------------------------------
+    {
+      const c = box('lead');
+      ok('a reply that OPENS with a TL;DR is flagged lead:true — that is the asked-for shape at length',
+        V.record(mkT('go', 'TL;DR — it is fixed.\n\n' + wall), c).lead === true);
+      const c2 = box('buried');
+      ok('...but a TL;DR BURIED at the end is not (a summary you reach last is not a summary)',
+        V.record(mkT('go', wall + '\n\nTL;DR — buried'), c2).lead === false);
+    }
+
+    // --- the double-count guard ------------------------------------------------------------------
+    // A prompt does not guarantee a new reply behind it; a board delivery or an interrupted turn
+    // fires the hook again over the SAME reply. Without the signature the long replies get weighted
+    // twice, and they are exactly the turns most likely to be interrupted — the bias would land
+    // squarely on the thing being measured.
+    {
+      const c = box('dedup');
+      const t = mkT('go', wall);
+      ok('the same reply logs once', V.record(t, c) && V.record(t, c) === null && V.rows(c).length === 1,
+        String(V.rows(c).length));
+      // and the guard is REACHABLE — mutate the signature and the second write must go through
+      fs.appendFileSync(V.logPath(c), JSON.stringify({ ts: 'x', q: 1, a: 2, sig: 'different' }) + '\n');
+      ok('...and a genuinely new reply is not swallowed by the guard',
+        V.record(t, c) !== null, String(V.rows(c).length));
+    }
+
+    // --- hook payloads are not the human speaking ------------------------------------------------
+    {
+      const c = box('hookturn');
+      const f = path.join(TMP, 'vb-hookturn.jsonl');
+      fs.writeFileSync(f, [
+        JSON.stringify({ type: 'user', message: { content: 'go' } }),
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] } }),
+        JSON.stringify({ type: 'user', message: { content: '[arc board] 1 unread note(s) ' + 'z'.repeat(3000) } }),
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: wall }] } }),
+      ].join('\n') + '\n');
+      ok('a board injection is not counted as the question — charging a wall against it is meaningless',
+        V.record(f, c).q === 2, JSON.stringify(V.record(f, box('hookturn2'))));
+    }
+
+    // --- one-line narration between tool calls is not a reply -------------------------------------
+    {
+      const c = box('narration');
+      const f = path.join(TMP, 'vb-narration.jsonl');
+      fs.writeFileSync(f, [
+        JSON.stringify({ type: 'user', message: { content: 'run it' } }),
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: wall }] } }),
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Now the tests:' }] } }),
+      ].join('\n') + '\n');
+      ok('a short inter-tool line is skipped; the reply measured is the one the human reads as one',
+        V.record(f, c).a === 2400, JSON.stringify(V.rows(c)[0]));
+    }
+
+    // --- it must never wedge a prompt -------------------------------------------------------------
+    ok('a missing transcript is null, never a throw', V.record(path.join(TMP, 'no-such.jsonl'), box('miss')) === null);
+    ok('a garbage transcript is null, never a throw', (() => {
+      const f = path.join(TMP, 'vb-junk.jsonl');
+      fs.writeFileSync(f, 'not json\n{{{\n');
+      return V.record(f, box('junk')) === null;
+    })());
+
+    // --- stats applies the thresholds at REPORT time ----------------------------------------------
+    {
+      const c = box('stats');
+      V.record(mkT('go', wall), c);
+      // NB: the reply must clear the 40-char narration floor or it is not a reply at all — the first
+      // draft of this test used "ok fine" and got n:1, which is the floor working, not a bug.
+      V.record(mkT('a longer question than sixty characters, definitively past the bar here',
+        'A short, ordinary answer that clears the narration floor.'), c);
+      const s = V.stats(c);
+      ok('stats counts the wall and attributes it to a short question', s.n === 2 && s.walls === 1 && s.shortQWalls === 1,
+        JSON.stringify(s));
+      ok('...and a long question with a short answer is not counted against either bar',
+        s.shortQ === 1 && s.medA > 0, JSON.stringify(s));
+    }
+
+    // --- THE LOAD-BEARING ONE: the hook stays silent ----------------------------------------------
+    // It was an injector for one commit. If it ever becomes one again, this fails.
+    ok('arc-verbosity exports no injector — the hook logs and says nothing',
+      typeof V.record === 'function' && typeof V.nag === 'undefined', Object.keys(V).join(','));
+    ok('...and the hook call site does not push it into the prompt', (() => {
+      const src = fs.readFileSync(path.join(SRC, 'arc-switch-hook.js'), 'utf8');
+      const m = src.match(/^.*arc-verbosity.*$/m);
+      return !!m && !/parts\.push/.test(m);
+    })());
+  } catch (e) { ok('verbosity log works', false, e.message + '\n' + (e.stack || '')); }
+}
+
 // ---- arc-done (derive "done" from git, not from the agent's word) ---------------
 section('arc-done (git-derived completion)');
 try {
@@ -3334,30 +3642,18 @@ try {
   try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${DS}.json`)); } catch {}
 } catch (e) { ok('(d) rate-limit squat', false, e.message + '\n' + (e.stack || '')); }
 
-// ---- the stance GATE: /arc-mode drives whether an agent may spawn a peer -----------
-// Everything else the stance governs is a model-level STEER (injected advice), which is right
-// for a note: cheap, reversible, and "was this the user's order?" is a judgment only the model
-// can make. STAFFING is different in kind — it spawns a REAL SESSION (window, process, its own
-// quota), and injected text cannot actually STOP an agent from running a command. So that one
-// step rides a PreToolUse hook and becomes enforceable: passive DENIES, balanced ASKS, active
-// ALLOWS.
-//
-// `arc delegate` carries BOTH costs under one verb, so the gate cannot judge the command string
-// alone — it must look up whether the role is LIVE. A live peer means this is only a note, and
-// gating the commonest thing an agent does would be pure noise; an empty chair means a session
-// gets born, and that is the moment the dial has to mean something.
-//
-// And it binds the HUMAN too, unlike the rest of the stance: a PreToolUse hook sees a tool call
-// and cannot tell the user's order from the agent's own idea. A prompt-command escape hatch
-// (a prompt is provably yours) was removed on purpose — a human's natural act is prose, not a
-// command. So passive costs you the spawn whoever wanted it.
-// ── arc alarm: the board-wide fire alarm — a broadcast that INTERRUPTS busy peers ──────────────
-// Raised by `arc alarm "<msg>"`: it broadcasts a note (wakes idle peers) AND writes a flag the
-// pretool hook reads on every tool call, denying a BUSY peer's next tool call so it must read the
-// alarm before proceeding. The design review (audit #332) required: block-once per (session,alarm),
-// FAIL-OPEN on ack-write failure, DEBOUNCE raises, CAP+frame the untrusted body, and the raiser
-// auto-acks. This exercises all of them against a real spawned hook.
-section('arc alarm (broadcast + busy-peer interrupt at the next tool boundary)');
+// ── the ALARM KIND: one tunnel, two channels ───────────────────────────────────
+// There is no `arc alarm` verb any more. The operator's call: everything goes through ONE tunnel —
+// you post a NOTE, and the KIND decides how hard it lands. rank <= 1 (alarm, correction) also writes
+// a flag the pretool hook reads on every tool call, so a BUSY peer is stopped at its next tool
+// boundary instead of learning at turn end. rank >= 2 keeps the ordinary pace.
+// The design review's safeties all still apply and are all exercised here: block-once per
+// (session, note), FAIL-OPEN on ack-write failure, CAP the untrusted body, the poster never blocks on
+// its own note, and a STALE entry stops interrupting.
+// ★ AND THE ONE THE FOLD ADDED: an alarm is ADDRESSED. 176 of the 183 rank<=1 notes on the two live
+// boards are DIRECTED at one role, so a directed one must reach ONLY its recipients — interrupting
+// every peer for a correction meant for one is how a gate becomes noise and stops being read.
+section('the alarm kind (post a note -> idle peers wake, busy peers stop at the next tool call)');
 try {
   const AL = require(path.join(SRC, 'arc-alarm.js'));
   const RMa = require(path.join(SRC, 'arc-board.js'));
@@ -3369,12 +3665,13 @@ try {
   const aboard = RMa.resolveBoard(arepo); RMa.ensureBoard(aboard);
   const RAISER = 'alarm-raiser-' + process.pid;
   const BUSY = 'alarm-busy-' + process.pid;
-  for (const s of [RAISER, BUSY]) fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`),
+  const OTHER = 'alarm-other-' + process.pid;
+  for (const sx of [RAISER, BUSY, OTHER]) fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${sx}.json`),
     JSON.stringify({ pid: process.pid, cwd: arepo, convId: 'ac1' }));
   Fa.requestRole(RAISER, 'code', arepo);
   Fa.requestRole(BUSY, 'audit', arepo);
+  Fa.requestRole(OTHER, 'research', arepo);
 
-  // the pretool gate, driven exactly as the /arc-mode gate test below drives it
   const armgate = (command, session) => {
     const r = spawnSync(process.execPath, [HOOKPa], {
       input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd: arepo }),
@@ -3385,117 +3682,63 @@ try {
     catch { return { decision: 'PARSE-ERROR', raw: r.stdout }; }
   };
 
-  // RAISE: writes the flag, broadcasts a note, and the raiser auto-acks (never blocks on its own).
+  // POST, through the SHIPPING command — not the module. The whole point of the fold is that this one
+  // call drives both channels.
   const notesBefore = RMa.allNotes(aboard).length;
-  const raised = AL.raise(RAISER, 'STOP — the config schema changed, do not build on the old one', arepo);
-  ok('raise writes the flag AND broadcasts a note (so idle peers wake, busy peers get interrupted)',
-    raised.ok === true && !!raised.id && !!AL.readFlag(aboard)
-    && RMa.allNotes(aboard).length === notesBefore + 1
-    && /ALARM: STOP/.test(RMa.allNotes(aboard).slice(-1)[0].body));
-  ok('the raiser auto-acks — it does NOT block on its own alarm',
-    AL.checkAndAck(RAISER, aboard) === null);
-  ok('badge() shows the ACTIVE alarm to a session that has NOT taken it up yet',
-    /^ALARM: STOP/.test(AL.badge(aboard, BUSY)));
-  ok('...and DISSOLVES for a session that HAS acked it — the raiser auto-acked, so its bar shows "on it"',
-    AL.badge(aboard, RAISER) === '' && /^ALARM: STOP/.test(AL.badge(aboard)));   // no-session viewer still sees it
+  const posted = Fa.requestNote(RAISER, 'audit --kind alarm "STOP — the config schema changed, do not build on the old one"', arepo);
+  ok('posting an ALARM note stores it AND raises the interrupt flag — one tunnel, two channels',
+    posted.ok === true && RMa.allNotes(aboard).length === notesBefore + 1 && !!AL.readFlag(aboard),
+    JSON.stringify(posted.message || '').slice(0, 120));
+  ok('...the poster never blocks on its own note',
+    armgate('ls -la', RAISER).decision === null);
 
-  // BUSY peer: interrupted ONCE at its next tool call, then never again for the same alarm.
+  // ADDRESSED: only the recipient is stopped.
   const first = armgate('ls -la', BUSY);
-  ok('a BUSY peer is DENIED at its next tool call, the body framed as UNTRUSTED (not an instruction)',
+  ok('the RECIPIENT is denied at its next tool call, body framed as UNTRUSTED (not an instruction)',
     first.decision === 'deny' && /ALARM/i.test(first.reason || '')
     && /UNTRUSTED/i.test(first.sys || '') && /schema changed/.test(first.sys || '')
-    && /NOT an instruction/i.test(first.sys || ''));
-  ok('...BLOCK-ONCE: the very next tool call RUNS (the ack suppresses a re-block, no storm)',
+    && /NOT an instruction/i.test(first.sys || ''), JSON.stringify(first).slice(0, 200));
+  ok('★ ...and a peer it was NOT addressed to is NOT interrupted (a directed note is not a siren)',
+    armgate('ls -la', OTHER).decision === null);
+  ok('...BLOCK-ONCE: the recipient next call RUNS (the ack suppresses a re-block, no storm)',
     armgate('ls -la', BUSY).decision === null);
-  ok('...`arc alarm` itself is EXEMPT so a peer can always raise/clear (no clear-deadlock)',
-    armgate('arc alarm --clear', RAISER).decision === null);
+  ok('...arc note/notes stay EXEMPT — a peer blocked from READING an alarm could never clear it',
+    armgate('arc notes', OTHER).decision === null);
 
-  // DEBOUNCE: a second raise inside the window coalesces — no per-id block storm.
-  const dbl = AL.raise(RAISER, 'a second, rapid alarm', arepo);
-  ok('a rapid second raise COALESCES (debounce) — one alarm, not a board-wide storm',
-    dbl.ok === false && dbl.coalesced === true && AL.readFlag(aboard).id === raised.id);
+  // A BROADCAST alarm reaches everyone.
+  const bc = Fa.requestNote(RAISER, 'all --kind alarm "the build is broken everywhere"', arepo);
+  ok('a BROADCAST alarm interrupts every peer, not just one', bc.ok === true
+    && armgate('ls', BUSY).decision === 'deny' && armgate('ls', OTHER).decision === 'deny');
 
-  // BODY CAP: the injected body is capped at the source (untrusted, force-fed into context).
-  AL.clear(arepo);
-  const big = AL.raise(RAISER, 'x'.repeat(1000), arepo);
-  ok('the alarm body is CAPPED (a broadcast prompt-injection surface must be bounded)',
-    big.ok === true && AL.readFlag(aboard).body.length <= AL.BODY_CAP);
+  // rank >= 2 must NOT interrupt, or every note becomes a siren.
+  Fa.requestNote(RAISER, 'audit --kind request "when you have a moment"', arepo);
+  ok('a REQUEST (rank 3) does NOT interrupt — only rank <= 1 earns a tool-call denial',
+    armgate('ls', BUSY).decision === null);
 
-  // STALE / TTL: an alarm older than the TTL no longer interrupts.
-  const flag = JSON.parse(fs.readFileSync(AL.flagPath(aboard), 'utf8'));
-  flag.at = Date.now() - AL.TTL_MS - 1000;
-  fs.writeFileSync(AL.flagPath(aboard), JSON.stringify(flag));
-  ok('a STALE alarm (past its TTL) no longer interrupts — readFlag and the gate fall through',
+  // BODY CAP — the injected text is untrusted and force-fed into a busy peer's context.
+  ok('every flag body is CAPPED (a force-fed injection surface must be bounded)',
+    (AL.readFlag(aboard) || []).every((n) => n.body.length <= AL.BODY_CAP));
+
+  // STALE / TTL.
+  const raw = JSON.parse(fs.readFileSync(AL.flagPath(aboard), 'utf8'));
+  raw.notes = raw.notes.map((n) => ({ ...n, at: Date.now() - AL.TTL_MS - 1000 }));
+  fs.writeFileSync(AL.flagPath(aboard), JSON.stringify(raw));
+  ok('a STALE entry (past its TTL) no longer interrupts — readFlag and the gate fall through',
     AL.readFlag(aboard) === null && armgate('ls', 'alarm-fresh-' + process.pid).decision === null);
 
-  // FAIL-OPEN: if the ack cannot be written, the gate lets the tool RUN (never block-forever).
-  AL.clear(arepo);
-  AL.raise(RAISER, 'fresh alarm for the fail-open probe', arepo);
+  // FAIL-OPEN: an ack that cannot persist must let the tool RUN, never wedge the session.
+  Fa.requestNote(RAISER, 'audit --kind alarm "fresh one for the fail-open probe"', arepo);
   ok('an ack-write FAILURE fails OPEN — a session whose ack cannot persist is NOT wedged',
     AL.stampAck('bad<>:name', 'x') === false
     && AL.checkAndAck('bad<>:name', aboard) === null
-    && AL.readFlag(aboard) !== null);   // the flag stays live for peers who CAN ack
+    && AL.readFlag(aboard) !== null);
 
-  // CLEAR: removes the flag; the gate falls through again for everyone.
-  AL.clear(arepo);
-  ok('clear removes the flag — the gate falls through for everyone, and the status-bar badge clears',
-    AL.readFlag(aboard) === null && armgate('ls', BUSY).decision === null && AL.badge(aboard) === '');
-
-  // IDLE-PEER WAKE: an alarm broadcasts a note, so a CAUGHT-UP (idle) peer's listener wake-condition
-  // — arc-await's check(), which fires on unreadFor > 0 — goes true. The idle session wakes and
-  // absorbs the alarm like any note (the note channel; the flag is the ADDITION for busy peers).
-  // Proven live with a real listener process; locked here so it can't silently regress.
-  const IDLE = 'alarm-idle-' + process.pid;
-  fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${IDLE}.json`),
-    JSON.stringify({ pid: process.pid, cwd: arepo, convId: 'ac1' }));
-  Fa.requestRole(IDLE, 'idler', arepo);
-  RMa.markRead(aboard, 'idler');                       // catch the idle peer up: 0 unread
-  const idleBefore = RMa.unreadFor(aboard, 'idler').count;
-  AL.raise(RAISER, 'wake the idle peer', arepo);
-  ok('an alarm wakes an IDLE peer too — a caught-up listener\'s wake-condition (unread>0) goes true',
-    idleBefore === 0 && RMa.unreadFor(aboard, 'idler').count >= 1
-    && /ALARM: wake the idle peer/.test(RMa.unreadFor(aboard, 'idler').notes.slice(-1)[0].body));
-  AL.clear(arepo);
-  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${IDLE}.json`)); } catch {}
-  try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-alarmack-${IDLE}.json`)); } catch {}
-
-  // DE-DUP (design review #332, claim 6): the alarm reaches a peer on TWO channels — the broadcast
-  // note AND the pretool flag-gate. Whichever fires first stamps the shared ack; the other is
-  // suppressed, so no peer sees the same alarm twice. Fresh board to isolate the channels cleanly.
-  const drepo = fs.mkdtempSync(path.join(os.tmpdir(), 'alarmdd-'));
-  spawnSync('git', ['init', '-q'], { cwd: drepo });
-  const dboard = RMa.resolveBoard(drepo); RMa.ensureBoard(dboard);
-  const DR = 'dd-raiser-' + process.pid, D1 = 'dd-note1st-' + process.pid, D2 = 'dd-flag1st-' + process.pid;
-  for (const s of [DR, D1, D2]) fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`),
-    JSON.stringify({ pid: process.pid, cwd: drepo, convId: 'dc1' }));
-  Fa.requestRole(DR, 'code', drepo); Fa.requestRole(D1, 'frontend', drepo); Fa.requestRole(D2, 'backend', drepo);
-
-  const r1 = AL.raise(DR, 'schema changed — stop', drepo);
-  // DIRECTION 1 (note first): the delivery SHOWS the alarm and stamps the ack -> the flag stays quiet.
-  const injA = Fa.injection(D1, drepo);
-  ok('de-dup, NOTE first: the note is shown and stamps the ack, so the flag-gate then stays quiet',
-    !!injA && /ALARM: schema changed/.test(injA.text)
-    && AL.readAck(D1) === r1.id && AL.checkAndAck(D1, dboard) === null);
-
-  // DIRECTION 2 (flag first): the gate blocks (acks), then the note is SUPPRESSED from delivery and
-  // the cursor advances so it never re-delivers. Here the alarm is the only unread note, so nothing
-  // is injected at all — the peer got it via the block; a note delivery would be the double-show.
-  const blocked = AL.checkAndAck(D2, dboard);
-  const injB = Fa.injection(D2, drepo);
-  ok('de-dup, FLAG first: the gate blocks, then the note is SUPPRESSED (no double-show, nothing injected)',
-    !!blocked && AL.readAck(D2) === r1.id && injB === null);
-  ok('...and the suppressed alarm never re-delivers — the cursor advanced past it',
-    Fa.injection(D2, drepo) === null && AL.readFlag(dboard) !== null);
-
-  for (const s of [DR, D1, D2]) {
-    try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-alarmack-${s}.json`)); } catch {}
-    try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${s}.json`)); } catch {}
+  for (const sx of [RAISER, BUSY, OTHER]) {
+    try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-alarmack-${sx}.json`)); } catch {}
+    try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-state-${sx}.json`)); } catch {}
   }
-  fs.rmSync(drepo, { recursive: true, force: true });
-
-  for (const s of [RAISER, BUSY]) { try { fs.unlinkSync(path.join(CLAUDE, 'cache', `arc-alarmack-${s}.json`)); } catch {} }
   fs.rmSync(arepo, { recursive: true, force: true });
-} catch (e) { ok('arc alarm section ran without throwing', false, e.message); }
+} catch (e) { ok('the alarm kind section ran without throwing', false, e.message + '\n' + (e.stack || '')); }
 
 // ── arc feed: the read-only operator status feed (127.0.0.1) ────────────────────────────────────
 // The human holds no role, so no board reader serves them. The feed answers "what are my agents
@@ -5868,8 +6111,8 @@ try {
   // named a different note on each clone.
   ok('--reply-to INFERS kind:result; --supersedes INFERS kind:correction',
     sn2.kind === 'result' && sn2.replyTo === sn1.id && sn3.kind === 'correction' && sn3.supersedes === sn2.id);
-  ok('a correction (and a blocker) is auto-HIGH priority — a retraction is never routine',
-    sn3.priority === 'high' && R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'blocker', body: 'db down' }).priority === 'high');
+  ok('a correction (and an alarm) is auto-HIGH priority — a retraction is never routine',
+    sn3.priority === 'high' && R2.appendNote(sboard, { from: 'android', to: 'research', kind: 'alarm', body: 'db down' }).priority === 'high');
   // Keyed by the retracted note's ID — a retraction must keep pointing at the same note after a
   // merge reorders the ledger, which a position cannot do.
   ok('supersededMap derives which note was RETRACTED, and by whom',
@@ -5885,8 +6128,20 @@ try {
   ok('...and a RETRACTED request is no longer owed (a debt that could never be paid)',
     !R2.openRequests(sboard).map((n) => n.seq).includes(4));
   ok('repliesTo threads the answers under a request', R2.repliesTo(sboard, 1).length === 1);
-  ok('KINDS/KIND_RANK rank a blocker + correction ABOVE routine info',
-    R2.KIND_RANK.blocker < R2.KIND_RANK.info && R2.KIND_RANK.correction < R2.KIND_RANK.info && R2.KINDS.includes('contract'));
+  // ★ THE LEGACY SHIM. `blocker` was this kind's first name and 37 notes carry it on the two live
+  // boards. normalizeKind degrades an UNKNOWN kind to `info`, so without the alias every one of those
+  // would silently fall from rank 0 to rank 5 — a stop-the-line re-filed as routine news, on every
+  // read, with nothing to say why. Same shim, same reason, as `decision` -> `contract`.
+  ok('the legacy `blocker` spelling still reads as `alarm` — 37 notes on disk carry it',
+    R2.normalizeKind('blocker') === 'alarm' && R2.KIND_RANK[R2.normalizeKind('blocker')] === 0);
+  ok('...and `decision` -> `contract` still works (the first shim is not collateral damage)',
+    R2.normalizeKind('decision') === 'contract');
+  ok('...while `blocker` is NOT offered as a current kind — read the old spelling, write the new',
+    !R2.KINDS.includes('blocker') && R2.KINDS.includes('alarm'));
+  ok('...and a hostile kind still degrades to info rather than resolving through the prototype',
+    R2.normalizeKind('__proto__') === 'info' && R2.normalizeKind('constructor') === 'info');
+  ok('KINDS/KIND_RANK rank an alarm + correction ABOVE routine info',
+    R2.KIND_RANK.alarm < R2.KIND_RANK.info && R2.KIND_RANK.correction < R2.KIND_RANK.info && R2.KINDS.includes('contract'));
   ok('...and a `contract` outranks a request — a clause binding two roles is not routine news',
     R2.KIND_RANK.contract < R2.KIND_RANK.request && R2.KIND_RANK.contract < R2.KIND_RANK.result);
 
@@ -6486,7 +6741,7 @@ try {
   ok('but the notes stay on the board (rd()-only)', R2.noteCount(board2) === countBeforeInject);
 
   // AN ALARM MUST NOT BE BURIED BY VOLUME. Delivery walks oldest-first and stops at the injection
-  // budget, so a burst of routine notes can push a BLOCKER past the cut, where it is invisible inside
+  // budget, so a burst of routine notes can push a ALARM past the cut, where it is invisible inside
   // "…and N more still unread". The float-to-top sort cannot help — it only reorders what is SHOWN.
   // Reordering delivery is NOT the fix (the cursor is a high-water mark; picking a later note ahead
   // of an earlier one and advancing past both would silently consume the skipped ones), so the
@@ -6494,16 +6749,16 @@ try {
   {
     const filler = 'x'.repeat(900);                         // ~5 of these exhaust INJECT_MAX (4000)
     for (let i = 0; i < 8; i++) R2.appendNote(board2, { from: 'research', to: 'coding', body: `routine ${i} ${filler}` });
-    R2.appendNote(board2, { from: 'research', to: 'coding', kind: 'blocker', body: 'THE BURIED BLOCKER' });
+    R2.appendNote(board2, { from: 'research', to: 'coding', kind: 'alarm', body: 'THE BURIED ALARM' });
     const inj2 = F.injection('sb', repo2);
-    ok('a burst of routine notes DOES push the blocker out of this batch (the hazard is real)',
-      !!inj2 && inj2.text.indexOf('THE BURIED BLOCKER') < 0 && /more still unread/.test(inj2.text));
+    ok('a burst of routine notes DOES push the alarm out of this batch (the hazard is real)',
+      !!inj2 && inj2.text.indexOf('THE BURIED ALARM') < 0 && /more still unread/.test(inj2.text));
     ok('...but the deferred HIGH-PRIORITY note is NAMED, not left inside "N more still unread"',
-      !!inj2 && /HIGH PRIORITY/.test(inj2.text) && /<blocker>/.test(inj2.text) && /read THOSE first/.test(inj2.text));
+      !!inj2 && /HIGH PRIORITY/.test(inj2.text) && /<alarm>/.test(inj2.text) && /read THOSE first/.test(inj2.text));
     // and it is still there to be read — deferral must never be consumption
     const inj3 = F.injection('sb', repo2);
-    ok('...and the blocker is still delivered on the NEXT batch (deferred, never consumed)',
-      !!inj3 && inj3.text.indexOf('THE BURIED BLOCKER') >= 0);
+    ok('...and the alarm is still delivered on the NEXT batch (deferred, never consumed)',
+      !!inj3 && inj3.text.indexOf('THE BURIED ALARM') >= 0);
   }
 
   // A NOTE ADDRESSED TO YOU IS YOUR WORK — deliver it whole. Caught live: `code` sent research a
@@ -6961,28 +7216,6 @@ try {
   ok('...while a sentence still has more bare words than the verb has slots, and is refused',
     flagLeaks.length === 0, flagLeaks.map(([v, a]) => `/arc-${v} ${a}`).join(' | '));
 
-  // /arc-alarm: the human's tab can raise a board-wide fire alarm at zero tokens (dispatch + EFFECT,
-  // on a dedicated board so it can't couple to the shared TMP one). A message dispatches and raises;
-  // --clear takes it down. This drives the REAL hook, not a copied regex.
-  const AL2 = require(path.join(SRC, 'arc-alarm.js'));
-  const B2 = require(path.join(SRC, 'arc-board.js'));
-  const arepo3 = fs.mkdtempSync(path.join(os.tmpdir(), 'slashalarm-'));
-  spawnSync('git', ['init', '-q'], { cwd: arepo3 });
-  const askIn = (prompt, cwd) => {
-    const r = spawnSync(process.execPath, [swhook], {
-      input: JSON.stringify({ prompt, cwd }), encoding: 'utf8',
-      env: { ...process.env, ARC_SESSION: '', ARC_PEEK_NO_REFRESH: '1' } });
-    try { return JSON.parse(r.stdout || '{}'); } catch { return {}; }
-  };
-  const raiseAsk = askIn('/arc-alarm the schema changed, everyone stop', arepo3);
-  ok('/arc-alarm dispatches and RAISES — blocks with the result, the flag lands on the board',
-    /ALARM raised/i.test(raiseAsk.reason || '') && !!AL2.readFlag(B2.resolveBoard(arepo3)));
-  ok('...and /arc-alarm --clear dispatches and clears the flag',
-    /cleared/i.test(askIn('/arc-alarm --clear', arepo3).reason || '')
-    && AL2.readFlag(B2.resolveBoard(arepo3)) === null);
-  ok('...a bare "/arc-alarm" with prose still dispatches (a message is not a one-token verb)',
-    !!(askIn('/arc-alarm', arepo3).reason || '').length);   // empty -> a helpful "refusing empty" block
-  fs.rmSync(arepo3, { recursive: true, force: true });
 
   // ORDERING TRAP (documented in arc-slash.js): delete-account must not misfire as a
   // conversation delete. Same-handler equality proves the routing.
@@ -7293,7 +7526,7 @@ try {
     && /seen by bb/.test(F.requestNotes(S('a'), '', rroot).message));
 
   // BROADCAST — the announcer's check: did everyone get it? Recipients are the LIVE peers minus me.
-  F.requestNote(S('a'), 'all --kind blocker "staging down"', rroot);
+  F.requestNote(S('a'), 'all --kind alarm "staging down"', rroot);
   const bn = RM.allNotes(rboard).find((n) => /staging down/.test(n.body));
   ok('a broadcast\'s recipients are the LIVE peers minus the sender, none seen before any read',
     JSON.stringify(RM.seenBy(rboard, bn).recipients.slice().sort()) === JSON.stringify(['bb', 'cc'])
@@ -7302,7 +7535,7 @@ try {
   ok('...partial once one reads (an announcer can see WHO is missing)',
     (() => { const s = RM.seenBy(rboard, bn); return s.seen.length === 1 && s.seen[0] === 'bb'; })());
   F.requestNotes(S('c'), '', rroot);
-  ok('...seen by all once every live peer reads — a blocker reached everyone, without asking',
+  ok('...seen by all once every live peer reads — an alarm reached everyone, without asking',
     RM.seenBy(rboard, bn).seen.length === 2);
   // audit #192 Q2: recipients is the CURRENT live set, which shrinks as chairs close, so a bare
   // "all" would overclaim. The receipt must say "all N LIVE" and name who signed — never an absolute
@@ -7315,7 +7548,7 @@ try {
   const lone = fs.mkdtempSync(path.join(os.tmpdir(), 'rcpt1-'));
   fs.mkdirSync(path.join(lone, '.git'));
   const lb = RM.resolveBoard(lone); RM.ensureBoard(lb);
-  const ln = RM.appendNote(lb, { from: 'solo', to: null, kind: 'blocker', body: 'nobody here' });
+  const ln = RM.appendNote(lb, { from: 'solo', to: null, kind: 'alarm', body: 'nobody here' });
   ok('a broadcast with no live peer reports zero recipients (never a false "all seen")',
     RM.seenBy(lb, ln).recipients.length === 0 && RM.seenBy(lb, ln).seen.length === 0);
 

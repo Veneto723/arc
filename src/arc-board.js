@@ -227,7 +227,7 @@ function readClaimFile(board, role) {
 // rewrite history, you append a correction) — but nothing linked the correction to what it
 // corrected, so a reader could act on a claim its own author had publicly retracted. Now they
 // are linked, and the retracted note is marked wherever it is read.
-const KINDS = ['info', 'request', 'result', 'correction', 'blocker', 'contract'];
+const KINDS = ['info', 'request', 'result', 'correction', 'alarm', 'contract'];
 // `decision` was this kind's first name, and notes carrying it EXIST on disk (whalephone posted 3).
 // The rename is not a free edit: normalizeKind degrades an unknown kind to `info`, so without this
 // alias those notes would silently drop from rank 2 to rank 5 — a clause that binds two roles
@@ -239,11 +239,17 @@ const KINDS = ['info', 'request', 'result', 'correction', 'blocker', 'contract']
 // literal, normalizeKind('__proto__') returned an object, not a string. Reachable through `arc
 // import`, which merges lines from another machine verbatim — the same door seq/ord are already
 // hardened against. A null-prototype map has no inherited keys, so only real aliases resolve.
-const KIND_ALIASES = Object.assign(Object.create(null), { decision: 'contract' });
+// `blocker` was this kind's first name too, and 36 notes carry it on the two live boards. It was
+// renamed to `alarm` when the separate `arc alarm` verb was folded into the kind: one word for the
+// thing, one tunnel to send it. Without this shim those 36 notes would degrade to `info` — rank 0 to
+// rank 5 — so a stop-the-line would re-file itself as routine news, silently, on every read.
+// SECOND shim in this map for the same reason as the first: read the old spelling, always write the
+// new one. (An alias is cheap; a ledger that lies about what it was told is not.)
+const KIND_ALIASES = Object.assign(Object.create(null), { decision: 'contract', blocker: 'alarm' });
 const DEFAULT_KIND = 'info';
-// How loudly a kind wants to be read. Used to RANK the injection digest: a blocker or a
+// How loudly a kind wants to be read. Used to RANK the injection digest: an alarm or a
 // retraction must never sit below routine news.
-const KIND_RANK = { blocker: 0, correction: 1, contract: 2, request: 3, result: 4, info: 5 };
+const KIND_RANK = { alarm: 0, correction: 1, contract: 2, request: 3, result: 4, info: 5 };
 
 function normalizeKind(k) {
   const s = String(k || '').trim().toLowerCase();
@@ -432,8 +438,8 @@ function appendNote(board, note) {
     else if (rec.supersedes) rec.kind = 'correction';
     else if (rec.replyTo) rec.kind = 'result';
   }
-  // A blocker or a retraction is high-priority by nature — don't make callers remember.
-  if (rec.kind === 'blocker' || rec.kind === 'correction') rec.priority = 'high';
+  // An alarm or a retraction is high-priority by nature — don't make callers remember.
+  if (rec.kind === 'alarm' || rec.kind === 'correction') rec.priority = 'high';
   // A CONTRACT CLAUSE THAT RETRACTS ANOTHER IS ALSO HIGH. Keeping the thread coherent (above) costs
   // the auto-HIGH a `correction` would have carried — and a revised clause is precisely the note a
   // peer must not miss, because it is already building against the version being withdrawn. So the

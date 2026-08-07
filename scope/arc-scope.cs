@@ -981,7 +981,7 @@ namespace ArcScope {
     // One NOTE FLOW row — shared by the inline list and the show-all window so they cannot drift.
     static UIElement FlowNote(object w) {
       bool op = Bo(w, "open");                                  // still awaiting an answer
-      // A BLOCKER or CORRECTION is flagged in the list too, not only on the graph — the list is where
+      // A ALARM or CORRECTION is flagged in the list too, not only on the graph — the list is where
       // a reader scrolls, and an alert that only shows on an edge is missed whenever nothing is owed.
       bool alert = S(w, "priority") == "high";
       string kind = S(w, "kind");
@@ -989,7 +989,7 @@ namespace ArcScope {
       if (to.Length == 0) to = "all";                           // a broadcast has no single recipient
       string meta = "#" + I(w, "seq") + "  ·  " + Ago(S(w, "ts"));
       // A CONTRACT MUST SAY SO IN THE FLOW. The label was gated on `alert`, i.e. priority == high —
-      // and only `blocker` and `correction` are auto-high, so a contract scrolled past looking exactly
+      // and only `alarm` and `correction` are auto-high, so a contract scrolled past looking exactly
       // like routine chatter. Reported by the operator against a real note whose body opened
       // "# CONTRACT — the notice card's action button needs a SECOND meaning": the note was a
       // perfectly-formed contract and only the RENDER hid it.
@@ -998,7 +998,7 @@ namespace ArcScope {
       // allowed to DO, which is exactly what must never be missed while scrolling. request/result are
       // the ordinary traffic of the board — labelling those would be noise, and noise is how the
       // label stops being read.
-      bool binding = kind == "contract" || kind == "blocker" || kind == "correction";
+      bool binding = kind == "contract" || kind == "alarm" || kind == "correction";
       if (binding) meta = kind.ToUpperInvariant() + "  ·  " + meta;
       return Note(alert || op, S(w, "from"), "→", to, alert ? ALERT : ACCENT, alert ? ALERT : op ? ALERT : WAIT,
                   meta, S(w, "text"));
@@ -1916,9 +1916,9 @@ namespace ArcScope {
         // wrong" — but an unconsumed note is the board working normally: someone wrote, the recipient
         // has not read it yet. Red is reserved for things that need intervention. The accent blue
         // says "live traffic" without shouting; amber stays for the older/settled case.
-        // ...and THIS is what earns red: a BLOCKER or a CORRECTION, which arc itself stamps
+        // ...and THIS is what earns red: a ALARM or a CORRECTION, which arc itself stamps
         // priority:high (arc-board.js:326). A correction retracts something already acted on and a
-        // blocker says work has stopped — both are the operator's problem, not just the recipient's.
+        // alarm says work has stopped — both are the operator's problem, not just the recipient's.
         bool alert = false;
         foreach (var w in list) if (S(w, "priority") == "high") { alert = true; break; }
         // OWED TO A CHAIR NOBODY HOLDS. The feed used to drop these entirely, so the panel could
@@ -1940,7 +1940,7 @@ namespace ArcScope {
         // VIOLET because the four existing colours are all spoken for and each already means
         // something a contract is not: accent=in flight, live=healthy, wait=older/settled,
         // alert=intervene.
-        // PRECEDENCE: dead > alert > contract > unseen. A blocker or correction still outranks it —
+        // PRECEDENCE: dead > alert > contract > unseen. An alarm or correction still outranks it —
         // a stop-the-line beats a binding, because one needs you NOW and the other needs you to read
         // it carefully. And dead outranks everything: owed to a chair nobody holds is not live at all.
         bool binding = false;
@@ -2026,7 +2026,7 @@ namespace ArcScope {
         // "it is self-evident" is not a judgement the person who drew it can make. A violet wire is a
         // new word too, and it is only shown when `alert` did not already claim the colour.
         string tipTxt = pr[0] + " → " + pr[1] + "  ·  " + EdgeLabel(edgeNotes, 400)
-                      + (alert ? "   (blocker/correction)" : "")
+                      + (alert ? "   (alarm/correction)" : "")
                       + (!alert && !dead && binding
                           ? "\nviolet = a CONTRACT in flight: a seam being agreed, not just news. It stays"
                             + "\nowed until every bound role declares its own half.  arc notes --kind contract"
