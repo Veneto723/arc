@@ -1721,6 +1721,35 @@ section('verbosity log (measure every reply; say nothing about it)');
         r && !('wall' in r), JSON.stringify(r));
       ok('the log lands under .arc/, which is already gitignored — it never travels by git',
         V.logPath(c).replace(/\\/g, '/').endsWith('/.arc/verbosity.jsonl'), V.logPath(c));
+
+      // ONE PROJECT, ONE .arc. The first cut joined '.arc' onto the raw cwd, so a session running
+      // from a SUBDIRECTORY built a second board dir beside the real one — observed live:
+      // E:\whalephone\backend\.arc appeared next to E:\whalephone\.arc and the rows for one project
+      // split across two files. resolveBoard already walks up to the repo root; this asserts the log
+      // asks it rather than inventing a second answer.
+      {
+        const root = fs.mkdtempSync(path.join(TMP, 'vroot-'));
+        spawnSync('git', ['init', '-q'], { cwd: root });
+        const sub = path.join(root, 'backend', 'src');
+        fs.mkdirSync(sub, { recursive: true });
+        ok('a session in a SUBDIRECTORY logs to the repo root, not beside itself',
+          V.logPath(sub) === V.logPath(root), `${V.logPath(sub)}  vs  ${V.logPath(root)}`);
+        V.record(mkT('go', 'a reply long enough to clear the forty-character narration floor'), sub);
+        ok('...so no second .arc is ever created under the subdirectory',
+          !fs.existsSync(path.join(root, 'backend', '.arc')) && !fs.existsSync(path.join(sub, '.arc')));
+        ok('...and the row is readable from the ROOT, which is the only place it lives',
+          V.rows(root).length === 1 && V.rows(sub).length === 1, `root=${V.rows(root).length} sub=${V.rows(sub).length}`);
+      }
+      // Outside a repo there is nothing to walk up to, and a local file is the only option — but it
+      // must still not throw on the prompt path.
+      {
+        const bare = fs.mkdtempSync(path.join(TMP, 'vbare-'));
+        // Compared case-INSENSITIVELY: resolveBoard normalizes the drive and path case, so an exact
+        // string match here fails on a correct path — Windows, one filesystem, two spellings.
+        const norm = (p) => p.replace(/\\/g, '/').toLowerCase();
+        ok('outside a git repo it still resolves under the cwd rather than throwing',
+          norm(V.logPath(bare)) === norm(bare) + '/.arc/verbosity.jsonl', V.logPath(bare));
+      }
       ok('...and it is readable back as one row', V.rows(c).length === 1);
     }
 

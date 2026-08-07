@@ -94,7 +94,23 @@ function lastExchange(transcriptPath) {
 // ---- the log -----------------------------------------------------------------------------------
 // Machine-local and per-project, next to the board: `.arc/` is already gitignored at the root, so
 // this never travels by git - the same rule the ledger lives under.
-function logPath(cwd) { return path.join(cwd || process.cwd(), '.arc', 'verbosity.jsonl'); }
+//
+// !! THE PATH IS THE BOARD'S, NOT THE CWD'S. The first cut joined '.arc' onto the raw cwd, which is
+// wrong the moment a session runs from a SUBDIRECTORY: a session in E:\whalephone\backend created a
+// second E:\whalephone\backend\.arc alongside the real E:\whalephone\.arc, and the rows for one
+// project landed in two places. resolveBoard already walks up to the repo root - it is what the
+// ledger, the roles and the cursors all use - so ask it instead of inventing a second answer. One
+// project, one .arc.
+// Falls back to the cwd only when there is no board at all (no git repo), where there is nothing to
+// walk up to and a local file is the only option.
+function logPath(cwd) {
+  const base = cwd || process.cwd();
+  try {
+    const board = require('./arc-board').resolveBoard(base);
+    if (board && board.planDir) return path.join(path.dirname(board.planDir), 'verbosity.jsonl');
+  } catch { /* no repo here - fall through */ }
+  return path.join(base, '.arc', 'verbosity.jsonl');
+}
 
 // The hook fires once per prompt, but a prompt does not guarantee a NEW reply behind it (a board
 // delivery, a retry, an interrupted turn). Logging the same reply twice would silently double-weight
