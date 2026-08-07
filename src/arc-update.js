@@ -56,7 +56,30 @@ async function latestRelease(timeoutMs = 2500) {
   };
   const res = await getJson(opts, timeoutMs);
   if (!res || !res.tag_name) return null;
-  return { tag: String(res.tag_name), tarball: res.tarball_url || null, publishedAt: res.published_at || null };
+  // PREFER AN UPLOADED ASSET over the generated tarball. Both unpack the same (doRelease builds the
+  // asset with `git archive --prefix=arc-<v>/`, matching what GitHub's tarball produces), but only
+  // the asset carries a content-length — the generated one is built on the fly and served chunked,
+  // so a downloader behind it can show bytes and a rate but never a percentage or an eta.
+  // `size` comes back in the API response, so it is passed along too: the bar can then draw from the
+  // first byte rather than waiting on the response headers.
+  const a = assetOf(res);
+  return {
+    tag: String(res.tag_name),
+    tarball: (a && a.url) || res.tarball_url || null,
+    size: (a && a.size) || null,
+    fromAsset: !!a,
+    publishedAt: res.published_at || null,
+  };
+}
+
+// The release's own .tgz, if doRelease managed to attach one. Named arc-<version>.tgz; matched by
+// shape rather than by exact name so a hand-uploaded artifact still counts, and skipped unless it is
+// `uploaded` — GitHub reports an asset the moment the upload STARTS, and a half-uploaded file would
+// download as a truncated archive.
+function assetOf(res) {
+  const list = Array.isArray(res && res.assets) ? res.assets : [];
+  const hit = list.find((x) => x && x.state === 'uploaded' && /\.(tgz|tar\.gz)$/i.test(String(x.name || '')) && x.browser_download_url);
+  return hit ? { url: String(hit.browser_download_url), size: Number(hit.size) || null, name: String(hit.name) } : null;
 }
 
 // A bounded GET that resolves to parsed JSON or null — never rejects, so the launch path can't be
@@ -80,6 +103,61 @@ function getJson(opts, timeoutMs) {
   });
 }
 
+// ---- the download, with a bar that says something --------------------------------------------
+// The transfer moved from `curl -#` to Node's own https for ONE reason: to know the byte count. curl
+// draws its own bar and tells us nothing, so the columns pip has — size, rate, eta — were not
+// reachable behind it. https is a built-in and this file already used it for the release check, so
+// this costs no dependency. CURL STAYS as the fallback: it handles proxy env, corporate TLS and
+// redirect quirks that this does not, and a prettier bar is not worth a download that fails.
+//
+// Redirects are followed BY HAND (GitHub hands a release tarball off to an S3 host), capped, and the
+// hop count is bounded — a redirect loop on the launch path would be a hang, and nothing here may
+// hang. Same contract as the rest of this file: resolve to a failure, never throw.
+const MAX_REDIRECTS = 5;
+
+function httpDownload(url, dest, opts = {}) {
+  const P = opts.progress || null;
+  const timeoutMs = opts.timeoutMs || 120_000;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+    const go = (u, hops) => {
+      if (hops > MAX_REDIRECTS) return finish({ ok: false, message: 'too many redirects' });
+      let req;
+      try {
+        req = https.get(u, { headers: { 'user-agent': 'arc-update' } }, (r) => {
+          const code = r.statusCode || 0;
+          if (code >= 300 && code < 400 && r.headers.location) {
+            r.resume();
+            return go(new URL(r.headers.location, u).toString(), hops + 1);
+          }
+          if (code !== 200) { r.resume(); return finish({ ok: false, message: `HTTP ${code}` }); }
+
+          // content-length is ABSENT on a chunked response — which is exactly what GitHub's generated
+          // tarball is. Only OVERWRITE the total when the header actually carries one: the caller may
+          // have seeded a size from the release API, and clearing it here would drop a bar that could
+          // have been drawn back to the spinner. Absent header + no seed still means null, so the bar
+          // shows its unknown-size form rather than a permanent 0%.
+          const len = parseInt(r.headers['content-length'] || '', 10);
+          if (P && Number.isFinite(len) && len > 0) P.setTotal(len);
+
+          let out;
+          try { out = fs.createWriteStream(dest); } catch (e) { r.destroy(); return finish({ ok: false, message: String(e.message || e) }); }
+          r.on('data', (c) => { if (P) P.tick(c.length); });
+          r.pipe(out);
+          out.on('error', (e) => { try { r.destroy(); } catch {} finish({ ok: false, message: String(e.message || e) }); });
+          out.on('finish', () => finish({ ok: true }));
+          r.on('error', (e) => finish({ ok: false, message: String(e.message || e) }));
+        });
+      } catch (e) { return finish({ ok: false, message: String(e.message || e) }); }
+      req.on('error', (e) => finish({ ok: false, message: String(e.message || e) }));
+      req.setTimeout(timeoutMs, () => { try { req.destroy(); } catch {} finish({ ok: false, message: 'timed out' }); });
+    };
+    go(url, 0);
+  });
+}
+
 // ---- the launch-time check (cached, fail-safe) -------------------------------
 // Returns { available, latest, installed, declined } — available=true only when a release is
 // strictly newer than what's installed. Reads the network at most once per TTL; otherwise serves the
@@ -94,19 +172,22 @@ async function checkForUpdate(opts = {}) {
   const fresh = !opts.force && cache.checkedAt && now - cache.checkedAt < CHECK_TTL_MS;
   let latest = cache.latest || null;
   let tarball = cache.tarball || null;   // returned so callers don't re-fetch (audit #199 Q1)
+  // Cached alongside the url, so a within-TTL launch still knows the size and draws a real bar
+  // rather than dropping to the spinner just because it did not re-hit the network.
+  let size = cache.size || null;
   if (!fresh) {
     let got = null;
     try { got = await fetch(); } catch {}
     if (got && got.tag) {
-      latest = got.tag; tarball = got.tarball || null;
-      writeCache(cp, { ...cache, checkedAt: now, latest, tarball });
+      latest = got.tag; tarball = got.tarball || null; size = got.size || null;
+      writeCache(cp, { ...cache, checkedAt: now, latest, tarball, size });
     } else {
       // A failed check must not retry on every single launch — stamp the attempt, keep the old tag.
       writeCache(cp, { ...cache, checkedAt: now });
     }
   }
   const available = !!latest && cmpVer(latest, installed) > 0;
-  return { available, latest, installed, tarball, declined: cache.declined === latest };
+  return { available, latest, installed, tarball, size, declined: cache.declined === latest };
 }
 
 function writeCache(cp, obj) {
@@ -124,7 +205,7 @@ function recordDecline(version, cachePath) {
 // Pulls a PUBLISHED artifact (never your working tree) and runs its own install.ps1, which is
 // idempotent. curl + tar ship with Windows 11, so no extra dependency and no `gh` needed. Every
 // step is checked; a failure at any point leaves the current install untouched and returns { ok:false }.
-function downloadAndInstall(tag, tarball, opts = {}) {
+async function downloadAndInstall(tag, tarball, opts = {}) {
   const log = opts.log || ((s) => process.stdout.write(s + '\n'));
   if (!tarball) return { ok: false, message: 'no tarball url for the release' };
   // PIN the Windows built-ins. Bare `tar`/`curl` can resolve to Git Bash's MSYS tar, which reads a
@@ -137,17 +218,30 @@ function downloadAndInstall(tag, tarball, opts = {}) {
   const tgz = path.join(work, 'arc.tgz');
   const ex = path.join(work, 'x');
   try {
-    log(`[arc] downloading ${tag}…`);
-    // `-#` is curl's PROGRESS BAR; the old `-sSL` had `-s` (silent), which suppressed it entirely,
-    // so a slow download looked frozen. The bar goes to stderr, so stderr must be INHERITED (a
-    // captured pipe shows nothing until the process ends) — which also means a curl error prints
-    // straight to the user, so we key the failure off the exit status rather than a captured string.
-    const showBar = !opts.quiet && process.stderr.isTTY;
-    const dl = showBar
-      ? spawnSync(CURL, ['-#', '-fL', '--max-time', '120', '-o', tgz, tarball], { stdio: ['ignore', 'ignore', 'inherit'], timeout: 130_000 })
-      : spawnSync(CURL, ['-sSL', '--fail', '--max-time', '120', '-o', tgz, tarball], { encoding: 'utf8', timeout: 130_000 });
-    if (dl.status !== 0 || !fs.existsSync(tgz) || fs.statSync(tgz).size < 1000) {
-      return { ok: false, message: `download failed${dl.stderr ? ': ' + String(dl.stderr).trim() : ''}` };
+    // NODE FIRST, FOR THE BAR. curl draws its own '#' row and reports nothing back, so size, rate
+    // and eta were simply not reachable behind it. Streaming it here makes the byte count ours.
+    const P = require('./arc-progress');
+    // The size from the release API seeds the bar, so it draws from the FIRST byte instead of
+    // waiting on response headers — and covers the case where the headers never carry one.
+    const bar = P.Bar(`[arc] ${tag}`, { quiet: opts.quiet, stream: opts.stream, total: opts.size || null });
+    if (!bar.enabled) log(`[arc] downloading ${tag}…`);        // no TTY: one line, not 500 fragments
+    let res = await httpDownload(tarball, tgz, { progress: bar, timeoutMs: 120_000 });
+    bar.stop(res.ok);
+    const short = () => !fs.existsSync(tgz) || fs.statSync(tgz).size < 1000;
+
+    // CURL IS STILL THE FALLBACK, and that is the point of doing it in this order rather than
+    // replacing it. curl carries proxy env, corporate TLS roots and redirect quirks that the code
+    // above does not, and a prettier bar is not worth a download that fails. Its own '#' bar is fine
+    // here — by the time it runs, working beats pretty.
+    if (!res.ok || short()) {
+      log(`[arc] direct download failed (${res.message || 'short file'}) — retrying with curl…`);
+      const showBar = !opts.quiet && process.stderr.isTTY;
+      const dl = showBar
+        ? spawnSync(CURL, ['-#', '-fL', '--max-time', '120', '-o', tgz, tarball], { stdio: ['ignore', 'ignore', 'inherit'], timeout: 130_000 })
+        : spawnSync(CURL, ['-sSL', '--fail', '--max-time', '120', '-o', tgz, tarball], { encoding: 'utf8', timeout: 130_000 });
+      if (dl.status !== 0 || short()) {
+        return { ok: false, message: `download failed${dl.stderr ? ': ' + String(dl.stderr).trim() : ''}` };
+      }
     }
     fs.mkdirSync(ex, { recursive: true });
     const un = spawnSync(TAR, ['-xzf', tgz, '-C', ex], { encoding: 'utf8', timeout: 60_000 });
@@ -333,7 +427,37 @@ function doRelease(bump, opts = {}) {
   if (git(['push', 'origin', tag]).status !== 0) return { ok: false, message: 'tag push failed' };
   const rel = spawnSync('gh', ['release', 'create', tag, '--repo', REPO, '--title', `arc ${tag}`, '--generate-notes'], { encoding: 'utf8' });
   if (rel.status !== 0) return { ok: false, message: `pushed ${tag}, but gh release failed: ${(rel.stderr || '').trim()}` };
-  return { ok: true, version: tag, message: `released ${tag}` };
+
+  // ATTACH A REAL ASSET, so the download can show a real progress bar.
+  // GitHub's auto-generated `tarball_url` is built ON THE FLY and served chunked — measured against
+  // codeload.github.com: no content-length, transfer-encoding: chunked. So a downloader cannot know
+  // the size, cannot compute a percentage, and cannot show an eta. That is not a bug in the bar; it
+  // is the server honestly saying it does not know either. An UPLOADED asset is a stored file and
+  // comes back with a content-length, which is the whole difference.
+  //
+  // Built with `git archive` FROM THE TAG, never from the working tree — same doctrine as the rest
+  // of this file: a release is a published artifact, not whatever happens to be on disk. The prefix
+  // matches what downloadAndInstall expects to unpack (one top dir holding install.ps1 +
+  // package.json), so the asset and the fallback tarball unpack identically.
+  //
+  // FAILURE HERE IS NOT A FAILED RELEASE. The tag is pushed and the Release exists; a missing asset
+  // only costs the next downloader its percentage, because the update path falls back to
+  // tarball_url. Say so and return ok.
+  const assetName = `arc-${next}.tgz`;
+  const asset = path.join(os.tmpdir(), assetName);
+  let assetNote = '';
+  try {
+    const ar = spawnSync('git', ['-C', repo, 'archive', '--format=tar.gz', `--prefix=arc-${next}/`, '-o', asset, tag], { encoding: 'utf8' });
+    if (ar.status !== 0 || !fs.existsSync(asset)) throw new Error((ar.stderr || 'git archive failed').trim());
+    const up = spawnSync('gh', ['release', 'upload', tag, asset, '--repo', REPO, '--clobber'], { encoding: 'utf8' });
+    if (up.status !== 0) throw new Error((up.stderr || 'gh release upload failed').trim());
+    assetNote = ` (+ ${assetName}, ${(fs.statSync(asset).size / 1e6).toFixed(1)} MB)`;
+  } catch (e) {
+    assetNote = ` — asset upload skipped (${String(e.message || e).split('\n')[0]}); downloads fall back to the generated tarball`;
+  } finally {
+    try { fs.unlinkSync(asset); } catch {}
+  }
+  return { ok: true, version: tag, message: `released ${tag}${assetNote}` };
 }
 
-module.exports = { installedVersion, cmpVer, latestRelease, checkForUpdate, recordDecline, downloadAndInstall, doRelease, REPO, checkCachePath, versionMarkerPath, liveOthers, liveScope, killOthers, isArcScopePath };
+module.exports = { assetOf, installedVersion, cmpVer, latestRelease, checkForUpdate, recordDecline, downloadAndInstall, httpDownload, doRelease, REPO, checkCachePath, versionMarkerPath, liveOthers, liveScope, killOthers, isArcScopePath };

@@ -1391,6 +1391,119 @@ section('roster activity (a peer can see whether an answer is coming)');
     fs.rmSync(rrepo, { recursive: true, force: true });
   } catch (e) { ok('roster activity works', false, e.message + '\n' + (e.stack || '')); }
 }
+// ---- the release ASSET, which is what makes a real bar possible ---------------------------------
+// MEASURED, not assumed: GitHub's generated tarball_url redirects to codeload.github.com, which
+// answers `transfer-encoding: chunked` with NO content-length — it builds the archive on the fly and
+// genuinely does not know the size. So a downloader behind it can show bytes and a rate but never a
+// percentage or an eta. An UPLOADED asset is a stored file and comes back with a length. doRelease
+// therefore attaches one (`git archive` FROM THE TAG, never the working tree), and latestRelease
+// prefers it.
+section('release asset (a stored file has a size; a generated one does not)');
+try {
+  const U = require(path.join(SRC, 'arc-update.js'));
+  const rel = (assets) => ({ tag_name: 'v9.9.9', tarball_url: 'https://api.github.com/gen/tarball', assets });
+
+  ok('an uploaded .tgz asset is picked up, with its size',
+    (() => { const a = U.assetOf(rel([{ name: 'arc-9.9.9.tgz', state: 'uploaded', size: 5568226, browser_download_url: 'https://x/a.tgz' }])); return a && a.size === 5568226; })());
+  // GitHub lists an asset the moment the upload STARTS. Downloading one mid-upload yields a
+  // truncated archive that extracts to nothing — a failed update that reports success.
+  ok('a half-uploaded asset is IGNORED — a truncated archive is worse than no asset',
+    U.assetOf(rel([{ name: 'arc-9.9.9.tgz', state: 'uploading', size: 12, browser_download_url: 'https://x/a.tgz' }])) === null);
+  ok('a non-archive asset is ignored', U.assetOf(rel([{ name: 'notes.txt', state: 'uploaded', size: 1, browser_download_url: 'https://x/n.txt' }])) === null);
+  ok('no assets at all is null, not a throw', U.assetOf(rel([])) === null && U.assetOf({}) === null);
+  ok('.tar.gz counts too — the match is on shape, not an exact filename',
+    U.assetOf(rel([{ name: 'arc-9.9.9.tar.gz', state: 'uploaded', size: 9, browser_download_url: 'https://x/a.tar.gz' }])) !== null);
+} catch (e) { ok('release asset selection works', false, e.message + '\n' + (e.stack || '')); }
+
+// ---- the download progress line -----------------------------------------------------------------
+// WHAT IT REPLACED: `curl -#`, a row of '#' and a percentage. It answered "how far" and nothing else
+// — not how big, not how fast, not how long left — so on a slow link it was indistinguishable from a
+// hang, which is the one question a progress bar exists to answer. The operator's verdict: "has no
+// connection with a progress bar."
+// The shape is pip's, read out of its source rather than guessed: fixed column order (description,
+// bar, done/total, rate, "eta", remaining), '━' with a '╸' leading edge, ASCII '-' fallback, and NO
+// BAR AT ALL when the size is unknown, because a bar without a denominator is a lie. npm 11 was the
+// other tool named and it ships no download bar at all, so there was nothing to take from it.
+// Everything here is a pure function of the numbers, so the layout is tested with no terminal.
+section('download progress line (pip\'s shape, arc\'s numbers)');
+try {
+  const G = require(path.join(SRC, 'arc-progress.js'));
+  const MB = 1000 * 1000;
+
+  ok('bytes read like pip: one decimal past kB', G.fmtBytes(1.26 * MB) === '1.3 MB' && G.fmtBytes(20000) === '20.0 kB' && G.fmtBytes(512) === '512 B',
+    [G.fmtBytes(1.26 * MB), G.fmtBytes(20000), G.fmtBytes(512)].join(' '));
+  ok('eta reads like pip: h:mm:ss', G.fmtEta(4) === '0:00:04' && G.fmtEta(3725) === '1:02:05', G.fmtEta(3725));
+  ok('an unknowable eta is dashes, never a fabricated 0', G.fmtEta(Infinity) === '-:--:--' && G.fmtEta(-1) === '-:--:--');
+
+  // The leading edge is what makes it read as MOVING rather than as a filled block — a stalled
+  // transfer must look different from a slow one.
+  ok('the bar has a distinct leading edge while incomplete', /╸/.test(G.bar(0.5, 20, false)));
+  ok('...and none once complete — a finished bar is solid', !/╸/.test(G.bar(1, 20, false)) && G.bar(1, 20, false).length === 20);
+  ok('the ascii fallback uses no box-drawing at all',
+    !/[━╸]/.test(G.bar(0.5, 20, true)) && /=/.test(G.bar(0.5, 20, true)), G.bar(0.5, 20, true));
+
+  // --- THE FAILURE THE LADDER EXISTS FOR ---------------------------------------------------------
+  // A progress line that overflows wraps, and a wrapped line leaves a trail of half-drawn bars up
+  // the scrollback — worse than no bar. Checked at every width, not a sampled few.
+  {
+    let worst = null;
+    for (let c = 12; c <= 200; c++) {
+      const s = G.render({ label: '[arc] v1.7.0', done: 1.26 * MB, total: 2.8 * MB, rate: 410000, columns: c });
+      if (s.length >= c) { worst = `${c} cols -> ${s.length} chars`; break; }
+    }
+    ok('the line NEVER exceeds the terminal width, at any width from 12 to 200', worst === null, worst);
+  }
+  ok('a wide pane keeps every column', /eta/.test(G.render({ label: 'x', done: 1, total: 2, rate: 1, columns: 120 })));
+  // pip narrows by dropping its rightmost columns; the bar is the last thing to go, not the first.
+  {
+    const at = (c) => G.render({ label: '[arc] v1.7.0', done: 1.26 * MB, total: 2.8 * MB, rate: 410000, columns: c });
+    ok('a narrow pane drops the LABEL before the bar — the bar is what the line is for',
+      /━/.test(at(60)) && !/\[arc\]/.test(at(60)), at(60));
+    ok('...then the eta, and still keeps the bar', /━/.test(at(50)) && !/eta/.test(at(50)), at(50));
+    ok('...then the rate, and still keeps the bar', /━/.test(at(30)) && !/kB\/s/.test(at(30)), at(30));
+    ok('...and when nothing fits, the amount survives and still fits', at(20).length < 20 && /\//.test(at(20)), at(20));
+  }
+
+  // --- unknown size: pip draws no bar, and neither do we ------------------------------------------
+  {
+    const u = G.render({ label: 'x', done: 0.9 * MB, total: null, rate: 3 * MB, elapsed: 4200, columns: 100 });
+    ok('an unknown total draws NO bar — a bar with no denominator is a lie', !/━|=/.test(u), u);
+    ok('...but still shows bytes and rate, so a stalled transfer is visible', /900\.0 kB/.test(u) && /MB\/s/.test(u), u);
+    const frames = [0, 1, 2, 3].map((f) => G.render({ label: '', done: 1, total: null, rate: 1, columns: 100, frame: f }));
+    ok('...and the spinner actually advances, so it cannot be mistaken for a freeze',
+      new Set(frames).size === 4, JSON.stringify(frames));
+  }
+
+  // --- the live Bar: silent unless there is a TTY to draw on --------------------------------------
+  // A progress line in a piped log or a CI job is thousands of \r-separated fragments nobody reads.
+  {
+    const sink = { isTTY: false, columns: 100, out: '', write(s) { this.out += s; } };
+    const b = G.Bar('x', { stream: sink });
+    b.setTotal(100); b.tick(50); b.stop(true);
+    ok('no TTY, no output — not one fragment', b.enabled === false && sink.out === '', JSON.stringify(sink.out));
+
+    const tty = { isTTY: true, columns: 100, out: '', write(s) { this.out += s; } };
+    let clock = 0;
+    const b2 = G.Bar('[arc] v1.7.0', { stream: tty, now: () => clock, ascii: true });
+    b2.setTotal(1000);
+    for (let i = 0; i < 50; i++) { clock += 10; b2.tick(20); }     // 500ms of 10ms chunks
+    const painted = (tty.out.match(/\r/g) || []).length;
+    ok('a TTY gets a throttled redraw, not one per chunk (50 chunks -> a handful of frames)',
+      painted > 0 && painted <= 6, `${painted} frames for 50 chunks`);
+    tty.out = '';
+    b2.stop(true);
+    ok('the final frame is FORCED to 100%, so the line never ends at a stale sample',
+      /1\.0 kB\/1\.0 kB/.test(tty.out), JSON.stringify(tty.out));
+    ok('...and it ends with a newline, so the next output starts clean', /\n$/.test(tty.out));
+    ok('...and each frame erases to end-of-line, so a shorter line leaves no tail', /\x1b\[K/.test(tty.out));
+  }
+
+  // --- the glyph choice is a TERMINAL question, not a preference ----------------------------------
+  ok('a plain console gets ASCII', G.asciiOnly({}) === true);
+  ok('Windows Terminal gets the box-drawing glyphs', G.asciiOnly({ WT_SESSION: '1' }) === false);
+  ok('ARC_PROGRESS_ASCII forces ASCII anywhere', G.asciiOnly({ WT_SESSION: '1', ARC_PROGRESS_ASCII: '1' }) === true);
+} catch (e) { ok('download progress line works', false, e.message + '\n' + (e.stack || '')); }
+
 // ---- a "ready" toast must not fire when a note is still undelivered -----------------------------
 // THE FALSE POSITIVE, found by the operator and then measured: on Stop, arc-stop-hook is wired ahead
 // of arc-notify. It blocks the stop to hand over a note that landed mid-turn, so the session goes
@@ -7768,12 +7881,26 @@ try {
   // download cannot happen. A bogus loopback url refuses immediately, so this stays fast and offline.
   // (The re-nag bug was a FAILED update leaving no memory; the contract that makes the fix safe is
   // that a failed update reports ok:false loudly rather than throwing or claiming success.)
+  // downloadAndInstall went ASYNC when the transfer moved into Node — the byte count had to be ours
+  // to draw a real bar, and curl would not give it up. So it is awaited in a child, the same shape
+  // the checkForUpdate cases above use, because this suite's body is synchronous.
   {
-    const r = U.downloadAndInstall('v9.9.9', 'http://127.0.0.1:9/nope.tgz', { quiet: true, log: () => {} });
-    ok('downloadAndInstall fails safe on an unreachable tarball (ok:false, no throw, no install)',
-      r && r.ok === false && typeof r.message === 'string');
+    const dchild = [
+      `const U=require(${JSON.stringify(path.join(SRC, 'arc-update.js').replace(/\\/g, '/'))});`,
+      `const t=(c,m)=>{if(!c){console.error('FAIL '+m);process.exit(1);}};`,
+      `(async()=>{`,
+      `  const r=await U.downloadAndInstall('v9.9.9','http://127.0.0.1:9/nope.tgz',{quiet:true,log:()=>{}});`,
+      `  t(r&&r.ok===false&&typeof r.message==='string','unreachable tarball must fail safe');`,
+      `  const n=await U.downloadAndInstall('v9.9.9',null);`,
+      `  t(n.ok===false,'null tarball must be refused before any work');`,
+      `  process.exit(0);`,
+      `})().catch(e=>{console.error('THREW '+e.message);process.exit(1);});`,
+    ].join('\n');
+    const df = path.join(TMP, 'arc-dl-async.js'); fs.writeFileSync(df, dchild);
+    const dr = spawnSync(process.execPath, [df], { encoding: 'utf8', timeout: 20000 });
+    ok('downloadAndInstall fails safe on an unreachable tarball, and refuses a null one (ok:false, no throw)',
+      dr.status === 0, (dr.stdout || '') + (dr.stderr || ''));
   }
-  ok('a null tarball is refused before any work', U.downloadAndInstall('v9.9.9', null).ok === false);
 
   // liveOthers feeds a FORCE-KILL, so a wrong pid is unrecoverable. It must prove GENUINE identity
   // (started before its marker), never target this process (by session id AND by pid, even through an
@@ -7870,8 +7997,6 @@ try {
   const fork = mkrepo('https://github.com/Veneto723/arc-fork.git', '1.0.0');
   ok('...and refuses a same-owner DIFFERENTLY-NAMED clone (Veneto723/arc-fork must NOT pass; the real arc.git did, above)',
     U.doRelease('patch', { cwd: fork, dryRun: true }).ok === false);
-  ok('downloadAndInstall refuses with no tarball url (never a half-install)',
-    U.downloadAndInstall('v9', null).ok === false);
   for (const d of [good, wrong, fork]) fs.rmSync(d, { recursive: true, force: true });
 } catch (e) { ok('arc-update', false, e.message + '\n' + (e.stack || '')); }
 

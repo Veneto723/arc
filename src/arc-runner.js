@@ -1562,7 +1562,7 @@ async function maybeOfferUpdate(originalArgs) {
     if (!yes) { U.recordDecline(info.latest); return; }
     await clearLocksForUpgrade(U);
     process.stdout.write(`[arc] upgrading to ${info.latest}…\n`);
-    const r = U.downloadAndInstall(info.latest, info.tarball);
+    const r = await U.downloadAndInstall(info.latest, info.tarball, { size: info.size });
     process.stdout.write(`[arc] ${r.ok ? '' : 'update failed — '}${r.message}\n`);
     if (r.ok) {
       const re = spawnSync(process.execPath, [process.argv[1], ...(originalArgs || [])], { stdio: 'inherit', env: process.env });
@@ -1584,7 +1584,7 @@ async function cmdUpdate() {
   if (!info.tarball) { process.stderr.write('[arc] could not resolve the release tarball.\n'); process.exit(1); }
   await clearLocksForUpgrade(U);
   process.stdout.write(`[arc] upgrading ${info.installed} → ${info.latest}…\n`);
-  const r = U.downloadAndInstall(info.latest, info.tarball);
+  const r = await U.downloadAndInstall(info.latest, info.tarball, { size: info.size });
   process.stdout.write(`[arc] ${r.ok ? '✓ ' : 'FAILED — '}${r.message}\n`);
   process.exit(r.ok ? 0 : 1);
 }
