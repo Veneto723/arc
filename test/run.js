@@ -2045,6 +2045,44 @@ try {
     RM.allNotes(board).some((n) => /login is 202/.test(n.body) && n.from === 'android'));
   ok('`arc note` output leaks no retired colon form', !/arc:(note|role|notes)/.test(post.stdout));
 
+  // THE HEADLINE FIELD — written for the OPERATOR, not the peer. Two real boards run ~45 notes/day
+  // at a ~2,700-char median (~120 KB/day), which no human audits; the body still reaches the peer
+  // whole, and this makes the LEDGER scannable. Derived when omitted because the agents already
+  // write a lead ("ROW 3 IS DONE AND MEASURED — …", "CONSUMED — …") and only lack a slot to stop at.
+  {
+    const T = (body, title) => RM.appendNote(board, { from: 'android', to: 'uiux', body, title }).title;
+    ok('a title is DERIVED from the lead the author already wrote, cut at their own boundary',
+      T('ROW 3 IS DONE AND MEASURED — see my crossing note; the short version is that your fix alone would have regressed it')
+        === 'ROW 3 IS DONE AND MEASURED');
+    // A boundary that yields a bare label is not a headline: "CONSUMED" alone tells the operator
+    // nothing about WHAT, so below the floor the line carries on instead.
+    ok('...but a stub label keeps going, because "CONSUMED" alone says nothing',
+      /^CONSUMED — the collector/.test(T('CONSUMED — the collector reads lastClear and skips re-parking on ANSWERED. Builds.')));
+    ok('an explicit title (programmatic callers only — no shell in between) wins over the derived one',
+      T('ROW 3 IS DONE AND MEASURED — and a lot more text after it', 'row 3 regressed') === 'row 3 regressed');
+    // TRUNCATE, NEVER REJECT: Claude Code shipped the strict form of this exact field and had to undo
+    // it (v2.1.211) because sends failed on the limit. A note that does not post is the worse failure.
+    const long = T('x', 'y'.repeat(400));
+    ok('an over-long title is TRUNCATED, never rejected', long.length <= 72 && long.endsWith('…'));
+    ok('a title is sanitised like the body (untrusted when explicit)',
+      T('x', 'clean‮title') === 'cleantitle');
+    ok('a bodiless, titleless note carries no empty headline', T('') === undefined);
+    // WHERE THE HEADLINE EARNS ITS PLACE. Wherever the FULL body is printed directly beneath it, a
+    // derived headline is a prefix of that body's first line BY CONSTRUCTION — printing both says
+    // the same words twice, which is the cost the field exists to avoid (audit #495 D2). So it is
+    // suppressed there, and shown when it is NOT an echo: an explicit title, or arc-scope, where the
+    // body is hidden behind a caret and this line is the only thing a scan can read.
+    const RS = 'clicli-reader';
+    fs.writeFileSync(path.join(CLAUDE, 'cache', `arc-role-${RS}.json`), JSON.stringify({ board: board.root, role: 'uiux' }));
+    RM.appendNote(board, { from: 'android', to: 'uiux', title: 'row 3 regressed under load',
+      body: 'A completely different opening sentence that the headline is not a prefix of, long enough to render.' });
+    const read = require(path.join(SRC, 'arc-notes.js')).requestNotes(RS, '', repo).message;
+    ok('an EXPLICIT headline reaches the reader — it is not an echo of the body',
+      /▸ row 3 regressed under load/.test(read), read.slice(0, 300));
+    ok('...and a DERIVED headline is suppressed above a full body it would only repeat',
+      !/▸ ROW 3 IS DONE AND MEASURED/.test(read));
+  }
+
   const role = spawnSync(process.execPath, [runner, 'role'], { cwd: repo, env, encoding: 'utf8' });
   ok('`arc role` reports your role', /your role: android/.test(role.stdout));
 

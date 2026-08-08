@@ -77,7 +77,8 @@ const FEED_PORT = parseInt(process.env.ARC_FEED_PORT || '8791', 10);   // next t
 // this counter exists for: without the bump, a feed already running at 18 would keep serving the
 // vulnerable renderer from memory forever, since a detached process never reloads its source. The
 // same lesson as v2/audit #345, re-learned by deploying the fix and finding the live feed unchanged.
-const VERSION = 21;   // 21: contracts[] — the OPEN seams and who is still owed a half (SHAPE change)
+const VERSION = 22;   // 22: flow[].title — the note headline, so scope can show WHAT (SHAPE change)
+                      // 21: contracts[] — the OPEN seams and who is still owed a half (SHAPE change)
                       // 20: pending[] reports CLOSED-chair notes too, flagged `closed` (SHAPE change)
 const COOP_MAX = 20;               // recent reply edges kept per board
 const CONTRACT_MAX = 6;            // OPEN contracts reported per board — a panel, not an archive
@@ -492,6 +493,14 @@ function snapshot() {
       // it unreadable, so the operator renamed the DISPLAY. The wire name stayed because renaming a
       // field is a protocol edit and the field name was never what confused anyone.
       open: openIds.has(n.id),
+      // The one-line headline, so arc-scope's NOTE FLOW can show WHAT a note says instead of only
+      // who sent it — the operator's main surface, and the reason the field exists at all.
+      // DERIVED HERE WHEN THE NOTE HAS NONE, which is every note written before the field existed —
+      // 1,797 of them across two real boards. Stored-only would leave the panel blank until new
+      // traffic accumulated, i.e. the feature would not work on the history the operator actually
+      // wants to scan. Read-time derivation is the same model `seq` and `ord` already use, and it
+      // touches nothing on disk.
+      title: n.title || B.noteTitle(null, n.body) || null,
       text: clip(n.body),
     }));
 

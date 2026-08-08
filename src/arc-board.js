@@ -400,12 +400,61 @@ function sanitizeBody(text) {
   return out;
 }
 
+// THE HEADLINE, AND WHO IT IS FOR. A note's body is written for the PEER, who reads all of it. This
+// field is written for the OPERATOR, who does not: measured on two real boards, 45 notes/day at a
+// ~2,700-char median is ~120 KB/day of prose, and no human audits that. A one-line title makes the
+// ledger scannable without shortening a single note — the peer loses nothing.
+//
+// DERIVED WHEN OMITTED, because the agents are already writing one. Real leads from the whalephone
+// board: "ROW 3 IS DONE AND MEASURED — see my crossing note…", "CONSUMED — the collector reads…".
+// They invent the convention and then run on, because there is no slot to stop at. So take the lead
+// they already wrote: cut at the em dash / colon they already use as the boundary.
+//
+// TRUNCATE, NEVER REJECT. Claude Code shipped the strict version of exactly this field and had to
+// undo it (v2.1.211: "Fixed SendMessage rejecting a long summary — it now truncates instead, so
+// sends no longer fail on a character limit"). A note that fails to post is worse than an ugly title.
+const TITLE_MAX = 72;
+// Below this a boundary cut is a LABEL, not a headline: "✓ done" / "committed" duplicate the `kind`
+// field and say nothing about WHAT. Measured, the floor is the dominant path (59%/56% of notes) and
+// exempting known lead words would regress ~233 notes into bare labels (audit #495 item 4a).
+const MIN_TITLE = 24;
+function noteTitle(explicit, body) {
+  // A STRING OR NOTHING. Coercing whatever arrives persisted "0", "false", "[object Object]" and
+  // "a,b" into an append-only ledger — 0 and false must fall through to derivation, and an object
+  // must never be stringified into a stored field (audit #495 D7).
+  let t = typeof explicit === 'string' ? explicit.trim() : '';
+  if (!t) {
+    const lead = String(body == null ? '' : body).split('\n').find((l) => l.trim()) || '';
+    t = lead.replace(/[*`_#>]/g, '').trim();
+    // the author's own boundary: "<headline> — <detail>" / "<headline>: <detail>". Keep it ONLY when
+    // it still says something: real leads include "CONSUMED —" and "COMMITTED —", and a list row
+    // reading "CONSUMED" tells the operator nothing about WHAT. Below MIN_TITLE the boundary is a
+    // label rather than a headline, so fall through and let the truncation carry more of the line.
+    const m = t.match(/^(.{4,}?)(?:\s+[—–-]+\s+|[.;:]\s+)/);
+    if (m && m[1].trim().length >= MIN_TITLE) t = m[1];
+  }
+  t = sanitizeBody(t).replace(/\s+/g, ' ').trim();      // untrusted when explicit, same as the body
+  if (!t) return undefined;                              // a bodiless note needs no headline
+  if (t.length <= TITLE_MAX) return t;
+  // CUT AT A WORD BOUNDARY, never mid-token. Measured over 1,797 real notes on two boards: a hard
+  // slice left 37% of headlines truncated mid-word; backing up to the last space drops that to 0%
+  // for an average of five characters (audit #495). clipBody two files over already does this, for
+  // the reason it states — "cutting inside a token makes the last thing it sees a lie". This also
+  // removes the only path that could persist a LONE SURROGATE: slicing by UTF-16 code unit can
+  // split an emoji in half, and the ledger is append-only, so a malformed pair would be forever.
+  const cut = t.slice(0, TITLE_MAX - 1);
+  const sp = cut.lastIndexOf(' ');
+  const kept = (sp >= MIN_TITLE ? cut.slice(0, sp) : cut).trimEnd();
+  return kept + '…';
+}
+
 function appendNote(board, note) {
   ensureBoard(board);
   const rec = {
     id: mintId(board),                           // stable identity — survives any merge or reorder
     ts: new Date().toISOString(),
     from: String(note.from || 'unknown'),
+    title: noteTitle(note.title, note.body),     // the OPERATOR's skim line; see noteTitle
     to: note.to == null ? null                                         // null = broadcast to the whole flat
       : (Array.isArray(note.to) ? note.to.map(String) : String(note.to)),   // one role, or a specific subset (array)
     kind: normalizeKind(note.kind),
@@ -1354,6 +1403,7 @@ module.exports = {
   toHas,
   readCursor, readCursorMap, readFloor, writeCursor, unreadFor, markRead, stampSeen, readSeen,
   boardOrigin, machineId, noteOrigin, noteKey, refKey, resolveRef, refSeq, legacyId,
+  noteTitle,
   isAlive, isHolder, procStarts, roleClaim, readClaimFile, claimRole, releaseRole, liveRoles, vacantClaimForRole,
   validConv,
   atomicWriteJson, withLock, vacantClaimForConv,

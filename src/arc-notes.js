@@ -474,6 +474,15 @@ function requestNote(session, arg, cwd, opts) {
   // it always was — these only matter when the note is a request, an answer, or a retraction.
   let rest = m[2];
   let kind = null, replyTo, supersedes, boardArg, bodyFile, mm;
+  // NO --title FLAG, DELIBERATELY. The headline is DERIVED from the note's own lead (arc-board's
+  // noteTitle) and there is no way to pass one here, because a headline has SPACES and this parser
+  // reads a JOINED argv string: the shell strips the quotes long before arc sees them, so
+  // `-t "row 3 regressed"` is indistinguishable from `-t row` plus body text. Built it, tested it on
+  // the shipping surface, and it filed a note titled "row" with the rest leaked into the body —
+  // the same trap as `--body-file` ("THE BODY NEVER RIDES IN ARGV"), which this file already records.
+  // Programmatic callers (postcommit, done, the hooks) still pass `title` straight to appendNote,
+  // where no shell sits in between. An AGENT controls its headline by writing a good lead, which is
+  // the habit worth having anyway — and the ledger says they already do.
   for (;;) {
     if ((mm = rest.match(/^--board[=\s]+(\S+)\s*/i))) { boardArg = mm[1]; rest = rest.slice(mm[0].length); continue; }
     if ((mm = rest.match(/^--body-file[=\s]+(\S+)\s*/i))) { bodyFile = mm[1]; rest = rest.slice(mm[0].length); continue; }
@@ -1118,6 +1127,10 @@ function requestNotes(session, arg, cwd) {
       return `  #${String(x.seq).padStart(3)}  ${ago(x.ts).padStart(4)} ago  ${x.from} → ${x.to || 'all'}` +
         `${x.kind && x.kind !== 'info' ? `  <${x.kind}>` : ''}${x.priority === 'high' ? '  [!]' : ''}` +
         `${x.replyTo ? `  ↩ re #${R.refSeq(all, x.replyTo) ?? '?'}` : ''}` +
+        // `--head` and `all` are the OPERATOR's reads — they hold no chair, so this is the surface
+        // the headline was built for. It was missing here while rendering only in an agent's inbox,
+        // i.e. delivered to the one reader it is documented not to be for (audit #495 D1).
+        headlineLine(x) +
         (dead ? `\n        ⚠ RETRACTED by #${dead.seq} — do NOT act on this` : '') +
         `\n        ${peekBody(String(x.body))}`;
     });
@@ -1159,6 +1172,10 @@ function requestNotes(session, arg, cwd) {
     return `  #${String(n.seq).padStart(3)}  ${ago(n.ts).padStart(4)} ago  from ${n.from}${n.to ? '' : '  (broadcast)'}` +
       `${n.kind && n.kind !== 'info' ? `  <${n.kind}>` : ''}${n.priority === 'high' ? '  [!]' : ''}` +
       `${n.replyTo ? `  ↩ re #${R.refSeq(allU, n.replyTo) ?? '?'}` : ''}${n.supersedes ? `  ⤺ retracts #${R.refSeq(allU, n.supersedes) ?? '?'}${struckRef(allU, n.supersedes)}` : ''}` +
+      // The headline sits AFTER the ↩/⤺ suffixes, never between them and the header: inserted in the
+      // middle it glued arc's retraction metadata — which quotes ANOTHER peer's body — onto what
+      // reads as this author's headline (audit #495 D4).
+      headlineLine(n) +
       (dead ? `\n        ⚠ RETRACTED by #${dead.seq} (${dead.from}) — do NOT act on this; read #${dead.seq}` : '') +
       // A withdrawn note is not work — identify it, do not re-deliver it at working size. Same
       // reasoning as the injection path: the body nobody may act on is what crowds out the
@@ -1367,6 +1384,35 @@ const CLIP_SLACK = 140;
 // cutting inside a token makes the last thing it sees a lie ("gr" is not a word). Back up to the
 // last space, but only if one is CLOSE — a body with no spaces near the cut (a URL, a base64 blob)
 // gets a hard cut rather than losing a third of its preview to word-hunting.
+// A body that is already ONE SHORT LINE is its own headline — rendering both prints it twice.
+// THE HEADLINE LINE — one renderer, used by every surface, because the two rules below are easy to
+// get wrong separately and both were (audit #495 D2/D3/D5).
+//
+// SUPPRESSED WHEN IT WOULD ECHO. The predicate is "does the body's first line already START with
+// this headline", not "is the body short". Derivation produces a prefix of the lead BY CONSTRUCTION,
+// so the old body-length test printed the same words twice on 60-65% of rendered notes while
+// leaving single-line bodies over 96 chars uncovered. This form also lets an EXPLICIT title through
+// on a short body — the postcommit/done case, which the old test silently swallowed.
+//
+// SANITISED AND SINGLE-LINE, because the ledger is not a trusted source. Body lines are re-indented
+// on render; the title used to be interpolated RAW, so a crafted note — `arc import` merges archive
+// lines VERBATIM — could put attacker text at COLUMN 0 in arc's own voice, forging the
+// "[arc board] …" frame that injection() tells the reader only arc may write. Strip the control
+// characters sanitizeBody strips (write-time sanitising cannot cover a line that arrived by import),
+// and flatten newlines, so a title can never leave its indent.
+const TITLE_SAFE = (s) => String(s == null ? '' : s)
+  .replace(/[ --‎‏‪-‮⁦-⁩]/g, ' ')
+  .replace(/\s+/g, ' ').trim();
+function headlineLine(n) {
+  if (!n || !n.title) return '';
+  const t = TITLE_SAFE(n.title);
+  if (!t) return '';
+  const lead = String(n.body == null ? '' : n.body).split('\n').find((l) => l.trim()) || '';
+  const bare = (s) => s.replace(/[*`_#>]/g, '').replace(/\s+/g, ' ').trim();
+  const stem = t.replace(/…$/, '');                       // a truncated headline is a PREFIX of the lead
+  if (stem && bare(lead).startsWith(stem)) return '';      // it would only echo the line beneath it
+  return `\n        ▸ ${t}`;
+}
 function clipBody(body, limit) {
   const s = String(body);
   if (s.length <= limit + CLIP_SLACK) return s;

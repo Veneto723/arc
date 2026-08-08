@@ -920,6 +920,12 @@ namespace ArcScope {
 
     // a clickable note: header row (from -> to ... meta) + a collapsible body with the exact content
     static UIElement Note(bool unseen, string from, string arrow, string to, string fromColor, string toColor, string meta, string body) {
+      return Note(unseen, from, arrow, to, fromColor, toColor, meta, body, "");
+    }
+    // THE HEADLINE ON THE COLLAPSED ROW. Without it a NOTE FLOW row says only who sent what to whom,
+    // so finding out WHAT a note says costs a click — 45 notes/day makes that the operator's whole
+    // problem. The body still lives behind the caret; this is the line that decides whether to open it.
+    static UIElement Note(bool unseen, string from, string arrow, string to, string fromColor, string toColor, string meta, string body, string headline) {
       var wrap = new StackPanel();
       var btn = new Button(); btn.Style = (Style)win.FindResource("NoteBtn");
       var row = new DockPanel();
@@ -934,6 +940,9 @@ namespace ArcScope {
       DockPanel.SetDock(caret, Dock.Right); row.Children.Add(caret);
       var edge = new TextBlock(); edge.FontFamily = new FontFamily(MONO); edge.FontSize = 12.5; edge.VerticalAlignment = VerticalAlignment.Center; edge.TextTrimming = TextTrimming.CharacterEllipsis;
       edge.Inlines.Add(RunC(from, fromColor)); edge.Inlines.Add(RunC("  " + arrow + "  ", "#54657A")); edge.Inlines.Add(RunC(to, toColor));
+      // Dim and after the pair, so from -> to still leads and the headline reads as the note's own
+      // words. Trimmed by the TextBlock, never wrapped: this row is a scan line, not a paragraph.
+      if (!string.IsNullOrEmpty(headline)) edge.Inlines.Add(RunC("   " + headline, "#8595A6"));
       row.Children.Add(edge);
       btn.Content = row;
 
@@ -1001,7 +1010,7 @@ namespace ArcScope {
       bool binding = kind == "contract" || kind == "alarm" || kind == "correction";
       if (binding) meta = kind.ToUpperInvariant() + "  ·  " + meta;
       return Note(alert || op, S(w, "from"), "→", to, alert ? ALERT : ACCENT, alert ? ALERT : op ? ALERT : WAIT,
-                  meta, S(w, "text"));
+                  meta, S(w, "text"), S(w, "title"));
     }
 
     static UIElement ShowAllButton(object repo, List<object> ordered, int hidden) {
