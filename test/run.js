@@ -1746,9 +1746,20 @@ section('verbosity log (measure every reply; say nothing about it)');
         const bare = fs.mkdtempSync(path.join(TMP, 'vbare-'));
         // Compared case-INSENSITIVELY: resolveBoard normalizes the drive and path case, so an exact
         // string match here fails on a correct path — Windows, one filesystem, two spellings.
+        // AND THROUGH REALPATH, which is the spelling this missed. resolveBoard canonicalises, so it
+        // expands an 8.3 SHORT NAME — `ADMINI~1` -> `administrator`, `RUNNER~1` -> `runneradmin` —
+        // while `bare` keeps whatever os.tmpdir() handed out. The code was right and the comparison
+        // was short one spelling: it went red on any box whose temp path has a short form, which is
+        // this operator's machine AND the CI runner. Same short-name/realpath divergence audit found
+        // in canRevive (#238) — the third time this class has bitten, so normalise both sides.
         const norm = (p) => p.replace(/\\/g, '/').toLowerCase();
+        // .native, NOT plain realpathSync: only the native call expands an 8.3 short name. Measured
+        // here — bare `C:\Users\ADMINI~1\…`, realpathSync `C:\Users\ADMINI~1\…` (unchanged),
+        // realpathSync.native `C:\Users\Administrator\…`. That one word is the whole failure.
+        let realBare = bare;
+        try { realBare = fs.realpathSync.native(bare); } catch { try { realBare = fs.realpathSync(bare); } catch {} }
         ok('outside a git repo it still resolves under the cwd rather than throwing',
-          norm(V.logPath(bare)) === norm(bare) + '/.arc/verbosity.jsonl', V.logPath(bare));
+          norm(V.logPath(bare)) === norm(realBare) + '/.arc/verbosity.jsonl', V.logPath(bare));
       }
       ok('...and it is readable back as one row', V.rows(c).length === 1);
     }
